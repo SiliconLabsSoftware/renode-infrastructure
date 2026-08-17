@@ -731,6 +731,17 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        /// <summary>
+        /// Requests an abort of the currently executing instruction inside the
+        /// translation block.  When excludeLastInstruction is true the CPU state
+        /// is restored to the start of the faulting instruction (PC points to
+        /// it), modelling a synchronous precise fault that can be retried.
+        /// </summary>
+        public void RequestTranslationBlockInterrupt(bool excludeLastInstruction)
+        {
+            TlibRequestTranslationBlockInterrupt(excludeLastInstruction ? 1 : 0);
+        }
+
         public bool SecureState
         {
             get
@@ -915,6 +926,19 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
+        // PATCH: The public property "Nvic" is added here to assist in bus fault modeling.  
+        // When a peripheral model wants to trigger a busfault, it can stuff a value into
+        // the BFAR (bus fault address register) via the NVIC reference.
+        // If, some day in the future, renode implements real bus fault modeling, 
+        // this patch will no longer be needed.
+        public NVIC Nvic
+        {
+            get
+            {
+                return nvic;
+            }
+        }
+
         public override string[] AllLLVMTriples => new[] { "thumb" };
 
         // LLVM considers M4F to be the "base" M4, see https://reviews.llvm.org/D12692
@@ -927,6 +951,15 @@ namespace Antmicro.Renode.Peripherals.CPU
         protected override void HandleBusAccessError(ulong address, SysbusAccessWidth width, BusAccess.Operation operation, BusAccessError error)
         {
             tlibRaisePreciseBusFault(checked((uint)address));
+        }
+
+        // PATCH: Exposes the precise BusFault mechanism (BFAR/BFSR update plus exception
+        // escalation, see HandleBusAccessError above) to peripheral models that enforce
+        // access permissions outside of the normal bus responder-error path, e.g. the IMU's
+        // PPU/EBMPU violation handling.
+        public void RaisePreciseBusFault(uint address)
+        {
+            tlibRaisePreciseBusFault(address);
         }
 
         protected override UInt32 BeforePCWrite(UInt32 value)
