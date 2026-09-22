@@ -39,6 +39,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return buffer[bufferIndex].Peek(byteIndex);
         }
 
+        public uint BytesAvailable(uint bufferIndex)
+        {
+            CheckBufferIndex(bufferIndex);
+
+            return buffer[bufferIndex].BytesNumber;
+        }
+
         public bool TryReadBytes(uint bufferIndex, uint length, out byte[] data)
         {
             CheckBufferIndex(bufferIndex);
@@ -58,6 +65,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             CheckBufferIndex(bufferIndex);
 
             buffer[bufferIndex].WriteData = data;
+        }
+
+        public void Clear(uint bufferIndex)
+        {
+            CheckBufferIndex(bufferIndex);
+
+            buffer[bufferIndex].Clear();
         }
 
         public bool Overflow(uint bufferIndex)

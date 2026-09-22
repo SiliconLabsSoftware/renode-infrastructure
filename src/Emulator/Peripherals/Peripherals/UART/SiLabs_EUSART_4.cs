@@ -14,15 +14,15 @@ using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
 using Antmicro.Renode.Peripherals.SPI;
 using Antmicro.Renode.Peripherals.Timers;
 using Antmicro.Renode.Time;
-using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
 
 namespace Antmicro.Renode.Peripherals.UART
 {
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.DoubleWordToByte)]
-    public class SiLabs_EUSART_4 : UARTBase, IUARTWithBufferState, IDoubleWordPeripheral, IPeripheralContainer<ISPIPeripheral, NullRegistrationPoint>, IKnownSize, SiLabs_IRetention, SiLabs_IRegisterAccess
+    public class SiLabs_EUSART_4 : UARTBase, IUARTWithBufferState, IDoubleWordPeripheral, IPeripheralContainer<ISPIPeripheral, NullRegistrationPoint>, IKnownSize, SiLabs_IRetention
     {
         public SiLabs_EUSART_4(Machine machine) : base(machine)
         {
@@ -41,13 +41,6 @@ namespace Antmicro.Renode.Peripherals.UART
             registersCollection = BuildRegistersCollection();
             TxFifoLevelRequest.Set(true);
         }
-
-        public void PowerDown()
-        {
-            Reset();
-        }
-
-        public bool Enabled => isEnabled;
 
         public void WriteDoubleWord(long offset, uint value)
         {
@@ -121,6 +114,13 @@ namespace Antmicro.Renode.Peripherals.UART
             return ReadRegister(offset);
         }
 
+        public void PowerDown()
+        {
+            Reset();
+        }
+
+        public bool Enabled => isEnabled;
+
         public BufferState BufferState
         {
             get
@@ -141,7 +141,7 @@ namespace Antmicro.Renode.Peripherals.UART
                     break;
                 case BufferState.Ready:
                 case BufferState.Full:
-                    if (Count >= (int)rxWatermark.Value + 1
+                    if(Count >= (int)rxWatermark.Value + 1
                         && !rxInProgress)
                     {
                         rxInProgress = true;
@@ -214,7 +214,7 @@ namespace Antmicro.Renode.Peripherals.UART
                 receiveDataValidFlag.Value = true;
                 UpdateInterrupts();
             }
-            if (nextBufferState == BufferState.Full)
+            if(nextBufferState == BufferState.Full)
             {
                 rxBufferFullInterrupt.Value = true;
                 UpdateInterrupts();

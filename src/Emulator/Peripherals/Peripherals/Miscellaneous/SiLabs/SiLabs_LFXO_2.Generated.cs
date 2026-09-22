@@ -1,12 +1,12 @@
 //
-// Copyright (c) 2010-2025 Silicon Labs
+// Copyright (c) 2010-2026 Silicon Labs
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
 /*  WARNING: Auto-Generated Peripheral  -  DO NOT EDIT
-    LFXO, Generated on : 2025-05-08 15:29:38.524482
+    LFXO, Generated on : 2026-06-09 17:08:07.711454
     LFXO, ID Version : b9968dcd7222434089d09cfd6373a3ec.2 */
 
 // Note: The constructor has been removed from the auto-generated code.
@@ -20,13 +20,13 @@ using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    public partial class SiLabs_LFXO_2 : BasicDoubleWordPeripheral, IKnownSize
+    public partial class SiLabs_LFXO_2 : SiLabsPeripheral
     {
-
-        private void Define_Registers()
+        protected override DoubleWordRegisterCollection BuildRegistersCollection()
         {
             var registersMap = new Dictionary<long, DoubleWordRegister>
             {
@@ -43,7 +43,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 {(long)Registers.Delaycal, GenerateDelaycalRegister()},
                 {(long)Registers.Agcctrl, GenerateAgcctrlRegister()},
             };
-            registers = new DoubleWordRegisterCollection(this, registersMap);
+            return new DoubleWordRegisterCollection(this, registersMap);
         }
 
         public override void Reset()
@@ -62,10 +62,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         
         protected enum CFG_MODE
         {
-            XTAL = 0, // LFXO in Low Power mode. A 32768Hz crystal should be connected to the LF crystal pads. Voltage must not exceed VDDIO. 
-            XTAL_HP = 1, // An external sine source with minimum amplitude 100mv (zero-to-peak) and maximum amplitude 500mV (zero-to-peak) should be connected in series with LFXTAL_I pin. Minimum voltage should be larger than ground and maximum voltage smaller than VDDIO. The sine source does not need to be ac coupled externally as it is ac couples inside LFXO. LFXTAL_O is free to be used as a general purpose GPIO. 
-            BUFEXTCLK = 2, // An external 32KHz CMOS clock should be provided on LFXTAL_I. LFXTAL_O is free to be used as a general purpose GPIO.
-            DIGEXTCLK = 3, // An external 32KHz CMOS clock should be provided on LFXTAL_I. LFXTAL_O is free to be used as a general purpose GPIO.
+            XTAL = 0, // LFXO in Low Power mode. A 32768 Hz crystal should be connected to the LF crystal pads.
+            XTAL_HP = 1, // LFXO in High Power mode. A 32768 Hz crystal should be connected to the LF crystal pads.
+            BUFEXTCLK = 2, // An external sine source should be connected to LFXTAL_I pin. The input signal  is internally AC coupled. Voltage should be kept above ground and below DVDD. LFXTAL_O pin is free to use as a GPIO.
+            DIGEXTCLK = 3, // An external 32 kHz CMOS clock should be provided on LFXTAL_I. LFXTAL_O is free to be used as a general purpose GPIO.
         }
         
         protected enum CFG_TIMEOUT
@@ -530,29 +530,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Agcctrl_Write(_, __));
         
 
-        private uint ReadWFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a WFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadLFWSYNC()
-        {
-            this.Log(LogLevel.Warning, "Reading from a LFWSYNC/HVLFWSYNC Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadRFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a RFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        
-
-
-
-        
         // Ipversion - Offset : 0x0
     
         protected IValueRegisterField ipversion_ipversion_field;
@@ -560,8 +537,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Ipversion_Ipversion_ValueProvider(ulong a);
         partial void Ipversion_Write(uint a, uint b);
         partial void Ipversion_Read(uint a, uint b);
-        
-        
+
         // Ctrl - Offset : 0x4
     
         protected IFlagRegisterField ctrl_forceen_bit;
@@ -593,8 +569,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
         partial void Ctrl_Write(uint a, uint b);
         partial void Ctrl_Read(uint a, uint b);
-        
-        
+
         // Cfg - Offset : 0x8
     
         protected IEnumRegisterField<CFG_AGCRATE> cfg_agcrate_field;
@@ -631,8 +606,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
         partial void Cfg_Write(uint a, uint b);
         partial void Cfg_Read(uint a, uint b);
-        
-        
+
         // Cfg1 - Offset : 0xC
     
         protected IEnumRegisterField<CFG1_BIASTRIM> cfg1_biastrim_field;
@@ -651,8 +625,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Cfg1_Hpcurrtrim_ValueProvider(CFG1_HPCURRTRIM a);
         partial void Cfg1_Write(uint a, uint b);
         partial void Cfg1_Read(uint a, uint b);
-        
-        
+
         // Status - Offset : 0x10
     
         protected IFlagRegisterField status_rdy_bit;
@@ -668,8 +641,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Status_Lock_ValueProvider(STATUS_LOCK a);
         partial void Status_Write(uint a, uint b);
         partial void Status_Read(uint a, uint b);
-        
-        
+
         // Cal - Offset : 0x14
     
         protected IValueRegisterField cal_captune_field;
@@ -683,8 +655,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Cal_Gain_ValueProvider(ulong a);
         partial void Cal_Write(uint a, uint b);
         partial void Cal_Read(uint a, uint b);
-        
-        
+
         // If - Offset : 0x18
     
         protected IFlagRegisterField if_rdy_bit;
@@ -708,8 +679,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void If_Fail_ValueProvider(bool a);
         partial void If_Write(uint a, uint b);
         partial void If_Read(uint a, uint b);
-        
-        
+
         // Ien - Offset : 0x1C
     
         protected IFlagRegisterField ien_rdy_bit;
@@ -733,8 +703,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Ien_Fail_ValueProvider(bool a);
         partial void Ien_Write(uint a, uint b);
         partial void Ien_Read(uint a, uint b);
-        
-        
+
         // Syncbusy - Offset : 0x20
     
         protected IFlagRegisterField syncbusy_cal_bit;
@@ -742,8 +711,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Syncbusy_Cal_ValueProvider(bool a);
         partial void Syncbusy_Write(uint a, uint b);
         partial void Syncbusy_Read(uint a, uint b);
-        
-        
+
         // Lock - Offset : 0x24
     
         protected IValueRegisterField lock_lockkey_field;
@@ -751,8 +719,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Lock_Lockkey_ValueProvider(ulong a);
         partial void Lock_Write(uint a, uint b);
         partial void Lock_Read(uint a, uint b);
-        
-        
+
         // Delaycal - Offset : 0x28
     
         protected IFlagRegisterField delaycal_encal_bit;
@@ -766,8 +733,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Delaycal_Delaytrim_ValueProvider(DELAYCAL_DELAYTRIM a);
         partial void Delaycal_Write(uint a, uint b);
         partial void Delaycal_Read(uint a, uint b);
-        
-        
+
         // Agcctrl - Offset : 0x2C
     
         protected IEnumRegisterField<AGCCTRL_DISAGCCLK> agcctrl_disagcclk_bit;
@@ -776,66 +742,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Agcctrl_Disagcclk_ValueProvider(AGCCTRL_DISAGCCLK a);
         partial void Agcctrl_Write(uint a, uint b);
         partial void Agcctrl_Read(uint a, uint b);
-        
+
         partial void LFXO_Reset();
 
-        public bool Enabled = true;
-
-        private SiLabs_ICMU _cmu;
-        private SiLabs_ICMU cmu
+        public override bool Enabled
         {
-            get
+            get 
             {
-                if (Object.ReferenceEquals(_cmu, null))
-                {
-                    foreach(var cmu in machine.GetPeripheralsOfType<SiLabs_ICMU>())
-                    {
-                        _cmu = cmu;
-                    }
-                }
-                return _cmu;
-            }
-            set
-            {
-                _cmu = value;
+                // Define isEnabled in your partial class file
+                return isEnabled;
             }
         }
 
-        public override uint ReadDoubleWord(long address)
-        {
-            long temp = address & 0x0FFF;
-            switch(address & 0x3000)
-            {
-                case 0x0000:
-                    return registers.Read(temp);
-                default:
-                    this.Log(LogLevel.Warning, "Reading from Set/Clr/Tgl is not supported.");
-                    return registers.Read(temp);
-            }
-        }
-
-        public override void WriteDoubleWord(long address, uint value)
-        {
-            long temp = address & 0x0FFF;
-            switch(address & 0x3000)
-            {
-                case 0x0000:
-                    registers.Write(temp, value);
-                    break;
-                case 0x1000:
-                    registers.Write(temp, registers.Read(temp) | value);
-                    break;
-                case 0x2000:
-                    registers.Write(temp, registers.Read(temp) & ~value);
-                    break;
-                case 0x3000:
-                    registers.Write(temp, registers.Read(temp) ^ value);
-                    break;
-                default:
-                    this.Log(LogLevel.Error, "writing doubleWord to non existing offset {0:X}, case : {1:X}", address, address & 0x3000);
-                    break;
-            }           
-        }
+        protected override Type RegistersType => typeof(Registers);
 
         protected enum Registers
         {
@@ -890,10 +809,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             Lock_TGL = 0x3024,
             Delaycal_TGL = 0x3028,
             Agcctrl_TGL = 0x302C,
-        }   
-        
-        public long Size => 0x4000;
-
-        protected DoubleWordRegisterCollection registers;
+        }
     }
 }

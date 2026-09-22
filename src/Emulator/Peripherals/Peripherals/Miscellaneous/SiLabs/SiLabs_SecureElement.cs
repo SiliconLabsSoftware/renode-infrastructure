@@ -172,6 +172,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             case CommandId.TransferKey:
                 responseCode = HandleTransferKeyCommand(inputDmaDescriptorPtr, outputDmaDescriptorPtr, commandParams, commandParamsCount);
                 break;
+            case CommandId.DeleteKey:
+                responseCode = HandleDeleteKeyCommand(commandParams, commandParamsCount);
+                break;
             case CommandId.Hash:
                 responseCode = HandleHashCommand(inputDmaDescriptorPtr, outputDmaDescriptorPtr, commandParams, commandParamsCount, commandOptions);
                 break;
@@ -311,21 +314,43 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 return ResponseCode.InvalidParameter;
             }
 
-            // First input DMA descriptor is the authorization data
-            uint authPtr;
-            uint authLength;
+            // Input DMA descriptor chain follows one of two valid SEMAILBOX layouts:
+            // - Key-first: InputKey_t plaintext key (RawKeyData_t for KEY_MODE_UNPROTECT), then
+            //              optional IV/context, then data. This matches the documented 0x0400/0x0401
+            //              data payload when no leading auth buffer is present.
+            // - Auth-then-key: auth buffer (0 or 8 bytes), then key material, then optional
+            //                  IV/context, then data. Used by SE Manager-style callers.
+            uint firstDescPtr;
+            uint firstDescLength;
+            uint secondDescPtr;
+            uint secondDescLength;
             DmaTransferOptions transferOptions;
             uint nextDescriptorPtr;
-            UnpackDmaDescriptor(inputDma, out authPtr, out authLength, out transferOptions, out nextDescriptorPtr, machine);
-            parent.Log(LogLevel.Debug, "AES_ENCRYPT/DECRYPT: INPUT0: authPtr=0x{0:X} authLength={1} options={2} nextDescriptorPtr=0x{3:X}",
-                     authPtr, authLength, transferOptions, nextDescriptorPtr);
+            UnpackDmaDescriptor(inputDma, out firstDescPtr, out firstDescLength, out transferOptions, out nextDescriptorPtr, machine);
+            parent.Log(LogLevel.Debug, "AES_ENCRYPT/DECRYPT: INPUT0: firstDescPtr=0x{0:X} firstDescLength={1} options={2} nextDescriptorPtr=0x{3:X}",
+                     firstDescPtr, firstDescLength, transferOptions, nextDescriptorPtr);
 
-            // Second input DMA descriptor contains the key
             uint keyPtr;
             uint keyLength;
-            UnpackDmaDescriptor(nextDescriptorPtr, out keyPtr, out keyLength, out transferOptions, out nextDescriptorPtr, machine);
-            parent.Log(LogLevel.Debug, "AES_ENCRYPT/DECRYPT: INPUT1: keyPtr=0x{0:X} keyLength={1} options={2} nextDescriptorPtr=0x{3:X}",
-                     keyPtr, keyLength, transferOptions, nextDescriptorPtr);
+            uint expectedKeyLength;
+            UnpackRawKeyMetadata(commandParams[0], out expectedKeyLength);
+            bool inputStartsWithKey = (keyMode == KeyMode.Unprotected
+                                       && firstDescLength == expectedKeyLength);
+            if(inputStartsWithKey)
+            {
+                keyPtr = firstDescPtr;
+                keyLength = firstDescLength;
+                parent.Log(LogLevel.Debug, "AES_ENCRYPT/DECRYPT: INPUT0 is key (unprotected InputKey_t), keyLength={0}", keyLength);
+            }
+            else
+            {
+                // Second input DMA descriptor contains the key
+                UnpackDmaDescriptor(nextDescriptorPtr, out secondDescPtr, out secondDescLength, out transferOptions, out nextDescriptorPtr, machine);
+                keyPtr = secondDescPtr;
+                keyLength = secondDescLength;
+                parent.Log(LogLevel.Debug, "AES_ENCRYPT/DECRYPT: INPUT1: keyPtr=0x{0:X} keyLength={1} options={2} nextDescriptorPtr=0x{3:X}",
+                         keyPtr, keyLength, transferOptions, nextDescriptorPtr);
+            }
             byte[] key = ReadKey(keyMode, keyIndex, keyPtr, keyLength);
             parent.Log(LogLevel.Debug, "Key=[{0}]", BitConverter.ToString(key));
             KeyParameter keyParameter = new KeyParameter(key);
@@ -3806,6 +3831,47 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return ResponseCode.Ok;
         }
 
+        private ResponseCode HandleDeleteKeyCommand(uint[] commandParams, uint commandParamsCount)
+        {
+            // SDK (sl_se_delete_key) still emits sli_add_key_metadata as the input DMA chain;
+            // the model only needs the keyspec in commandParams[0].
+            if(commandParamsCount != 1)
+            {
+                parent.Log(LogLevel.Error, "DELETE_KEY: invalid parameter count");
+                return ResponseCode.Abort;
+            }
+
+            KeyMode keyMode;
+            KeyType keyType;
+            KeyRestriction keyRestriction;
+            uint keyIndex;
+            UnpackKeyMetadata(commandParams[0], out keyIndex, out keyType, out keyMode, out keyRestriction);
+            parent.Log(LogLevel.Debug, "DELETE_KEY: keyIndex={0} keyType={1} keyMode={2} keyRestriction={3}",
+                       keyIndex, keyType, keyMode, keyRestriction);
+
+            switch(keyMode)
+            {
+            case KeyMode.Volatile:
+                if(!volatileKeys.Remove(keyIndex))
+                {
+                    parent.Log(LogLevel.Error, "DELETE_KEY: volatile key index {0} not found", keyIndex);
+                    return ResponseCode.InvalidParameter;
+                }
+                return ResponseCode.Ok;
+            case KeyMode.Ksu:
+                if(ksuStorage == null || !ksuStorage.ContainsKey(keyIndex))
+                {
+                    parent.Log(LogLevel.Error, "DELETE_KEY: KSU key index {0} not found", keyIndex);
+                    return ResponseCode.InvalidParameter;
+                }
+                ksuStorage.RemoveKey(keyIndex);
+                return ResponseCode.Ok;
+            default:
+                parent.Log(LogLevel.Error, "DELETE_KEY: invalid key mode {0}", keyMode);
+                return ResponseCode.InvalidParameter;
+            }
+        }
+
         private void FillArray(byte[] arr, uint offset, uint length, byte value)
         {
             for(uint i = offset; i < offset + length && i < arr.Length; i++)
@@ -4031,10 +4097,23 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             type = (KeyType)((keyMetadata >> 28) & 0xF);
             // [27:26]
             mode = (KeyMode)((keyMetadata >> 26) & 0x3);
-            // [25:24]
-            restriction = (KeyRestriction)((keyMetadata >> 24) & 0x3);
-            // [23:16]
-            index = ((keyMetadata >> 16) & 0xFF);
+            
+            if(mode == KeyMode.Ksu)
+            {
+                // KSU metadata uses bits [25:24] for the KSU instance and
+                // bits [23:18] for the key slot. It does not encode a key
+                // restriction in this field.
+                restriction = KeyRestriction.Unlocked;
+                index = ((keyMetadata >> 18) & 0x3F);
+            }
+            else
+            {
+                // [25:24]
+                restriction = (KeyRestriction)((keyMetadata >> 24) & 0x3);
+                // [23:16]
+                index = ((keyMetadata >> 16) & 0xFF);
+            }            
+            
             // [15]
             // noProtection = (keyMetadata & 0x8000) != 0;
 

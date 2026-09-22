@@ -1,12 +1,12 @@
 //
-// Copyright (c) 2010-2025 Silicon Labs
+// Copyright (c) 2010-2026 Silicon Labs
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
 /*  WARNING: Auto-Generated Peripheral  -  DO NOT EDIT
-    HFRCO, Generated on : 2025-05-08 15:30:19.942260
+    HFRCO, Generated on : 2026-06-10 11:52:33.974471
     HFRCO, ID Version : 165adedf604742fda856a08648e115e5.3 */
 
 // Note: The constructor has been removed from the auto-generated code.
@@ -20,13 +20,13 @@ using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    public partial class SiLabs_HFRCO_3 : BasicDoubleWordPeripheral, IKnownSize, SiLabs_IRegisterAccess
+    public partial class SiLabs_HFRCO_3 : SiLabsPeripheral
     {
-
-        private void Define_Registers()
+        protected override DoubleWordRegisterCollection BuildRegistersCollection()
         {
             var registersMap = new Dictionary<long, DoubleWordRegister>
             {
@@ -40,7 +40,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 {(long)Registers.Test, GenerateTestRegister()},
                 {(long)Registers.Feature, GenerateFeatureRegister()},
             };
-            registers = new DoubleWordRegisterCollection(this, registersMap);
+            return new DoubleWordRegisterCollection(this, registersMap);
         }
 
         public override void Reset()
@@ -49,7 +49,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             HFRCO_Reset();
         }
         
-        protected enum CAL_CLKDIV
+        protected enum CAL_CLKDIV : ulong
         {
             DIV1 = 0, // Divide by 1.
             DIV2 = 1, // Divide by 2.
@@ -57,7 +57,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             DIV8 = 3, // Divide by 8
         }
         
-        protected enum STATUS_LOCK
+        protected enum STATUS_LOCK : ulong
         {
             UNLOCKED = 0, // HFRCO is unlocked
             LOCKED = 1, // HFRCO is locked
@@ -385,37 +385,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Feature_Write(_, __));
         
 
-        private uint ReadWFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a WFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadLFWSYNC()
-        {
-            this.Log(LogLevel.Warning, "Reading from a LFWSYNC/HVLFWSYNC Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadRFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a RFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        
-
-
-        private void WriteRWSYNC()
-        {
-            if(!Enabled)
-            {
-                // throw new InvalidOperationException("Bus fault trying to write to a RWSYNC register while peripheral is disabled");
-                this.Log(LogLevel.Error, "Trying to write to a RWSYNC register while peripheral is disabled EN = {0}", Enabled);
-            }
-        }
-
-        
         // Ipversion - Offset : 0x0
     
         protected IValueRegisterField ipversion_ipversion_field;
@@ -423,8 +392,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Ipversion_Ipversion_ValueProvider(ulong a);
         partial void Ipversion_Write(uint a, uint b);
         partial void Ipversion_Read(uint a, uint b);
-        
-        
+
         // Ctrl - Offset : 0x4
     
         protected IFlagRegisterField ctrl_forceen_bit;
@@ -451,8 +419,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
         partial void Ctrl_Write(uint a, uint b);
         partial void Ctrl_Read(uint a, uint b);
-        
-        
+
         // Cal - Offset : 0x8
     
         protected IValueRegisterField cal_tuning_field;
@@ -496,8 +463,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Cal_Tempco_ValueProvider(ulong a);
         partial void Cal_Write(uint a, uint b);
         partial void Cal_Read(uint a, uint b);
-        
-        
+
         // Status - Offset : 0xC
     
         protected IFlagRegisterField status_rdy_bit;
@@ -521,8 +487,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Status_Lock_ValueProvider(STATUS_LOCK a);
         partial void Status_Write(uint a, uint b);
         partial void Status_Read(uint a, uint b);
-        
-        
+
         // If - Offset : 0x10
     
         protected IFlagRegisterField if_rdy_bit;
@@ -531,8 +496,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void If_Rdy_ValueProvider(bool a);
         partial void If_Write(uint a, uint b);
         partial void If_Read(uint a, uint b);
-        
-        
+
         // Ien - Offset : 0x14
     
         protected IFlagRegisterField ien_rdy_bit;
@@ -541,8 +505,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Ien_Rdy_ValueProvider(bool a);
         partial void Ien_Write(uint a, uint b);
         partial void Ien_Read(uint a, uint b);
-        
-        
+
         // Lock - Offset : 0x1C
     
         protected IValueRegisterField lock_lockkey_field;
@@ -550,8 +513,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Lock_Lockkey_ValueProvider(ulong a);
         partial void Lock_Write(uint a, uint b);
         partial void Lock_Read(uint a, uint b);
-        
-        
+
         // Test - Offset : 0x20
     
         protected IFlagRegisterField test_inv_bit;
@@ -575,8 +537,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Test_Clkoutdis1_ValueProvider(bool a);
         partial void Test_Write(uint a, uint b);
         partial void Test_Read(uint a, uint b);
-        
-        
+
         // Feature - Offset : 0x24
     
         protected IFlagRegisterField feature_forcemax_bit;
@@ -590,77 +551,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Feature_Bandcoarseul_ValueProvider(ulong a);
         partial void Feature_Write(uint a, uint b);
         partial void Feature_Read(uint a, uint b);
-        
+
         partial void HFRCO_Reset();
 
-        public bool Enabled
+        public override bool Enabled
         {
             get 
             {
-                // Your boolean which you have to define in your partial class file
-                return IsEnabled;
+                // Define isEnabled in your partial class file
+                return isEnabled;
             }
         }
 
-        private SiLabs_ICMU _cmu;
-        private SiLabs_ICMU cmu
-        {
-            get
-            {
-                if (Object.ReferenceEquals(_cmu, null))
-                {
-                    foreach(var cmu in machine.GetPeripheralsOfType<SiLabs_ICMU>())
-                    {
-                        _cmu = cmu;
-                    }
-                }
-                return _cmu;
-            }
-            set
-            {
-                _cmu = value;
-            }
-        }
-
-        public override uint ReadDoubleWord(long address)
-        {
-            OnRegisterAccess?.Invoke();
-            long temp = address & 0x0FFF;
-            switch(address & 0x3000)
-            {
-                case 0x0000:
-                    return registers.Read(temp);
-                default:
-                    this.Log(LogLevel.Warning, "Reading from Set/Clr/Tgl is not supported.");
-                    return registers.Read(temp);
-            }
-        }
-
-        public override void WriteDoubleWord(long address, uint value)
-        {
-            OnRegisterAccess?.Invoke();
-            long temp = address & 0x0FFF;
-            switch(address & 0x3000)
-            {
-                case 0x0000:
-                    registers.Write(temp, value);
-                    break;
-                case 0x1000:
-                    registers.Write(temp, registers.Read(temp) | value);
-                    break;
-                case 0x2000:
-                    registers.Write(temp, registers.Read(temp) & ~value);
-                    break;
-                case 0x3000:
-                    registers.Write(temp, registers.Read(temp) ^ value);
-                    break;
-                default:
-                    this.Log(LogLevel.Error, "writing doubleWord to non existing offset {0:X}, case : {1:X}", address, address & 0x3000);
-                    break;
-            }           
-        }
-
-        public Action OnRegisterAccess { get; set; }
+        protected override Type RegistersType => typeof(Registers);
 
         protected enum Registers
         {
@@ -703,10 +606,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             Lock_TGL = 0x301C,
             Test_TGL = 0x3020,
             Feature_TGL = 0x3024,
-        }   
-        
-        public long Size => 0x4000;
-
-        protected DoubleWordRegisterCollection registers;
+        }
     }
+
 }

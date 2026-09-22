@@ -29,6 +29,22 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             status_lock_bit.Value = STATUS_LOCK.UNLOCKED;
         }
 
+        public ulong WdogClockFrequency(uint instance)
+        {
+            if(instance != 0)
+            {
+                this.Log(LogLevel.Warning, "WdogClockFrequency: WDOG{0} not present on CMU_1", instance);
+                return 0UL;
+            }
+            var clksel = (SiLabs_WdogClksel)wdog0clkctrl_clksel_field.Value;
+            return SiLabs_CMU_Constants.WdogFrequencyFromClksel(clksel, hfxoFrequency);
+        }
+
+        public bool GetPeripheralClockEnable(IPeripheral peripheral)
+        {
+            return true; // Default to true for peripherals not handled by this method
+        }
+
         public bool OscSocpllRequested(uint instance)
         {
             return false;
@@ -49,7 +65,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return false;
         }
 
-        public ulong HfxoFrequency 
+        public ulong HfxoFrequency
         {
             get
             {
@@ -57,24 +73,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
-        public ulong WdogClockFrequency(uint instance)
-        {
-            if(instance != 0)
-            {
-                this.Log(LogLevel.Warning, "WdogClockFrequency: WDOG{0} not present on CMU_1", instance);
-                return 0UL;
-            }
-            var clksel = (SiLabs_WdogClksel)wdog0clkctrl_clksel_field.Value;
-            return SiLabs_CMU_Constants.WdogFrequencyFromClksel(clksel, hfxoFrequency);
-        }
-
         public bool OscLfrcoRequested { get; }
 
         public bool OscLfrcoEnabled { get; }
 
-        public bool OscHfrcoRequested { get; }
+        public bool OscHfrcoRequested(uint instance)
+        {
+            return false;
+        }
 
-        public bool OscHfrcoEnabled { get; }
+        public bool OscHfrcoEnabled(uint instance)
+        {
+            return false;
+        }
 
         public bool OscHfrcoEM23Requested { get; }
 

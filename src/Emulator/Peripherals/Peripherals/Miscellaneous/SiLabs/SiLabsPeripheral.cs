@@ -7,23 +7,309 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.CPU;
 using Antmicro.Renode.Time;
-using Range = Antmicro.Renode.Core.Range;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    /// <summary>
-    /// Optional: implement this to notify when a register is accessed.
-    /// </summary>
-    public interface SiLabs_IRegisterAccess
+    [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
+    public abstract class SiLabsPeripheral : IDoubleWordPeripheral, IKnownSize, IAbsoluteAddressAware
     {
-        Action OnRegisterAccess { get; set; }
+        public SiLabsPeripheral(Machine machine, bool buildRegisters = true)
+        {
+            this.machine = machine;
+            if(buildRegisters)
+            {
+                registersCollection = BuildRegistersCollection();
+            }
+        }
+
+        public void SetAbsoluteAddress(ulong address)
+        {
+            currentAbsoluteAddress = address;
+        }
+
+        public byte ReadByte(long offset)
+        {
+            int byteOffset = (int)(offset & 0x3);
+            uint registerValue = ReadDoubleWord(offset - byteOffset);
+            byte result = (byte)((registerValue >> byteOffset*8) & 0xFF);
+            return result;
+        }
+
+        public uint ReadDoubleWord(long offset)
+        {
+            if(!VerifyPeripheralAccess(isWrite: false, offset))
+            {
+                return 0;
+            }
+
+            long internal_offset = offset & 0x0FFF;
+            switch(offset & 0x3000)
+            {
+            case 0x0000:
+                return registersCollection.Read(internal_offset);
+            default:
+                this.Log(LogLevel.Warning, "Reading from Set/Clr/Tgl is not supported");
+                return registersCollection.Read(internal_offset);
+            }
+        }
+
+        public void WriteDoubleWord(long offset, uint value)
+        {
+            machine.ClockSource.ExecuteInLock(delegate
+            {
+                if(!VerifyPeripheralAccess(isWrite: true, offset))
+                {
+                    return;
+                }
+
+                long internal_offset = offset & 0x0FFF;
+                switch(offset & 0x3000)
+                {
+                case 0x0000:
+                    registersCollection.Write(internal_offset, value);
+                    break;
+                case 0x1000:
+                    registersCollection.Write(internal_offset, registersCollection.Read(internal_offset) | value);
+                    break;
+                case 0x2000:
+                    registersCollection.Write(internal_offset, registersCollection.Read(internal_offset) & ~value);
+                    break;
+                case 0x3000:
+                    registersCollection.Write(internal_offset, registersCollection.Read(internal_offset) ^ value);
+                    break;
+                default:
+                    this.Log(LogLevel.Error, "writing doubleWord to non existing offset 0x{0:X}", offset);
+                    break;
+                }
+            });
+        }
+
+        public virtual void Reset()
+        {
+            registersCollection.Reset();
+            UpdateInterrupts();
+        }
+
+        /// <summary>
+        /// Indicates whether the peripheral's enable register is set.
+        /// Derived classes should define this when the peripheral has an EN register.
+        /// </summary>
+        public virtual bool Enabled { get; set; }
+
+        public bool isSecureAccess => (currentAbsoluteAddress & 0x10000000) != 0;
+
+        public virtual long Size => 0x4000;
+
+        protected void WriteWSTATIC()
+        {
+            if(Enabled)
+            {
+                this.Log(LogLevel.Error, "Write to a WSTATIC register ({0}) while peripheral is enabled; ignored on hardware", Enum.ToObject(RegistersType, currentAbsoluteAddress & 0x3FFF));
+            }
+        }
+
+        protected void WriteWSYNC()
+        {
+            if(!Enabled)
+            {
+                this.Log(LogLevel.Error, "Trying to write to a WSYNC register ({0}) while peripheral is disabled", Enum.ToObject(RegistersType, currentAbsoluteAddress & 0x3FFF));
+                TriggerBusFault(currentAbsoluteAddress);
+            }
+        }
+
+        protected void WriteRWSYNC()
+        {
+            if(!Enabled)
+            {
+                this.Log(LogLevel.Error, "Trying to write to a RWSYNC register ({0}) while peripheral is disabled", Enum.ToObject(RegistersType, currentAbsoluteAddress & 0x3FFF));
+                TriggerBusFault(currentAbsoluteAddress);
+            }
+        }
+
+        protected uint ReadWFIFO()
+        {
+            this.Log(LogLevel.Warning, "Reading from a WFIFO Field, value returned will always be 0");
+            return 0x0;
+        }
+
+        protected uint ReadLFWSYNC()
+        {
+            this.Log(LogLevel.Warning, "Reading from a LFWSYNC/HVLFWSYNC Field, value returned will always be 0");
+            return 0x0;
+        }
+
+        protected uint ReadRFIFO()
+        {
+            this.Log(LogLevel.Warning, "Reading from a RFIFO Field, value returned will always be 0");
+            return 0x0;
+        }
+
+        internal bool VerifyPeripheralAccess(bool isWrite, long offset)
+        {
+            if(cmu != null && cmu.GetPeripheralClockEnable(this) == false)
+            {
+                this.Log(LogLevel.Error, "Accessing a peripheral while peripheral clock is disabled");
+                TriggerBusFault(currentAbsoluteAddress);
+                return false;
+            }
+            if(currentCpu is CortexM cortexM && cortexM.TrustZoneEnabled && smu != null && smu.GetPeripheralSecurityLevel(this) != isSecureAccess)
+            {
+                this.Log(LogLevel.Error, "Accessing a {0} peripheral while peripheral security level is {1}",
+                    isSecureAccess ? "secure" : "non-secure",
+                    isSecureAccess ? "non-secure" : "secure");
+                TriggerBusFault(currentAbsoluteAddress);
+                return false;
+            }
+            if(!VerifyPapAccess(isWrite, offset))
+            {
+                return false;
+            }
+            smu?.UpdateDirtyState(this);
+            return true;
+        }
+
+        /// <summary>
+        /// Optional PAP filter. Return false to reject the access:
+        /// reads RAZ to 0, writes are dropped. Subclasses that reject a write
+        /// should report the IMU VIOCON consequence themselves.
+        /// </summary>
+        protected virtual bool VerifyPapAccess(bool isWrite, long offset)
+        {
+            return true;
+        }
+
+        protected TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
+
+        protected bool TrySyncTime()
+        {
+            if(currentCpu != null)
+            {
+                currentCpu.SyncTime();
+                return true;
+            }
+            return false;
+        }
+
+        protected virtual void UpdateInterrupts()
+        {
+        }
+
+        /// <summary>
+        /// Triggers a precise bus fault on the currently-executing CortexM CPU.
+        /// </summary>
+        protected void TriggerBusFault(ulong address)
+        {
+            if(currentCpu is CortexM cortexM)
+            {
+                cortexM.RaisePreciseBusFault(checked((uint)address));
+                return;
+            }
+            this.Log(LogLevel.Error, "TriggerBusFault: no active CortexM CPU; precise bus fault not delivered");
+        }
+
+        protected abstract DoubleWordRegisterCollection BuildRegistersCollection();
+
+        protected ulong HfxoFrequency => cmu.HfxoFrequency;
+
+        protected SiLabs_ICMU cmu
+        {
+            get
+            {
+                if(Object.ReferenceEquals(_cmu, null))
+                {
+                    foreach(var peripheral in machine.GetPeripheralsOfType<SiLabs_ICMU>())
+                    {
+                        _cmu = peripheral;
+                        break;
+                    }
+                }
+                return _cmu;
+            }
+
+            set
+            {
+                _cmu = value;
+            }
+        }
+
+        protected SiLabs_IEmu emu
+        {
+            get
+            {
+                if(Object.ReferenceEquals(_emu, null))
+                {
+                    foreach(var peripheral in machine.GetPeripheralsOfType<SiLabs_IEmu>())
+                    {
+                        _emu = peripheral;
+                        break;
+                    }
+                }
+                return _emu;
+            }
+
+            set
+            {
+                _emu = value;
+            }
+        }
+
+        protected SiLabs_ISMU smu
+        {
+            get
+            {
+                if(Object.ReferenceEquals(_smu, null))
+                {
+                    foreach(var peripheral in machine.GetPeripheralsOfType<SiLabs_ISMU>())
+                    {
+                        _smu = peripheral;
+                        break;
+                    }
+                }
+                return _smu;
+            }
+
+            set
+            {
+                _smu = value;
+            }
+        }
+
+        protected ICPU currentCpu
+        {
+            get
+            {
+                // Monitor and test writes have no executing CPU; GetCurrentCPU() throws in that case.
+                if(machine.SystemBus.TryGetCurrentCPU(out var cpu))
+                {
+                    return cpu;
+                }
+                return null;
+            }
+        }
+
+        protected abstract Type RegistersType { get; }
+
+        protected DoubleWordRegisterCollection registersCollection;
+
+        protected readonly Machine machine;
+
+        private SiLabs_ICMU _cmu;
+
+        private SiLabs_IEmu _emu;
+
+        private SiLabs_ISMU _smu;
+
+        private ulong currentAbsoluteAddress;
+        private const uint SetRegisterOffset = 0x1000;
+        private const uint ClearRegisterOffset = 0x2000;
+        private const uint ToggleRegisterOffset = 0x3000;
     }
 
     /// <summary>
@@ -32,16 +318,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
     public interface SiLabs_IRetention
     {
         bool Enabled { get; }
+
         void PowerDown();
     }
 
     /// <summary>
-    /// Optional: implement this to report registers and ranges to power down. If not implemented, the entire peripheral is treated as not retained.
+    /// Optional: implement this to report registers to power down. If not implemented, the entire peripheral is treated as not retained.
     /// </summary>
     public interface SiLabs_IPartialRetention
     {
         List<DoubleWordRegister> GetPowerDownRegisters();
-        List<Range> AddRangesToPowerDown();
     }
 
     /// <summary>
@@ -54,193 +340,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
     public interface SiLabs_IPartialPowerDownHook
     {
         void OnPartialPowerDown();
-    }
-
-    [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
-    public abstract class SiLabsPeripheral : IDoubleWordPeripheral, SiLabs_IRegisterAccess
-    {
-        public SiLabsPeripheral(Machine machine, bool buildRegisters = true)
-        {
-            this.machine = machine;
-
-            if(buildRegisters)
-            {
-                registersCollection = BuildRegistersCollection();
-            }
-        }
-
-        public virtual byte ReadByte(long offset)
-        {
-            OnRegisterAccess?.Invoke();
-            int byteOffset = (int)(offset & 0x3);
-            uint registerValue = ReadRegister(offset, true);
-            byte result = (byte)((registerValue >> byteOffset*8) & 0xFF);
-            return result;
-        }
-
-        public virtual uint ReadDoubleWord(long offset)
-        {
-            OnRegisterAccess?.Invoke();
-            return ReadRegister(offset);
-        }
-
-        public virtual void WriteDoubleWord(long offset, uint value)
-        {
-            OnRegisterAccess?.Invoke();
-            WriteRegister(offset, value);
-        }
-
-        public virtual void Reset()
-        {
-            registersCollection.Reset();
-            UpdateInterrupts();
-        }
-
-        public Action OnRegisterAccess { get; set; }
-
-        protected TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
-
-        protected bool TrySyncTime()
-        {
-            if(machine.SystemBus.TryGetCurrentCPU(out var cpu))
-            {
-                cpu.SyncTime();
-                return true;
-            }
-            return false;
-        }
-
-        protected virtual void UpdateInterrupts()
-        {
-        }
-
-        protected uint ReadRegister(long offset, bool internal_read = false)
-        {
-            var result = 0U;
-            long internal_offset = offset;
-
-            // Set, Clear, Toggle registers should only be used for write operations. But just in case we convert here as well.
-            if(offset >= SetRegisterOffset && offset < ClearRegisterOffset)
-            {
-                // Set register
-                internal_offset = offset - SetRegisterOffset;
-                if(!internal_read)
-                {
-                    this.Log(LogLevel.Noisy, "SET Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}", Enum.ToObject(RegistersType, internal_offset), offset, internal_offset);
-                }
-            }
-            else if(offset >= ClearRegisterOffset && offset < ToggleRegisterOffset)
-            {
-                // Clear register
-                internal_offset = offset - ClearRegisterOffset;
-                if(!internal_read)
-                {
-                    this.Log(LogLevel.Noisy, "CLEAR Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}", Enum.ToObject(RegistersType, internal_offset), offset, internal_offset);
-                }
-            }
-            else if(offset >= ToggleRegisterOffset)
-            {
-                // Toggle register
-                internal_offset = offset - ToggleRegisterOffset;
-                if(!internal_read)
-                {
-                    this.Log(LogLevel.Noisy, "TOGGLE Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}", Enum.ToObject(RegistersType, internal_offset), offset, internal_offset);
-                }
-            }
-
-            try
-            {
-                if(registersCollection.TryRead(internal_offset, out result))
-                {
-                    return result;
-                }
-            }
-            finally
-            {
-                if(!internal_read)
-                {
-                    this.Log(LogLevel.Debug, "Read at offset 0x{0:X} ({1}), returned 0x{2:X}.", internal_offset, Enum.ToObject(RegistersType, internal_offset), result);
-                }
-            }
-
-            if(!internal_read)
-            {
-                this.Log(LogLevel.Warning, "Unhandled read at offset 0x{0:X} ({1}).", internal_offset, Enum.ToObject(RegistersType, internal_offset));
-            }
-
-            return 0;
-        }
-
-        protected void WriteRegister(long offset, uint value, bool internal_write = false)
-        {
-            machine.ClockSource.ExecuteInLock(delegate
-            {
-                long internal_offset = offset;
-                uint internal_value = value;
-
-                if(offset >= SetRegisterOffset && offset < ClearRegisterOffset)
-                {
-                    // Set register
-                    internal_offset = offset - SetRegisterOffset;
-                    uint old_value = ReadRegister(internal_offset, true);
-                    internal_value = old_value | value;
-                    this.Log(LogLevel.Noisy, "SET Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}, SET_value=0x{3:X}, old_value=0x{4:X}, new_value=0x{5:X}", Enum.ToObject(RegistersType, internal_offset), offset, internal_offset, value, old_value, internal_value);
-                }
-                else if(offset >= ClearRegisterOffset && offset < ToggleRegisterOffset)
-                {
-                    // Clear register
-                    internal_offset = offset - ClearRegisterOffset;
-                    uint old_value = ReadRegister(internal_offset, true);
-                    internal_value = old_value & ~value;
-                    this.Log(LogLevel.Noisy, "CLEAR Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}, CLEAR_value=0x{3:X}, old_value=0x{4:X}, new_value=0x{5:X}", Enum.ToObject(RegistersType, internal_offset), offset, internal_offset, value, old_value, internal_value);
-                }
-                else if(offset >= ToggleRegisterOffset)
-                {
-                    // Toggle register
-                    internal_offset = offset - ToggleRegisterOffset;
-                    uint old_value = ReadRegister(internal_offset, true);
-                    internal_value = old_value ^ value;
-                    this.Log(LogLevel.Noisy, "TOGGLE Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}, TOGGLE_value=0x{3:X}, old_value=0x{4:X}, new_value=0x{5:X}", Enum.ToObject(RegistersType, internal_offset), offset, internal_offset, value, old_value, internal_value);
-                }
-
-                this.Log(LogLevel.Debug, "Write at offset 0x{0:X} ({1}), value 0x{2:X}.", internal_offset, Enum.ToObject(RegistersType, internal_offset), internal_value);
-
-                if(!registersCollection.TryWrite(internal_offset, internal_value))
-                {
-                    this.Log(LogLevel.Warning, "Unhandled write at offset 0x{0:X} ({1}), value 0x{2:X}.", internal_offset, Enum.ToObject(RegistersType, internal_offset), internal_value);
-                    return;
-                }
-            });
-        }
-
-        protected ulong HfxoFrequency
-        {
-            get
-            {
-                if(Object.ReferenceEquals(cmu, null))
-                {
-                    foreach(var peripheral in machine.GetPeripheralsOfType<SiLabs_ICMU>())
-                    {
-                        cmu = peripheral;
-                        break;
-                    }
-                }
-
-                return cmu.HfxoFrequency;
-            }
-        }
-
-        // Abstract methods to be implemented
-        protected abstract DoubleWordRegisterCollection BuildRegistersCollection();
-
-        protected abstract Type RegistersType { get; }
-
-        protected DoubleWordRegisterCollection registersCollection;
-        protected readonly Machine machine;
-        private SiLabs_ICMU cmu;
-        private const uint SetRegisterOffset = 0x1000;
-        private const uint ClearRegisterOffset = 0x2000;
-        private const uint ToggleRegisterOffset = 0x3000;
     }
 
     /// <summary>
@@ -262,7 +361,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         /// </summary>
         public static void PowerDown(this IPeripheral @this)
         {
-            if (@this is SiLabs_IRetention peripheral) peripheral.PowerDown(); else @this.Reset();
+            if(@this is SiLabs_IRetention peripheral) peripheral.PowerDown(); else @this.Reset();
         }
 
         /// <summary>
@@ -275,50 +374,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
 
         /// <summary>
-        /// Adds the ranges to the power down list if the peripheral implements SiLabs_IPartialRetention; otherwise returns an empty list.
-        /// </summary>
-        public static List<Range> AddRangesToPowerDown(this IPeripheral @this)
-        {
-            return @this is SiLabs_IPartialRetention peripheral ? peripheral.AddRangesToPowerDown() : new List<Range>();
-        }
-
-        /// <summary>
         /// Invokes the opt-in partial-power-down hook if the peripheral implements SiLabs_IPartialPowerDownHook; otherwise no-op.
         /// Called by EMU before resetting the registers reported by GetPowerDownRegisters().
         /// </summary>
         public static void OnPartialPowerDown(this IPeripheral @this)
         {
             (@this as SiLabs_IPartialPowerDownHook)?.OnPartialPowerDown();
-        }
-    }
-
-    /// <summary>
-    /// Helper methods for retention.
-    /// </summary>
-    public static class SiLabs_Retention
-    {
-                // Gets the system bus ranges for the registers of a peripheral.
-        public static List<Range> GetRegisterRangesFromSystemBus(IPeripheral peripheral, List<ulong> registerAddresses)
-        {
-            var busPeripheral = peripheral as IBusPeripheral;
-            var registrations = peripheral.GetMachine().GetSystemBus(busPeripheral).GetRegistrationPoints(busPeripheral).OfType<BusRangeRegistration>().ToList();
-            return GetRegisterRangesFromRegistrations(registrations, registerAddresses);
-        }
-
-        // Gets the system bus ranges for the registration.
-        public static List<Range> GetRegisterRangesFromRegistrations(List<BusRangeRegistration> registrations, List<ulong> registerAddresses)
-        {
-            var ranges = new List<Range>();
-            foreach(var registration in registrations)
-            {
-                ulong baseAddress = registration.Range.StartAddress;
-                if (registration.Range.Size != 0x4000)
-                {
-                    continue;
-                }
-                ranges.AddRange(registerAddresses.Select(registerAddress => new Range(baseAddress + registerAddress, 4)));
-            }
-            return ranges;
         }
     }
 }

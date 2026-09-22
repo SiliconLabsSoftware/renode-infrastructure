@@ -5,7 +5,6 @@
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
-using System;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Timers;
@@ -26,8 +25,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                                    enabled: false, workMode: WorkMode.OneShot,
                                    eventEnabled: true, autoUpdate: true);
             timer.LimitReached += OnTimerLimitReached;
-
-            Define_Registers();
         }
 
         public GPIO IRQ { get; }
@@ -37,7 +34,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             timer.Reset();
             currentStage = Stage.Warning;
             cyclesBeforeStage = 0;
-            registers.Reset();
+            suspendedInEnergyMode = false;
             IRQ.Unset();
         }
 
@@ -54,6 +51,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             if(!a && b)
             {
                 this.DebugLog("WDOG{0} enabled", instance);
+                InitializeEnergyModeHooks();
                 ScheduleNextEvent();
             }
             else if(a && !b)
@@ -64,6 +62,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 timer.Enabled = false;
                 cyclesBeforeStage = 0;
                 currentStage = Stage.Warning;
+                suspendedInEnergyMode = false;
                 ClearInterruptFlags();
                 UpdateInterrupts();
             }
@@ -126,7 +125,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
-        private void UpdateInterrupts()
+        protected override void UpdateInterrupts()
         {
             bool irq = (if_tout_bit.Value && ien_tout_bit.Value
                         || if_warn_bit.Value && ien_warn_bit.Value
@@ -225,6 +224,64 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             timer.Enabled = true;
         }
 
+        private void InitializeEnergyModeHooks()
+        {
+            if(energyModeHooksInitialized || emu == null)
+            {
+                return;
+            }
+
+            emu.AddEnterSleepHook(() => EnterEnergyMode(EnergyMode.EM1));
+            emu.AddExitSleepHook(() => ExitEnergyMode(EnergyMode.EM1));
+            emu.AddEnterDeepSleepHook(() => EnterEnergyMode(EnergyMode.EM2));
+            emu.AddExitDeepSleepHook(() => ExitEnergyMode(EnergyMode.EM2));
+            energyModeHooksInitialized = true;
+        }
+
+        private void EnterEnergyMode(EnergyMode energyMode)
+        {
+            if(!Enabled || !timer.Enabled || RunsInEnergyMode(energyMode))
+            {
+                return;
+            }
+
+            TrySyncTime();
+            timer.Enabled = false;
+            suspendedInEnergyMode = true;
+            suspendedEnergyMode = energyMode;
+            this.DebugLog("WDOG{0} frozen in {1}", instance, energyMode);
+        }
+
+        private void ExitEnergyMode(EnergyMode energyMode)
+        {
+            if(!suspendedInEnergyMode || suspendedEnergyMode != energyMode)
+            {
+                return;
+            }
+
+            suspendedInEnergyMode = false;
+            if(!Enabled)
+            {
+                return;
+            }
+
+            timer.Enabled = true;
+            this.DebugLog("WDOG{0} resumed after {1}", instance, energyMode);
+        }
+
+        private bool RunsInEnergyMode(EnergyMode energyMode)
+        {
+            switch(energyMode)
+            {
+            case EnergyMode.EM1:
+                return cfg_em1run_bit.Value == CFG_EM1RUN.ENABLE;
+            case EnergyMode.EM2:
+                return cfg_em2run_bit.Value == CFG_EM2RUN.ENABLE;
+            default:
+                throw new System.ArgumentOutOfRangeException(nameof(energyMode));
+            }
+        }
+
         private ulong GetCurrentCounter()
         {
             if(!timer.Enabled)
@@ -291,14 +348,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return true;
         }
 
-        private enum Stage
-        {
-            Warning,
-            Timeout,
-        }
-
         private Stage currentStage;
         private ulong cyclesBeforeStage;
+        private bool energyModeHooksInitialized;
+        private bool suspendedInEnergyMode;
+        private EnergyMode suspendedEnergyMode;
 
         private readonly uint instance;
         private readonly LimitTimer timer;
@@ -306,5 +360,17 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         // Fallback frequency used when no CMU is attached to the machine.
         private const ulong WdogDefaultFrequency = SiLabs_CMU_Constants.LfrcoFrequency;
         private const ulong UnlockKey = 0xABE8UL;
+
+        private enum Stage
+        {
+            Warning,
+            Timeout,
+        }
+
+        private enum EnergyMode
+        {
+            EM1,
+            EM2,
+        }
     }
 }

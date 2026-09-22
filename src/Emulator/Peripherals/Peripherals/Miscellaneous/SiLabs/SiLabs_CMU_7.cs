@@ -32,6 +32,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             status_lock_bit.Value = STATUS_LOCK.UNLOCKED;
         }
 
+        public bool GetPeripheralClockEnable(IPeripheral peripheral)
+        {
+            return true; // Default to true for peripherals not handled by this method
+        }
+
         public bool OscPerpllEnabled(uint instance)
         {
             // PERPLL is not present on CMU_7
@@ -74,7 +79,27 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return SiLabs_CMU_Constants.WdogFrequencyFromClksel(clksel, hfxoFrequency);
         }
 
-        public ulong HfxoFrequency 
+        public SiLabs_IHFXO hfxo
+        {
+            get
+            {
+                if(Object.ReferenceEquals(_hfxo, null))
+                {
+                    foreach(var hfxo in machine.GetPeripheralsOfType<SiLabs_IHFXO>())
+                    {
+                        _hfxo = hfxo;
+                    }
+                }
+                return _hfxo;
+            }
+
+            set
+            {
+                _hfxo = value;
+            }
+        }
+
+        public ulong HfxoFrequency
         {
             get
             {
@@ -195,10 +220,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             get { return clken0_lfrco_bit.Value; }
         }
 
-        public bool OscHfrcoRequested
+        public bool OscHfrcoRequested(uint instance)
         {
-            get
+            if(instance != 0)
             {
+                this.Log(LogLevel.Error, "{0} is an invalid instance for HFRCO", instance);
+                return false;
+            }
                 return exportclkctrl_clkoutsel0_field.Value == EXPORTCLKCTRL_CLKOUTSEL0.HFRCODPLL
                     || exportclkctrl_clkoutsel1_field.Value == EXPORTCLKCTRL_CLKOUTSEL1.HFRCODPLL
                     || exportclkctrl_clkoutsel2_field.Value == EXPORTCLKCTRL_CLKOUTSEL2.HFRCODPLL
@@ -213,12 +241,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                         em01grpcclkctrl_clksel_field.Value == EM01GRPCCLKCTRL_CLKSEL.HFRCODPLL
                         && isEm01GrpcClkEnabled()
                     );
-            }
         }
 
-        public bool OscHfrcoEnabled
+        public bool OscHfrcoEnabled(uint instance)
         {
-            get { return clken0_hfrco0_bit.Value; }
+            if(instance != 0)
+            {
+                this.Log(LogLevel.Error, "{0} is an invalid instance for HFRCO", instance);
+                return false;
+            }
+            return clken0_hfrco0_bit.Value;
         }
 
         public bool OscHfrcoEM23Requested
@@ -365,7 +397,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         private void BusFault(uint exception)
         {
             this.Log(LogLevel.Error, "CMU is locked, BusFault!!");
-            if (
+            if(
                 machine.SystemBus.TryGetCurrentCPU(out var cpu)
                 && cpu is TranslationCPU translationCPU
             )
@@ -376,7 +408,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         partial void Sysclkctrl_Write(uint a, uint b)
         {
-            if (status_lock_bit.Value == STATUS_LOCK.LOCKED)
+            if(status_lock_bit.Value == STATUS_LOCK.LOCKED)
             {
                 BusFault(EXCP_PREFETCH_ABORT);
             }
@@ -384,13 +416,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         partial void Sysclkctrl_Clksel_Write(SYSCLKCTRL_CLKSEL a, SYSCLKCTRL_CLKSEL b)
         {
-            if (b == SYSCLKCTRL_CLKSEL.HFXO)
+            if(b == SYSCLKCTRL_CLKSEL.HFXO)
             {
                 // Notify the Hfxo it has been selected as a source
                 hfxo.OnClksel();
             }
         }
-
 
         partial void Calcnt_Calcnt_ValueProvider(ulong a)
         {
@@ -441,7 +472,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         partial void Lock_Lockkey_Write(ulong a, ulong b)
         {
-            if (b == 0x93F7)
+            if(b == 0x93F7)
             {
                 status_lock_bit.Value = STATUS_LOCK.UNLOCKED;
             }
@@ -453,7 +484,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         partial void Wdoglock_Lockkey_Write(ulong a, ulong b)
         {
-            if (b == 0x5257)
+            if(b == 0x5257)
             {
                 status_wdoglock_bit.Value = STATUS_WDOGLOCK.UNLOCKED;
             }
@@ -545,26 +576,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             EM4GRPACLK_LUT[0] = Burtc0Enabled && clken0_burtc_bit.Value;
 
             return EM4GRPACLK_LUT.ContainsValue(true);
-        }
-
-        public SiLabs_IHFXO hfxo
-        {
-            get
-            {
-                if(Object.ReferenceEquals(_hfxo, null))
-                {
-                    foreach(var hfxo in machine.GetPeripheralsOfType<SiLabs_IHFXO>())
-                    {
-                        _hfxo = hfxo;
-                    }
-                }
-                return _hfxo;
-            }
-
-            set
-            {
-                _hfxo = value;
-            }
         }
 
         private SiLabs_IDPLL dpll0

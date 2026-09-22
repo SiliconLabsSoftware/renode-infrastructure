@@ -5,6 +5,7 @@
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
+using Antmicro.Renode.Core;
 using Antmicro.Renode.Peripherals.Bus;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
@@ -12,13 +13,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
     public partial class SiLabs_DEVINFO_1
     {
-        partial void SiLabs_DEVINFO_1_Constructor()
+        public SiLabs_DEVINFO_1(Machine machine) : base(machine)
         {
         }
 
         partial void DEVINFO_Reset()
         {
-            registers.Reset();
         }
 
         public ulong EUI64
@@ -58,5 +58,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             main0_eui64h_dataeui64h_field.Value = (uint)(EUI64 >> 32);
         }
+
+        private readonly bool isEnabled = true;
     }
 }

@@ -7,19 +7,16 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
-using Antmicro.Renode.Core.Structure.Registers;
-using Antmicro.Renode.Debugging;
-using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.CPU;
 using Antmicro.Renode.Peripherals.IRQControllers;
+
 using Range = Antmicro.Renode.Core.Range;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
@@ -32,82 +29,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             this.parent = parent;
 
             isWFIHookAdded = false;
-            inDeepSleep = false;
+            inSleep = false; // EM1
+            inDeepSleep = false; // EM2
             em2CoreRetentionEnabled = true;
             noRetain = new List<IPeripheral>();
             currentBusFaulters = new Dictionary<IPeripheral, List<BusFaulter>>();
-            customPowerDownRanges = new Dictionary<IPeripheral, List<Range>>();
-        }
-
-        public void AddEnterDeepSleepHook(Action hook)
-        {
-            AddWFIHook();
-            EnterDeepSleep += hook;
-        }
-
-        public void AddExitDeepSleepHook(Action hook)
-        {
-            AddWFIHook();
-            ExitDeepSleep += hook;
-        }
-
-        public void UpdatePeripheralEnabledStatus(IPeripheral peripheral, bool enabled)
-        {
-            if (peripheral == null)
-            {
-                throw new Exception("UpdatePeripheralEnabledStatus: peripheral is null");
-            }
-            
-            if(enabled) 
-            {
-                PowerUpPeripheral(peripheral);
-            }
-            else 
-            {
-                PowerDownPeripheral(peripheral);
-            }
-        }
-
-        public bool GetPeripheralEnabledStatus(IPeripheral peripheral)
-        {
-            if(peripheral == null)
-            {
-                return false;
-            }
-            return peripheral.Enabled();
-        }
-
-        private Action<bool> WFIStateChanged(CortexM cpu)
-        {
-            return (WFI) =>
-            {
-                CpuWfiState[cpu] = WFI;
-                
-                IEnumerable<NVIC> nvic = machine.GetPeripheralsOfType<NVIC>();        
-                if(nvic.All(n => n.DeepSleepEnabled))
-                {
-                    if(CpuWfiState.Values.All(wfi => wfi))
-                    {
-                        // all CPUs in WFI state
-                        EnterDeepSleep?.Invoke();
-                        inDeepSleep = true;
-                    }
-                    else if(!WFI && inDeepSleep)
-                    {
-                        // invoke the exit deep sleep hooks on the
-                        // first CPU state change after deep sleep
-                        ExitDeepSleep?.Invoke();
-                        // The reset of the core must be done in the exit hook to
-                        // keep the WFI state and the NVIC state for the wakeup sources
-                        if(!em2CoreRetentionEnabled) {
-                            ResetCortexMCores();
-                        }
-                        // This must be done after the reset of the cores because this modifies the NVIC state
-                        PowerDownAllNoRetainPeripherals();
-                        inDeepSleep = false;
-                    }
-                }
-            };
         }
 
         public void AddWFIHook()
@@ -130,13 +56,142 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return noRetain;
         }
 
+        public void AddEnterSleepHook(Action hook)
+        {
+            AddWFIHook();
+            EnterSleep += hook;
+        }
+
+        public void AddExitSleepHook(Action hook)
+        {
+            AddWFIHook();
+            ExitSleep += hook;
+        }
+
+        public void AddEnterDeepSleepHook(Action hook)
+        {
+            AddWFIHook();
+            EnterDeepSleep += hook;
+        }
+
+        public void AddExitDeepSleepHook(Action hook)
+        {
+            AddWFIHook();
+            ExitDeepSleep += hook;
+        }
+
+        public void UpdatePeripheralEnabledStatus(IPeripheral peripheral, bool enabled)
+        {
+            if(peripheral == null)
+            {
+                throw new Exception("UpdatePeripheralEnabledStatus: peripheral is null");
+            }
+
+            if(enabled)
+            {
+                PowerUpPeripheral(peripheral);
+            }
+            else
+            {
+                PowerDownPeripheral(peripheral);
+            }
+        }
+
+        public bool GetPeripheralEnabledStatus(IPeripheral peripheral)
+        {
+            if(peripheral == null)
+            {
+                return false;
+            }
+            return peripheral.Enabled();
+        }
+
+        public bool em2CoreRetentionEnabled;
+
+        protected event Action EnterSleep;
+
+        protected event Action ExitSleep;
+
+        protected event Action EnterDeepSleep;
+
+        protected event Action ExitDeepSleep;
+
+        /// <summary>
+        /// Reads the set of pending IRQ numbers from an NVIC via reflection.
+        /// Used to save/restore pending state across EM2 core reset without modifying the NVIC model.
+        /// </summary>
+        private static int[] GetPendingIRQsFromNvic(NVIC nvic)
+        {
+            var field = typeof(NVIC).GetField("pendingIRQs", BindingFlags.NonPublic | BindingFlags.Instance);
+            if(field == null)
+            {
+                return Array.Empty<int>();
+            }
+            var pendingSet = field.GetValue(nvic) as System.Collections.Generic.ICollection<int>;
+            if(pendingSet == null)
+            {
+                return Array.Empty<int>();
+            }
+            var snapshot = new int[pendingSet.Count];
+            pendingSet.CopyTo(snapshot, 0);
+            return snapshot;
+        }
+
+        private Action<bool> WFIStateChanged(CortexM cpu)
+        {
+            return (WFI) =>
+            {
+                CpuWfiState[cpu] = WFI;
+
+                if(!WFI && (inSleep || inDeepSleep))
+                {
+                    if(inDeepSleep)
+                    {
+                        ExitDeepSleep?.Invoke();
+                        // The reset of the core must be done in the exit hook to
+                        // keep the WFI state and the NVIC state for the wakeup sources
+                        if(!em2CoreRetentionEnabled)
+                        {
+                            ResetCortexMCores();
+                        }
+                        // This must be done after the reset of the cores because this modifies the NVIC state
+                        PowerDownAllNoRetainPeripherals();
+                        inDeepSleep = false;
+                    }
+                    else
+                    {
+                        ExitSleep?.Invoke();
+                        inSleep = false;
+                    }
+                    return;
+                }
+
+                if(WFI && CpuWfiState.All(state => state.Value || state.Key.IsHalted))
+                {
+                    // A halted companion CPU is quiescent and does not prevent the
+                    // remaining CPUs from entering a system energy mode.
+                    var sleepingCpus = CpuWfiState.Where(state => state.Value).Select(state => state.Key);
+                    if(sleepingCpus.All(sleepingCpu => sleepingCpu.Nvic.DeepSleepEnabled))
+                    {
+                        EnterDeepSleep?.Invoke();
+                        inDeepSleep = true;
+                    }
+                    else
+                    {
+                        EnterSleep?.Invoke();
+                        inSleep = true;
+                    }
+                }
+            };
+        }
+
         private void PowerDownAllNoRetainPeripherals()
         {
             foreach(IPeripheral peripheral in noRetain)
             {
                 string peripheralName = peripheral.GetName().Split('.')[1];
                 var powerDownRegisters = peripheral.GetPowerDownRegisters();
-                if (powerDownRegisters.Count == 0)
+                if(powerDownRegisters.Count == 0)
                 {
                     this.Log(LogLevel.Noisy, "Powering down NoRetain peripheral {0}", peripheralName);
                     peripheral.PowerDown();
@@ -153,33 +208,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 {
                     register.Reset();
                 }
-
-                // Update power down ranges for unretained registers
-                customPowerDownRanges[peripheral] = CombineRanges(peripheral.AddRangesToPowerDown());
             }
-        }
-
-        // Merges adjacent ranges into a single range.
-        private static List<Range> CombineRanges(List<Range> ranges)
-        {
-            if (ranges.Count == 0)
-            {
-                return ranges;
-            }
-            var result = new List<Range> { ranges[0] };
-            for(var i = 1; i < ranges.Count; i++)
-            {
-                var last = result[result.Count - 1];
-                if(last.CanBeExpandedBy(ranges[i]))
-                {
-                    result[result.Count - 1] = last.Expand(ranges[i]);
-                }
-                else
-                {
-                    result.Add(ranges[i]);
-                }
-            }
-            return result;
         }
 
         // emulate power down by adding a BusFaulter peripheral at
@@ -226,17 +255,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 // if "cpu" is the initiator that targets this address
                 // range)
                 //
-                IEnumerable<Range> rangesToFault;
-                if(customPowerDownRanges.TryGetValue(peripheral, out var customRanges))
-                {
-                    rangesToFault = customRanges;
-                }
-                else
-                {
-                    rangesToFault = sysbus.GetRegistrationPoints(peripheral as IBusPeripheral)
-                        .OfType<BusRangeRegistration>()
-                        .Select(registration => registration.Range);
-                }
+                IEnumerable<Range> rangesToFault = sysbus.GetRegistrationPoints(peripheral as IBusPeripheral)
+                    .OfType<BusRangeRegistration>()
+                    .Select(registration => registration.Range);
 
                 foreach(var range in rangesToFault)
                 {
@@ -314,27 +335,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
-        /// <summary>
-        /// Reads the set of pending IRQ numbers from an NVIC via reflection.
-        /// Used to save/restore pending state across EM2 core reset without modifying the NVIC model.
-        /// </summary>
-        private static int[] GetPendingIRQsFromNvic(NVIC nvic)
-        {
-            var field = typeof(NVIC).GetField("pendingIRQs", BindingFlags.NonPublic | BindingFlags.Instance);
-            if(field == null)
-            {
-                return Array.Empty<int>();
-            }
-            var pendingSet = field.GetValue(nvic) as System.Collections.Generic.ICollection<int>;
-            if(pendingSet == null)
-            {
-                return Array.Empty<int>();
-            }
-            var snapshot = new int[pendingSet.Count];
-            pendingSet.CopyTo(snapshot, 0);
-            return snapshot;
-        }
-
         // keys are reference to the CPU(s) values are WFI state of the CPU
         private IDictionary<CortexM, bool> CpuWfiState
         {
@@ -348,25 +348,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
-        protected event Action EnterDeepSleep;
-        protected event Action ExitDeepSleep;
-        public bool em2CoreRetentionEnabled;
-        private readonly IMachine machine;
-        private readonly IBusPeripheral parent;
         private bool isWFIHookAdded;
+        private bool inSleep;
         private bool inDeepSleep;
         private List<IPeripheral> noRetain;
         private IDictionary<CortexM, bool> _cpuWfiState;
+        private readonly IMachine machine;
+        private readonly IBusPeripheral parent;
 
         // dictionary for keeping track of all busFaulters that
         // have been added to the memory map
-        private Dictionary<IPeripheral, List<BusFaulter>> currentBusFaulters;
+        private readonly Dictionary<IPeripheral, List<BusFaulter>> currentBusFaulters;
 
-        // optional custom address ranges per peripheral for power-down bus fault;
-        // when set, only these ranges are faulted instead of the full registration
-        private Dictionary<IPeripheral, List<Range>> customPowerDownRanges;
- 
-         // dummy peripheral that always generates a bus fault on any read/write
+        // dummy peripheral that always generates a bus fault on any read/write
         private class BusFaulter : IBytePeripheral, IWordPeripheral, IDoubleWordPeripheral
         {
             public BusFaulter(IMachine machine, CortexM cpu, ulong baseAddr)
@@ -376,41 +370,47 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 this.baseAddr = baseAddr;
             }
 
-            private void TriggerBusFault(long offset)
-            {
-                uint bfar = checked((uint)baseAddr + (uint)offset);
-                cpu.RaisePreciseBusFault(bfar);
-            }
-
             public void Reset()
             {
             }
+
             public uint ReadDoubleWord(long offset)
             {
                 TriggerBusFault(offset);
                 return 0;
             }
+
             public void WriteDoubleWord(long offset, uint value)
             {
                 TriggerBusFault(offset);
             }
+
             public ushort ReadWord(long offset)
             {
                 TriggerBusFault(offset);
                 return 0;
             }
+
             public void WriteWord(long offset, ushort value)
             {
                 TriggerBusFault(offset);
             }
+
             public byte ReadByte(long offset)
             {
                 TriggerBusFault(offset);
                 return 0;
             }
+
             public void WriteByte(long offset, byte value)
             {
                 TriggerBusFault(offset);
+            }
+
+            private void TriggerBusFault(long offset)
+            {
+                uint bfar = checked((uint)baseAddr + (uint)offset);
+                cpu.RaisePreciseBusFault(bfar);
             }
 
             private readonly IMachine machine;

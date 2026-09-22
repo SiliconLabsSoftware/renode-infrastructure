@@ -284,6 +284,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             // Nothing to do here, the StartFetcher command already grabs the pusher descriptors and writes them.
         }
 
+        private bool IsSecureEngineCpu()
+        {
+            if(!machine.SystemBus.TryGetCurrentCPU(out var contextCpu))
+            {
+                return false;
+            }
+            return machine.TryGetLocalName(contextCpu, out var name) && name == SeCpuName;
+        }
+
         private void RunAesEngine(List<DmaDescriptor> fetcherDescriptorList, List<DmaDescriptor> pusherDescriptorList)
         {
             int configDescriptorIndex = -1;
@@ -359,13 +368,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             // 1: decryption operation
             bool encrypt = ((fetcherDescriptorList[configDescriptorIndex].Data[0] & 0x1) == 0);
             // Bit 4: Cx_Load: 
-            // 0: AES operation is initial; no contet is given as input
+            // 0: AES operation is initial; no context is given as input
             // 1: AES operation is not initial; the context must be provided as input
             bool cxLoad = ((fetcherDescriptorList[configDescriptorIndex].Data[0] & (0x1 << 4)) > 0);
             // Bit 5: Cx_Save: 
             // 0: AES operation is final; the engine will not return the context
             // 1: AES operation is not final; the engine will return the context
-            bool cxSave = ((fetcherDescriptorList[configDescriptorIndex].Data[0] & (0x1 << 4)) > 0);
+            bool cxSave = ((fetcherDescriptorList[configDescriptorIndex].Data[0] & (0x1 << 5)) > 0);
             // Bits 7:6 and 31:28: KeySel
             // bits 7:6->1:0
             // bits 31:28->5:2
@@ -380,18 +389,38 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             byte[] key;
             if(keyDescriptorIndex < 0)
             {
-                this.Log(LogLevel.Noisy, "RunAesEngine(): fetching key from KSU at index {0}", keySelect);
-                if((keySelect & 0x1) == 0x1)
+                if(IsSecureEngineCpu())
                 {
-                    // bit 0 set: use HW key 1 - SE crypto key (lower 256 bits of 512-bit PUF RT output)
-                    key = (byte[])SeCryptoKey.Clone();
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): Using HW key 1 (keySelect bit 0 is set)");
+                    if((keySelect & 0x1) == 0x1)
+                    {
+                        // Hardware key 1: SE crypto key (lower 256 bits of the 512-bit PUF RT output)
+                        key = (byte[])SeCryptoKey.Clone();
+                        this.Log(LogLevel.Noisy, "RunAesEngine(): Using the SE crypto HW key");
+                    }
+                    else
+                    {
+                        throw new ArgumentException($"RunAesEngine(): key selector bit 0 is not set for SE CPU");
+                    }
                 }
                 else
                 {
-                    // From software examination, appears that key slots are passed in as 1-based indexes.
-                    // Neither bit 0 nor bit 1 set: fetch from KSU normally
-                    key = ksu.GetKey(keySelect - 1);
+                    if(keySelect == 0)
+                    {
+                        // Slot 0 is reserved for a key programmed directly by software, which is passed in a key descriptor.
+                        throw new ArgumentException("RunAesEngine(): key descriptor missing and keySel is 0, which is reserved for a software programmed key");
+                    }
+                    else
+                    {
+                        if(ksu == null)
+                        {
+                            throw new ArgumentException($"RunAesEngine(): no KSU configured to fetch key slot {keySelect - 1} from");
+                        }
+                        // Key slots are passed in as 1-based indexes.
+                        // KeySel == 0: Key programmed by the SW
+                        // KeySel > 0: KSU slot index (1-based)
+                        this.Log(LogLevel.Noisy, "RunAesEngine(): fetching key from KSU at index {0}", keySelect - 1);
+                        key = ksu.GetKey(keySelect - 1);
+                    }
                 }
             }
             else
@@ -746,158 +775,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
             case AesMode.Ccm:
             {
-                if(inputHeaderDescriptorIndices.Count == 0)
-                {
-                    throw new ArgumentException("RunAesEngine(): CCM header descriptor(s) missing");
-                }
-
-                byte[] headerData = BuildDataArray(inputHeaderDescriptorIndices, fetcherDescriptorList);
-                this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Header Data ({0} bytes: [{1}])", headerData.Length, BitConverter.ToString(headerData));
-                if(headerData.Length < 16)
-                {
-                    throw new ArgumentException($"RunAesEngine(): CCM header data too short: {headerData.Length} bytes, expected at least 16");
-                }
-
-                // Parse the header structure according to RFC 3610 and sx_aead_create_ccmheader:
-                // Byte 0: Flags byte
-                byte flags = headerData[0];
-                bool hasAad = (flags & (1 << 6)) != 0;
-                int l = (flags & 0x7) + 1; // Length field size
-                int nonceSize = 15 - l; // Nonce size
-                int tagLength = ((flags >> 3) & 0x7) * 2 + 2; // (t-2)/2 encoded in bits 5:3, so t = ((flags>>3)&0x7)*2 + 2
-
-                this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Flags: 0x{0:X2}, hasAad: {1}, l: {2}, nonceSize: {3}, tagLength: {4}", flags, hasAad, l, nonceSize, tagLength);
-
-                // Bytes 1 to (1+nonceSize): Nonce
-                byte[] nonce = new byte[nonceSize];
-                Array.Copy(headerData, 1, nonce, 0, nonceSize);
-
-                // Bytes (1+nonceSize) to 15: Message length (big endian)
-                uint messageLength = 0;
-                for(int i = 0; i < l; i++)
-                {
-                    messageLength = (messageLength << 8) | headerData[1 + nonceSize + i];
-                }
-
-                // AAD length and data (if present)
-                uint aadLength = 0;
-                if(hasAad && headerData.Length >= 18)
-                {
-                    aadLength = (uint)((headerData[16] << 8) | headerData[17]);
-                }
-
-                // AAD data (if present) starts at byte 18 after the AAD length field
-                byte[] aad = null;
-                if(hasAad && aadLength > 0 && headerData.Length > 18)
-                {
-                    // AAD data starts at byte 18
-                    int availableAadBytes = headerData.Length - 18;
-                    int actualAadLength = Math.Min((int)aadLength, availableAadBytes);
-                    aad = new byte[actualAadLength];
-                    Array.Copy(headerData, 18, aad, 0, actualAadLength);
-                }
-
-                this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Nonce: [{0}]", BitConverter.ToString(nonce));
-                this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Message Length: {0}", messageLength);
-                this.Log(LogLevel.Noisy, "RunAesEngine(): CCM AAD Length: {0}", aadLength);
-                if(aad != null)
-                {
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM AAD: [{0}]", BitConverter.ToString(aad));
-                }
-
-                CcmBlockCipher cipher = new CcmBlockCipher(new AesEngine());
-                AeadParameters parameters = new AeadParameters(keyParameter,
-                                                               tagLength * 8, // tag length in bits (inferred from flags byte)
-                                                               nonce,
-                                                               aad);
-                cipher.Init(encrypt, parameters);
-
-                byte[] finalOutput = null;
-
-                if(encrypt)
-                {
-                    byte[] plaintextData = BuildDataArray(inputPayloadDescriptorIndices, fetcherDescriptorList);
-                    var plaintextDataLength = (plaintextData == null) ? 0 : plaintextData.Length; 
-
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Plaintext Data ({0} bytes): [{1}]", plaintextDataLength, (plaintextData == null) ? "" : BitConverter.ToString(plaintextData));
-                    
-                    // Create output buffer for ciphertext + tag
-                    finalOutput = new byte[plaintextDataLength + tagLength];
-
-                    // Process the plaintext if present
-                    if (plaintextDataLength > 0)
-                    {
-                        cipher.ProcessBytes(plaintextData, 0, plaintextDataLength, finalOutput, 0);
-                    }
-
-                    // Finalize the encryption (this writes out the encrypted data and the authentication tag)
-                    cipher.DoFinal(finalOutput, 0);
-
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Encrypted Data: [{0}]", BitConverter.ToString(finalOutput, 0, plaintextDataLength));
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Authentication Tag: [{0}]", BitConverter.ToString(finalOutput, plaintextDataLength, tagLength));
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM final output: [{0}]", BitConverter.ToString(finalOutput));
-                }
-                else
-                {
-                    byte[] inputData = BuildDataArray(inputPayloadDescriptorIndices, fetcherDescriptorList);
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Input Data (cipher text + Tag) ({0} bytes): [{1}]", inputData.Length, BitConverter.ToString(inputData));
-
-                    finalOutput = new byte[inputData.Length];
-
-                    // Output buffer is for plaintext only (input size - tag size)
-                    int ciphertextLength = inputData.Length - tagLength;
-
-                    // Process ciphertext and tag
-                    cipher.ProcessBytes(inputData, 0, inputData.Length, finalOutput, 0);
-                    byte[] tag = cipher.GetMac();
-
-                    // Finalize the decryption (this verifies the authentication tag)
-                    bool tagMatch = true;
-                    try
-                    {
-                        cipher.DoFinal(finalOutput, 0);
-                    }
-                    catch(Exception e)
-                    {
-                        if(e is InvalidCipherTextException)
-                        {
-                            tagMatch = false;
-                        }
-                        else
-                        {
-                            throw e;
-                        }
-                    }
-
-                    // Copy the tag before DoFinal() which is XOR'd with the key (hence, all zeros when the tag matches)
-                    Array.Copy(tag, 0, finalOutput, ciphertextLength, tagLength);
-
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Decrypt TagMatch={0} Tag={{1}}", tagMatch, BitConverter.ToString(tag));
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM Decrypted Data: [{0}]", BitConverter.ToString(finalOutput, 0, ciphertextLength));
-                    this.Log(LogLevel.Noisy, "RunAesEngine(): CCM final output: [{0}]", BitConverter.ToString(finalOutput));
-                }
-
-                // Write finalOutput to memory
-                uint writtenBytesCount = 0;
-                int currentPusherDescriptorIndex = 0;
-                while(writtenBytesCount < finalOutput.Length)
-                {
-                    if(pusherDescriptorList[currentPusherDescriptorIndex].Discard)
-                    {
-                        currentPusherDescriptorIndex++;
-                        continue;
-                    }
-
-                    uint writeLength = (uint)Math.Min(pusherDescriptorList[currentPusherDescriptorIndex].Length, (finalOutput.Length - writtenBytesCount));
-                    for(uint i = 0; i < writeLength; i++)
-                    {
-                        machine.SystemBus.WriteByte((pusherDescriptorList[currentPusherDescriptorIndex].FirstDataAddress + i),
-                                                    finalOutput[writtenBytesCount + i], cpu);
-                    }
-
-                    writtenBytesCount += writeLength;
-                    currentPusherDescriptorIndex++;
-                }
+                RunAesCcm(encrypt, cxLoad, cxSave, keyParameter, fetcherDescriptorList, pusherDescriptorList,
+                          inputHeaderDescriptorIndices, inputPayloadDescriptorIndices, ivDescriptorIndex);
                 break;
             }
             default:
@@ -905,6 +784,145 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 throw new ArgumentException("RunAesEngine(): AES mode not supported");
             }
             }
+        }
+
+        private void RunAesCcm(bool encrypt, bool cxLoad, bool cxSave, KeyParameter keyParameter,
+                               List<DmaDescriptor> fetcherDescriptorList, List<DmaDescriptor> pusherDescriptorList,
+                               List<int> inputHeaderDescriptorIndices, List<int> inputPayloadDescriptorIndices,
+                               int ivDescriptorIndex)
+        {
+            byte[] macState = new byte[CcmBlockSize];
+            byte[] counterBlock = new byte[CcmBlockSize];
+            int tagLength;
+
+            byte[] headerData = BuildDataArray(inputHeaderDescriptorIndices, fetcherDescriptorList);
+            if(headerData == null)
+            {
+                headerData = Array.Empty<byte>();
+            }
+
+            if(cxLoad)
+            {
+                if(ivDescriptorIndex < 0 || fetcherDescriptorList[ivDescriptorIndex].Data.Length < CcmContextSize)
+                {
+                    throw new ArgumentException("RunAesCcm(): Cx_Load requires a 32-byte IV/context descriptor");
+                }
+                CcmUnpackContext(fetcherDescriptorList[ivDescriptorIndex].Data, macState, counterBlock, out tagLength);
+                this.Log(LogLevel.Noisy, "RunAesCcm(): Cx_Load tagLength={0} mac=[{1}] ctr=[{2}]",
+                         tagLength, BitConverter.ToString(macState), BitConverter.ToString(counterBlock));
+                if(headerData.Length > 0)
+                {
+                    CcmMacRaw(keyParameter, macState, headerData);
+                }
+            }
+            else
+            {
+                if(headerData.Length < CcmBlockSize)
+                {
+                    throw new ArgumentException($"RunAesCcm(): CCM header data too short: {headerData.Length} bytes, expected at least 16");
+                }
+
+                byte flags = headerData[0];
+                int l = (flags & 0x7) + 1;
+                int nonceSize = 15 - l;
+                int m = (flags >> 3) & 0x7;
+                // Firmware CCM* encodes tagsz=0 as M=0; RFC 3610 maps M=0 to t=2. Prefer CCM*.
+                tagLength = (m == 0) ? 0 : (m * 2 + 2);
+
+                byte[] nonce = new byte[nonceSize];
+                Array.Copy(headerData, 1, nonce, 0, nonceSize);
+
+                uint messageLength = 0;
+                for(int i = 0; i < l; i++)
+                {
+                    messageLength = (messageLength << 8) | headerData[1 + nonceSize + i];
+                }
+
+                this.Log(LogLevel.Noisy, "RunAesCcm(): flags=0x{0:X2} l={1} nonceSize={2} tagLength={3} msgLen={4} nonce=[{5}]",
+                         flags, l, nonceSize, tagLength, messageLength, BitConverter.ToString(nonce));
+
+                CcmStartFromB0(keyParameter, headerData, nonce, macState, counterBlock);
+            }
+
+            byte[] payload = BuildDataArray(inputPayloadDescriptorIndices, fetcherDescriptorList);
+            if(payload == null)
+            {
+                payload = Array.Empty<byte>();
+            }
+
+            byte[] tagIn = Array.Empty<byte>();
+            if(!encrypt && !cxSave && tagLength > 0)
+            {
+                if(payload.Length < tagLength)
+                {
+                    throw new ArgumentException($"RunAesCcm(): decrypt payload {payload.Length} shorter than tag {tagLength}");
+                }
+                tagIn = new byte[tagLength];
+                Array.Copy(payload, payload.Length - tagLength, tagIn, 0, tagLength);
+                byte[] ciphertext = new byte[payload.Length - tagLength];
+                Array.Copy(payload, 0, ciphertext, 0, ciphertext.Length);
+                payload = ciphertext;
+            }
+
+            this.Log(LogLevel.Noisy, "RunAesCcm(): encrypt={0} cxLoad={1} cxSave={2} payload={3} bytes [{4}]",
+                     encrypt, cxLoad, cxSave, payload.Length, payload.Length > 0 ? BitConverter.ToString(payload) : "empty");
+
+            if(cxSave && (payload.Length % CcmBlockSize) != 0)
+            {
+                throw new ArgumentException($"RunAesCcm(): Cx_Save payload length {payload.Length} is not a multiple of 16");
+            }
+
+            byte[] processed = new byte[payload.Length];
+            uint fullBlocksLength = (uint)(payload.Length - (payload.Length % CcmBlockSize));
+            if(fullBlocksLength > 0)
+            {
+                CcmProcessBlocks(encrypt, keyParameter, macState, counterBlock, payload, fullBlocksLength, processed);
+            }
+
+            byte[] tag = new byte[tagLength];
+            if(!cxSave)
+            {
+                byte[] tail = Array.Empty<byte>();
+                if(payload.Length > fullBlocksLength)
+                {
+                    tail = new byte[payload.Length - fullBlocksLength];
+                    Array.Copy(payload, (int)fullBlocksLength, tail, 0, tail.Length);
+                }
+                byte[] tailOut = new byte[tail.Length];
+                CcmFinish(encrypt, keyParameter, macState, counterBlock, tail, tailOut, (uint)tagLength, tag);
+                if(tail.Length > 0)
+                {
+                    Array.Copy(tailOut, 0, processed, (int)fullBlocksLength, tail.Length);
+                }
+
+                if(!encrypt && tagLength > 0)
+                {
+                    byte[] tagXor = new byte[tagLength];
+                    for(int i = 0; i < tagLength; i++)
+                    {
+                        tagXor[i] = (byte)(tagIn[i] ^ tag[i]);
+                    }
+                    tag = tagXor;
+                }
+            }
+
+            List<byte> output = new List<byte>(processed);
+            if(cxSave)
+            {
+                byte[] context = new byte[CcmContextSize];
+                CcmPackContext(macState, counterBlock, tagLength, context);
+                output.AddRange(context);
+                this.Log(LogLevel.Noisy, "RunAesCcm(): Cx_Save context=[{0}]", BitConverter.ToString(context));
+            }
+            else if(tagLength > 0)
+            {
+                output.AddRange(tag);
+                this.Log(LogLevel.Noisy, "RunAesCcm(): tag=[{0}]", BitConverter.ToString(tag));
+            }
+
+            byte[] finalOutput = output.ToArray();
+            this.Log(LogLevel.Noisy, "RunAesCcm(): output ({0} bytes)=[{1}]", finalOutput.Length, BitConverter.ToString(finalOutput));
+            WriteCcmPusherOutput(pusherDescriptorList, finalOutput);
         }
 
         private void RunHashEngine(List<DmaDescriptor> fetcherDescriptorList, List<DmaDescriptor> pusherDescriptorList)
@@ -1513,6 +1531,188 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
+        private void WriteCcmPusherOutput(List<DmaDescriptor> pusherDescriptorList, byte[] finalOutput)
+        {
+            uint writtenBytesCount = 0;
+            int currentPusherDescriptorIndex = 0;
+            while(writtenBytesCount < finalOutput.Length)
+            {
+                if(currentPusherDescriptorIndex >= pusherDescriptorList.Count)
+                {
+                    throw new ArgumentException("RunAesCcm(): ran out of pusher descriptors while writing output");
+                }
+                if(pusherDescriptorList[currentPusherDescriptorIndex].Discard)
+                {
+                    currentPusherDescriptorIndex++;
+                    continue;
+                }
+
+                uint writeLength = (uint)Math.Min(pusherDescriptorList[currentPusherDescriptorIndex].Length, (finalOutput.Length - writtenBytesCount));
+                for(uint i = 0; i < writeLength; i++)
+                {
+                    machine.SystemBus.WriteByte(pusherDescriptorList[currentPusherDescriptorIndex].FirstDataAddress + i,
+                                                finalOutput[writtenBytesCount + i], cpu);
+                }
+
+                writtenBytesCount += writeLength;
+                currentPusherDescriptorIndex++;
+            }
+        }
+
+        private static byte CcmGetQ(int nonceLength)
+        {
+            return (byte)(CcmBlockSize - 1 - nonceLength);
+        }
+
+        private static void CcmIncrementCounter(byte[] counterBlock)
+        {
+            for(int i = CcmBlockSize - 1; i >= 0; i--)
+            {
+                if(++counterBlock[i] != 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        private static void CcmMacBlock(KeyParameter keyParameter, byte[] macState, byte[] block)
+        {
+            CbcBlockCipher mac = new CbcBlockCipher(new AesEngine());
+            mac.Init(true, new ParametersWithIV(keyParameter, macState));
+            byte[] macOut = new byte[CcmBlockSize];
+            mac.ProcessBlock(block, 0, macOut, 0);
+            Array.Copy(macOut, 0, macState, 0, CcmBlockSize);
+        }
+
+        private static void CcmMacRaw(KeyParameter keyParameter, byte[] macState, byte[] data)
+        {
+            int offset = 0;
+            while(offset < data.Length)
+            {
+                byte[] block = new byte[CcmBlockSize];
+                int chunk = Math.Min(data.Length - offset, CcmBlockSize);
+                Array.Copy(data, offset, block, 0, chunk);
+                CcmMacBlock(keyParameter, macState, block);
+                offset += chunk;
+            }
+        }
+
+        private static void CcmCtrBlock(KeyParameter keyParameter, byte[] counterBlock, byte[] input, byte[] output, int length)
+        {
+            SicBlockCipher ctr = new SicBlockCipher(new AesEngine());
+            ctr.Init(true, new ParametersWithIV(keyParameter, counterBlock));
+
+            byte[] paddedIn = new byte[CcmBlockSize];
+            byte[] paddedOut = new byte[CcmBlockSize];
+            Array.Copy(input, 0, paddedIn, 0, length);
+            ctr.ProcessBlock(paddedIn, 0, paddedOut, 0);
+            Array.Copy(paddedOut, 0, output, 0, length);
+
+            CcmIncrementCounter(counterBlock);
+        }
+
+        // First 16 header bytes are B0 (already parsed). MAC B0, MAC any remaining header as AAD,
+        // and seed counterBlock to A1.
+        private static void CcmStartFromB0(KeyParameter keyParameter, byte[] headerData, byte[] nonce, byte[] macState, byte[] counterBlock)
+        {
+            byte[] b0 = new byte[CcmBlockSize];
+            Array.Copy(headerData, 0, b0, 0, CcmBlockSize);
+            Array.Clear(macState, 0, CcmBlockSize);
+            CcmMacBlock(keyParameter, macState, b0);
+
+            if(headerData.Length > CcmBlockSize)
+            {
+                byte[] remaining = new byte[headerData.Length - CcmBlockSize];
+                Array.Copy(headerData, CcmBlockSize, remaining, 0, remaining.Length);
+                CcmMacRaw(keyParameter, macState, remaining);
+            }
+
+            byte q = CcmGetQ(nonce.Length);
+            counterBlock[0] = (byte)(q - 1);
+            Array.Copy(nonce, 0, counterBlock, 1, nonce.Length);
+            Array.Clear(counterBlock, 1 + nonce.Length, CcmBlockSize - 1 - nonce.Length);
+            CcmIncrementCounter(counterBlock);
+        }
+
+        private static void CcmProcessBlocks(bool encrypt, KeyParameter keyParameter, byte[] macState, byte[] counterBlock, byte[] input, uint length, byte[] output)
+        {
+            for(int offset = 0; offset < length; offset += CcmBlockSize)
+            {
+                byte[] plainBlock = new byte[CcmBlockSize];
+                byte[] cipherBlock = new byte[CcmBlockSize];
+                if(encrypt)
+                {
+                    Array.Copy(input, offset, plainBlock, 0, CcmBlockSize);
+                    CcmMacBlock(keyParameter, macState, plainBlock);
+                    CcmCtrBlock(keyParameter, counterBlock, plainBlock, cipherBlock, CcmBlockSize);
+                    Array.Copy(cipherBlock, 0, output, offset, CcmBlockSize);
+                }
+                else
+                {
+                    Array.Copy(input, offset, cipherBlock, 0, CcmBlockSize);
+                    CcmCtrBlock(keyParameter, counterBlock, cipherBlock, plainBlock, CcmBlockSize);
+                    CcmMacBlock(keyParameter, macState, plainBlock);
+                    Array.Copy(plainBlock, 0, output, offset, CcmBlockSize);
+                }
+            }
+        }
+
+        private static void CcmFinish(bool encrypt, KeyParameter keyParameter, byte[] macState, byte[] counterBlock, byte[] finalData, byte[] outputData, uint tagLength, byte[] tag)
+        {
+            int finalLength = finalData.Length;
+            if(finalLength > 0)
+            {
+                byte[] paddedPlain = new byte[CcmBlockSize];
+                byte[] paddedCipher = new byte[CcmBlockSize];
+                if(encrypt)
+                {
+                    Array.Copy(finalData, 0, paddedPlain, 0, finalLength);
+                    CcmMacBlock(keyParameter, macState, paddedPlain);
+                    CcmCtrBlock(keyParameter, counterBlock, paddedPlain, paddedCipher, finalLength);
+                    Array.Copy(paddedCipher, 0, outputData, 0, finalLength);
+                }
+                else
+                {
+                    Array.Copy(finalData, 0, paddedCipher, 0, finalLength);
+                    CcmCtrBlock(keyParameter, counterBlock, paddedCipher, paddedPlain, finalLength);
+                    CcmMacBlock(keyParameter, macState, paddedPlain);
+                    Array.Copy(paddedPlain, 0, outputData, 0, finalLength);
+                }
+            }
+
+            byte[] a0 = new byte[CcmBlockSize];
+            Array.Copy(counterBlock, 0, a0, 0, CcmBlockSize);
+            byte q = (byte)((a0[0] & 0x7) + 1);
+            Array.Clear(a0, CcmBlockSize - q, q);
+            a0[0] &= 0x07;
+
+            AesEngine aes = new AesEngine();
+            aes.Init(true, keyParameter);
+            byte[] s0 = new byte[CcmBlockSize];
+            aes.ProcessBlock(a0, 0, s0, 0);
+
+            for(int i = 0; i < tagLength; i++)
+            {
+                tag[i] = (byte)(macState[i] ^ s0[i]);
+            }
+        }
+
+        private static void CcmPackContext(byte[] macState, byte[] counterBlock, int tagLength, byte[] context)
+        {
+            Array.Copy(macState, 0, context, 0, CcmBlockSize);
+            Array.Copy(counterBlock, 0, context, CcmBlockSize, CcmBlockSize);
+            // SYMCRYPTO resume does not re-send B0; stash tagLength in unused A[0] bits 7:3.
+            context[CcmBlockSize] = (byte)((counterBlock[0] & 0x07) | ((tagLength & 0x1F) << 3));
+        }
+
+        private static void CcmUnpackContext(byte[] context, byte[] macState, byte[] counterBlock, out int tagLength)
+        {
+            Array.Copy(context, 0, macState, 0, CcmBlockSize);
+            Array.Copy(context, CcmBlockSize, counterBlock, 0, CcmBlockSize);
+            tagLength = (counterBlock[0] >> 3) & 0x1F;
+            counterBlock[0] &= 0x07;
+        }
+
         private static uint HashEngineStateSize(HashMode hashMode)
         {
             switch(hashMode)
@@ -1772,6 +1972,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         private readonly SiLabs_IKeyStorage ksu;
         private readonly ICPU cpu;
+
+        // Local name of the Secure Element CPU in the platform description.
+        private const string SeCpuName = "secpu";
+        private const int CcmBlockSize = 16;
+        private const int CcmContextSize = 2 * CcmBlockSize;
 
         // Lower 256 bits (SE crypto key)
         private static readonly byte[] SeCryptoKey = new byte[] {

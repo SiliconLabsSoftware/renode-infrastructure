@@ -669,6 +669,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             currentFrameOffset = 0;
             currentDisassembleSubFrame = 0;
             currentDisassembleSubFrameStartWord = 0;
+            currentDisassembleSubFrameBytes = 0;
             currentFrameByteOverTheAirTimeUs = 0;
             currentFrameElapsedAirtimeUs = 0;
 
@@ -764,6 +765,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                        || (field_142.Value && field_143.Value)
                        || (field_78.Value && field_79.Value)
                        || (field_83.Value && field_84.Value));
+                for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
+                {
+                    irq |= (field_410[channel].Value && field_411[channel].Value);
+                }
                 if(LogInterrupts && irq)
                 {
                     var interruptFlag = 0U;
@@ -887,6 +892,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                        || (field_133.Value && field_134.Value)
                        || (field_117.Value && field_118.Value)
                        || (field_119.Value && field_120.Value));
+                for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
+                {
+                    irq |= (field_408[channel].Value && field_409[channel].Value);
+                }
                 if(LogInterrupts && irq)
                 {
                     var interruptFlag = 0U;
@@ -3679,9 +3688,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out field_68, name: "REG_C_27_FIELD_7")
                     .WithFlag(7, name: "REG_C_27_FIELD_8")
                     .WithFlag(8, out field_107, name: "REG_C_27_FIELD_9")
-                    .WithFlag(9, name: "REG_C_27_FIELD_10")
-                    .WithFlag(10, name: "REG_C_27_FIELD_11")
-                    .WithFlag(11, name: "REG_C_27_FIELD_12")
+                    .WithFlag(9, out field_410[0], name: "REG_C_27_FIELD_10")
+                    .WithFlag(10, out field_410[1], name: "REG_C_27_FIELD_11")
+                    .WithFlag(11, out field_410[2], name: "REG_C_27_FIELD_12")
                     .WithFlag(12, name: "REG_C_27_FIELD_13")
                     .WithFlag(13, name: "REG_C_27_FIELD_14")
                     .WithFlag(14, out field_112, name: "REG_C_27_FIELD_15")
@@ -3714,9 +3723,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out field_69, name: "REG_C_28_FIELD_7")
                     .WithFlag(7, name: "REG_C_28_FIELD_8")
                     .WithFlag(8, out field_108, name: "REG_C_28_FIELD_9")
-                    .WithFlag(9, name: "REG_C_28_FIELD_10")
-                    .WithFlag(10, name: "REG_C_28_FIELD_11")
-                    .WithFlag(11, name: "REG_C_28_FIELD_12")
+                    .WithFlag(9, out field_411[0], name: "REG_C_28_FIELD_10")
+                    .WithFlag(10, out field_411[1], name: "REG_C_28_FIELD_11")
+                    .WithFlag(11, out field_411[2], name: "REG_C_28_FIELD_12")
                     .WithFlag(12, name: "REG_C_28_FIELD_13")
                     .WithFlag(13, name: "REG_C_28_FIELD_14")
                     .WithFlag(14, out field_113, name: "REG_C_28_FIELD_15")
@@ -3749,9 +3758,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out field_115, name: "REG_C_42_FIELD_7")
                     .WithFlag(7, name: "REG_C_42_FIELD_8")
                     .WithFlag(8, out field_125, name: "REG_C_42_FIELD_9")
-                    .WithFlag(9, name: "REG_C_42_FIELD_10")
-                    .WithFlag(10, name: "REG_C_42_FIELD_11")
-                    .WithFlag(11, name: "REG_C_42_FIELD_12")
+                    .WithFlag(9, out field_408[0], name: "REG_C_42_FIELD_10")
+                    .WithFlag(10, out field_408[1], name: "REG_C_42_FIELD_11")
+                    .WithFlag(11, out field_408[2], name: "REG_C_42_FIELD_12")
                     .WithFlag(12, name: "REG_C_42_FIELD_13")
                     .WithFlag(13, name: "REG_C_42_FIELD_14")
                     .WithFlag(14, out field_127, name: "REG_C_42_FIELD_15")
@@ -3784,9 +3793,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out field_116, name: "REG_C_43_FIELD_7")
                     .WithFlag(7, name: "REG_C_43_FIELD_8")
                     .WithFlag(8, out field_126, name: "REG_C_43_FIELD_9")
-                    .WithFlag(9, name: "REG_C_43_FIELD_10")
-                    .WithFlag(10, name: "REG_C_43_FIELD_11")
-                    .WithFlag(11, name: "REG_C_43_FIELD_12")
+                    .WithFlag(9, out field_409[0], name: "REG_C_43_FIELD_10")
+                    .WithFlag(10, out field_409[1], name: "REG_C_43_FIELD_11")
+                    .WithFlag(11, out field_409[2], name: "REG_C_43_FIELD_12")
                     .WithFlag(12, name: "REG_C_43_FIELD_13")
                     .WithFlag(13, name: "REG_C_43_FIELD_14")
                     .WithFlag(14, out field_128, name: "REG_C_43_FIELD_15")
@@ -4150,6 +4159,91 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        private bool PROTIMER_CaptureCompareMatches(uint index)
+        {
+            var channel = PROTIMER_captureCompareChannel[index];
+
+            if(!channel.Field_56.Value || channel.Field_232.Value != Enumeration_Q.EnumerationQValue0)
+            {
+                return false;
+            }
+
+            if(!channel.Field_43.Value && !channel.Field_406.Value)
+            {
+                return false;
+            }
+
+            if(channel.Field_43.Value && channel.Field_44.Value != PROTIMER_baseCounterValue)
+            {
+                return false;
+            }
+
+            if(channel.Field_406.Value && channel.Field_407.Value != PROTIMER_wrapCounterValue)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private void PROTIMER_CaptureOnSyncWordsDetected(bool foundSyncWord0, bool foundSyncWord1, bool foundSyncWord2, bool foundSyncWord3)
+        {
+            for(uint i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
+            {
+                var channel = PROTIMER_captureCompareChannel[i];
+                if(!channel.Field_56.Value || channel.Field_232.Value != Enumeration_Q.EnumerationQValue1)
+                {
+                    continue;
+                }
+
+                var triggered = false;
+                switch(channel.Field_50.Value)
+                {
+                case Enumeration_R.EnumerationRValue4:
+                    triggered = foundSyncWord0;
+                    break;
+                case Enumeration_R.EnumerationRValue5:
+                    triggered = foundSyncWord1;
+                    break;
+                case Enumeration_R.EnumerationRValue6:
+                    triggered = foundSyncWord2;
+                    break;
+                case Enumeration_R.EnumerationRValue7:
+                    triggered = foundSyncWord3;
+                    break;
+                case Enumeration_R.EnumerationRValue8:
+                    triggered = true;
+                    break;
+                }
+
+                if(triggered)
+                {
+                    channel.Capture(PROTIMER_BaseCounterValue, PROTIMER_WrapCounterValue);
+                    PROTIMER_TriggerEvent(PROTIMER_GetCaptureCompareEventFromIndex(i));
+                }
+            }
+        }
+
+        private void PROTIMER_CheckCaptureCompareBaseMatches()
+        {
+            for(uint i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
+            {
+                if(PROTIMER_captureCompareChannel[i].Field_43.Value && PROTIMER_CaptureCompareMatches(i))
+                {
+                    PROTIMER_HandleCaptureCompareMatch(i);
+                }
+            }
+        }
+
+        private void PROTIMER_HandleCaptureCompareMatch(uint index)
+        {
+            PROTIMER_captureCompareChannel[index].Field_155.Value = true;
+            PROTIMER_captureCompareChannel[index].Field_390.Value = true;
+            UpdateInterrupts();
+            PROTIMER_TriggerEvent(PROTIMER_GetCaptureCompareEventFromIndex(index));
+            CaptureCompareEvent?.Invoke(index);
+        }
+
         private void PROTIMER_IncrementBaseCounter(uint increment = 1)
         {
             if(proTimer.Enabled)
@@ -4159,27 +4253,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             PROTIMER_baseCounterValue += increment;
 
-            for(uint i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
-            {
-                var triggered = PROTIMER_captureCompareChannel[i].Field_56.Value
-                    && PROTIMER_captureCompareChannel[i].Field_43.Value
-                    && PROTIMER_captureCompareChannel[i].Field_232.Value == Enumeration_Q.EnumerationQValue0
-                    && PROTIMER_baseCounterValue == PROTIMER_captureCompareChannel[i].Field_44.Value;
-
-                if(triggered)
-                {
-                    PROTIMER_captureCompareChannel[i].Field_155.Value = true;
-                    PROTIMER_captureCompareChannel[i].Field_390.Value = true;
-                    UpdateInterrupts();
-                    PROTIMER_TriggerEvent(PROTIMER_GetCaptureCompareEventFromIndex(i));
-                    CaptureCompareEvent.Invoke(i);
-                }
-            }
+            PROTIMER_CheckCaptureCompareBaseMatches();
 
             if(PROTIMER_baseCounterValue >= field_239.Value)
             {
                 PROTIMER_HandleBaseCounterOverflow();
                 PROTIMER_baseCounterValue = 0x0;
+
+                PROTIMER_CheckCaptureCompareBaseMatches();
             }
         }
 
@@ -4190,7 +4271,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             Array.ForEach(PROTIMER_timeoutCounter, x => x.Update(Enumeration_W.EnumerationWValue3));
 
-            WrapCountOverflowsEvent.Invoke(1);
+            WrapCountOverflowsEvent?.Invoke(1);
         }
 
         private uint MODEM_GetPreambleLengthInBits()
@@ -4223,18 +4304,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             for(uint i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
             {
-                var triggered = PROTIMER_captureCompareChannel[i].Field_56.Value
-                    && PROTIMER_captureCompareChannel[i].Field_406.Value
-                    && PROTIMER_captureCompareChannel[i].Field_232.Value == Enumeration_Q.EnumerationQValue0
-                    && PROTIMER_wrapCounterValue == PROTIMER_captureCompareChannel[i].Field_407.Value;
 
-                if(triggered)
+                if(!PROTIMER_captureCompareChannel[i].Field_43.Value
+                    && PROTIMER_captureCompareChannel[i].Field_406.Value
+                    && PROTIMER_CaptureCompareMatches(i))
                 {
-                    PROTIMER_captureCompareChannel[i].Field_155.Value = true;
-                    PROTIMER_captureCompareChannel[i].Field_390.Value = true;
-                    UpdateInterrupts();
-                    PROTIMER_TriggerEvent(PROTIMER_GetCaptureCompareEventFromIndex(i));
-                    CaptureCompareEvent.Invoke(i);
+                    PROTIMER_HandleCaptureCompareMatch(i);
                 }
             }
 
@@ -4283,7 +4358,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             Array.ForEach(PROTIMER_timeoutCounter, x => x.Update(Enumeration_W.EnumerationWValue2));
 
-            BaseCountOverflowsEvent.Invoke(1);
+            BaseCountOverflowsEvent?.Invoke(1);
         }
 
         private ulong PROTIMER_UsToPreCntOverflowTicks(double timeUs)
@@ -4354,33 +4429,42 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             for(int i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; i++)
             {
-                if(PROTIMER_captureCompareChannel[i].Field_56.Value
-                    && PROTIMER_captureCompareChannel[i].Field_232.Value == Enumeration_Q.EnumerationQValue0)
+                var channel = PROTIMER_captureCompareChannel[i];
+
+                if(!channel.Field_56.Value || channel.Field_232.Value != Enumeration_Q.EnumerationQValue0)
                 {
+                    continue;
+                }
 
-                    if(PROTIMER_captureCompareChannel[i].Field_43.Value
-                        && field_238.Value == Enumeration_P.EnumerationPValue1
-                        && PROTIMER_captureCompareChannel[i].Field_44.Value > PROTIMER_baseCounterValue)
-                    {
-                        uint temp = (uint)(PROTIMER_captureCompareChannel[i].Field_44.Value - PROTIMER_baseCounterValue);
-                        if(temp < limit)
-                        {
-                            limit = temp;
-                        }
-                        PROTIMER_preCounterSourcedBitmask |= ((uint)Enumeration_T.EnumerationTValue5 << i);
-                    }
+                var compoundCompare = channel.Field_43.Value && channel.Field_406.Value;
 
-                    if(PROTIMER_captureCompareChannel[i].Field_406.Value
-                        && field_297.Value == Enumeration_Y.EnumerationYValue1
-                        && PROTIMER_captureCompareChannel[i].Field_407.Value > PROTIMER_wrapCounterValue)
+                if(compoundCompare && channel.Field_407.Value != PROTIMER_wrapCounterValue)
+                {
+                    continue;
+                }
+
+                if(channel.Field_43.Value
+                    && field_238.Value == Enumeration_P.EnumerationPValue1
+                    && channel.Field_44.Value > PROTIMER_baseCounterValue)
+                {
+                    uint temp = (uint)(channel.Field_44.Value - PROTIMER_baseCounterValue);
+                    if(temp < limit)
                     {
-                        uint temp = (uint)(PROTIMER_captureCompareChannel[i].Field_407.Value - PROTIMER_wrapCounterValue);
-                        if(temp < limit)
-                        {
-                            limit = temp;
-                        }
-                        PROTIMER_preCounterSourcedBitmask |= ((uint)Enumeration_T.EnumerationTValue5 << i);
+                        limit = temp;
                     }
+                    PROTIMER_preCounterSourcedBitmask |= ((uint)Enumeration_T.EnumerationTValue5 << i);
+                }
+
+                if(channel.Field_406.Value && !compoundCompare
+                    && field_297.Value == Enumeration_Y.EnumerationYValue1
+                    && channel.Field_407.Value > PROTIMER_wrapCounterValue)
+                {
+                    uint temp = (uint)(channel.Field_407.Value - PROTIMER_wrapCounterValue);
+                    if(temp < limit)
+                    {
+                        limit = temp;
+                    }
+                    PROTIMER_preCounterSourcedBitmask |= ((uint)Enumeration_T.EnumerationTValue5 << i);
                 }
             }
 
@@ -4446,7 +4530,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
             }
 
-            PreCountOverflowsEvent.Invoke(overflowCount);
+            PreCountOverflowsEvent?.Invoke(overflowCount);
 
         }
 
@@ -4916,7 +5000,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             if(field_103.Value)
             {
-                FRC_RestoreRxDescriptorsBufferWriteOffset();
+                FRC_RestoreActiveRxDescriptorBufferWriteOffset();
             }
 
             RAC_UpdateRadioStateMachine(Enumeration_AC.EnumerationACValue27);
@@ -4987,13 +5071,151 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
-        private bool FRC_TxLeadingSyncDescriptorActive()
+        private int FRC_SequenceFrameDescriptor(Enumeration_H mode, int firstDescriptor, int completedSubframes)
         {
-            return field_212.Value
+            switch(mode)
+            {
+            case Enumeration_H.EnumerationHValue0:
+                return firstDescriptor;
+            case Enumeration_H.EnumerationHValue1:
+                return firstDescriptor + (completedSubframes % 2);
+            case Enumeration_H.EnumerationHValue2:
+                return firstDescriptor + ((completedSubframes > 0) ? 1 : 0);
+            case Enumeration_H.EnumerationHValue3:
+                return firstDescriptor + 1;
+            default:
+                this.Log(LogLevel.Error, "Invalid FCD mode ({0}).", mode);
+                return firstDescriptor;
+            }
+        }
+
+        private void FRC_ResetWordCounter()
+        {
+            field_146.Value = 0;
+            FRC_UpdateWordCounterCompareInterrupts(0, 0);
+        }
+
+        private void FRC_AdvanceWordCounter(uint words)
+        {
+            var previous = (uint)field_146.Value;
+            field_146.Value = previous + words;
+            FRC_UpdateWordCounterCompareInterrupts(previous + 1, previous + words);
+        }
+
+        private void FRC_UpdateWordCounterCompareInterrupts(uint firstWordReached, uint lastWordReached)
+        {
+            var compareValues = new uint[]
+            {
+                (uint)field_70.Value,
+                (uint)field_73.Value,
+                (uint)field_60.Value,
+            };
+
+            var raised = false;
+            for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
+            {
+                if(compareValues[channel] < firstWordReached || compareValues[channel] > lastWordReached)
+                {
+                    continue;
+                }
+
+                field_410[channel].Value = true;
+                field_408[channel].Value = true;
+                raised = true;
+            }
+
+            if(raised)
+            {
+                UpdateInterrupts();
+            }
+        }
+
+        private bool FRC_SubframeExcludedFromWordCounter(FRC_FrameDescriptor descriptor, int index)
+        {
+            if(!descriptor.Field_57.Value)
+            {
+                return false;
+            }
+
+            if(descriptor.UnlimitedWords)
+            {
+                this.Log(LogLevel.Error, "FCD{0} sets EXCLUDESUBFRAMEWCNT together with an unlimited WORDS, counting the subframe in WCNT instead.", index);
+                return false;
+            }
+
+            return true;
+        }
+
+        private bool FRC_TxLeadingSyncDescriptor(int index)
+        {
+            return index == 0
+                   && field_212.Value
                    && MODEM_GetRadioSymbolCoding() == RadioSymbolCoding.Linecode
                    && field_141.Value == Enumeration_H.EnumerationHValue2
-                   && !FRC_frameDescriptor[0].Field_49.Value
+                   && !FRC_frameDescriptor[0].Field_153.Value
                    && FRC_frameDescriptor[0].Words == MODEM_SyncWordBytes;
+        }
+
+        private bool FRC_TxLeadingDescriptorContributesNoData(int index)
+        {
+            return FRC_TxLeadingSyncDescriptor(index)
+                   || bufferController.BytesAvailable(FRC_frameDescriptor[index].BufferIndex) == 0;
+        }
+
+        private void FRC_ResolveLeadingTransmitFrameDescriptor()
+        {
+            for(var skipped = 0; skipped < FRC_NumberOfFrameDescriptors; ++skipped)
+            {
+                var current = FRC_ActiveTransmitFrameDescriptor;
+                if(!FRC_TxLeadingDescriptorContributesNoData(current))
+                {
+                    return;
+                }
+
+                var next = FRC_SequenceFrameDescriptor(field_141.Value, FRC_FirstTransmitFrameDescriptor, skipped + 1);
+                if(next == current)
+                {
+                    return;
+                }
+
+                FRC_ActiveTransmitFrameDescriptor = next;
+            }
+        }
+
+        private bool FRC_RxLeadingSyncDescriptor(int index)
+        {
+            if(index != FRC_FirstReceiveFrameDescriptor
+               || field_106.Value != Enumeration_H.EnumerationHValue2
+               || !field_212.Value)
+            {
+                return false;
+            }
+
+            var descriptor = FRC_frameDescriptor[index];
+            return !descriptor.Field_153.Value
+                   && descriptor.Words == MODEM_SyncWordBytes
+                   && (descriptor.Field_57.Value
+                       || MODEM_GetRadioSymbolCoding() == RadioSymbolCoding.Linecode);
+        }
+
+        private void FRC_ResolveLeadingReceiveFrameDescriptor()
+        {
+            for(var skipped = 0; skipped < FRC_NumberOfFrameDescriptors; ++skipped)
+            {
+                var current = FRC_ActiveReceiveFrameDescriptor;
+                if(!FRC_RxLeadingSyncDescriptor(current))
+                {
+                    return;
+                }
+
+                var next = FRC_SequenceFrameDescriptor(field_106.Value, FRC_FirstReceiveFrameDescriptor, skipped + 1);
+                if(next == current)
+                {
+                    return;
+                }
+
+                FRC_ActiveReceiveFrameDescriptor = next;
+            }
         }
 
         private byte[] FRC_AssembleFrame()
@@ -5006,10 +5228,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 frame = frame.Concat(BitHelper.GetBytesFromValue(MODEM_TxSyncWord, (int)MODEM_SyncWordBytes, reverse: true));
             }
 
-            if(FRC_TxLeadingSyncDescriptorActive())
-            {
-                FRC_ActiveTransmitFrameDescriptor = 1;
-            }
+            FRC_ResolveLeadingTransmitFrameDescriptor();
 
             var descriptor = FRC_frameDescriptor[FRC_ActiveTransmitFrameDescriptor];
             var frameLength = 0u;
@@ -5042,19 +5261,24 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return new byte[0];
             }
 
-            field_146.Value = 0;
+            FRC_ResetWordCounter();
             for(var subframe = 0; field_146.Value < FRC_FrameLength; ++subframe)
             {
 
-                var crcLength = (descriptor.Field_49.Value && dynamicFrameLength && field_61.Value) ? CRC_CrcWidth : 0;
-
-                var length = Math.Min((uint)(FRC_FrameLength - field_146.Value), descriptor.Words);
-                if(length < crcLength)
+                var crcLength = descriptor.Field_153.Value ? CRC_CrcWidth : 0;
+                var crcCountsInFrameLength = (crcLength > 0) && dynamicFrameLength && field_61.Value;
+                var remaining = (uint)(FRC_FrameLength - field_146.Value);
+                if(crcCountsInFrameLength && remaining < crcLength)
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame (CRC would exceed DFL), partial frame: {0}", BitConverter.ToString(frame.ToArray()));
                     return new byte[0];
                 }
-                length -= crcLength;
+
+                var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveTransmitFrameDescriptor);
+
+                var length = excludeFromWordCounter
+                             ? descriptor.Words
+                             : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
                 if(!bufferController.TryReadBytes(descriptor.BufferIndex, length, out var payload))
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.Concat(payload).ToArray()));
@@ -5062,49 +5286,52 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     return new byte[0];
                 }
                 frame = frame.Concat(payload);
-                field_146.Value += length;
+                if(!excludeFromWordCounter)
+                {
+                    FRC_AdvanceWordCounter(length);
+                }
 
-                if(descriptor.Field_49.Value)
+                if(descriptor.Field_153.Value)
                 {
                     frame = frame.Concat(CRC_CalculateCRC());
-                    field_146.Value += crcLength;
+                    if(crcCountsInFrameLength)
+                    {
+                        FRC_AdvanceWordCounter(crcLength);
+                    }
                 }
 
-                switch(field_141.Value)
+                var nextDescriptor = FRC_SequenceFrameDescriptor(field_141.Value, FRC_FirstTransmitFrameDescriptor, subframe + 1);
+                if(excludeFromWordCounter && nextDescriptor == FRC_ActiveTransmitFrameDescriptor)
                 {
-                case Enumeration_H.EnumerationHValue0:
-                case Enumeration_H.EnumerationHValue3:
-                    break;
-                case Enumeration_H.EnumerationHValue1:
-                    FRC_ActiveTransmitFrameDescriptor = subframe % 2;
-                    break;
-                case Enumeration_H.EnumerationHValue2:
-                    FRC_ActiveTransmitFrameDescriptor = 1;
-                    break;
+                    this.Log(LogLevel.Error, "FCD{0} is excluded from WCNT but the FCD mode never advances past it, aborting frame assembly.",
+                             FRC_ActiveTransmitFrameDescriptor);
+                    return new byte[0];
                 }
+                FRC_ActiveTransmitFrameDescriptor = nextDescriptor;
                 descriptor = FRC_frameDescriptor[FRC_ActiveTransmitFrameDescriptor];
             }
 
-            switch(field_141.Value)
-            {
-            case Enumeration_H.EnumerationHValue0:
-            case Enumeration_H.EnumerationHValue1:
-            case Enumeration_H.EnumerationHValue2:
-                FRC_ActiveTransmitFrameDescriptor = 0;
-                break;
-            case Enumeration_H.EnumerationHValue3:
-                FRC_ActiveTransmitFrameDescriptor = 1;
-                break;
-            }
+            FRC_ActiveTransmitFrameDescriptor = FRC_SequenceFrameDescriptor(field_141.Value, FRC_FirstTransmitFrameDescriptor, 0);
 
             return frame.ToArray();
         }
 
-        private void FRC_SaveRxDescriptorsBufferWriteOffset()
+        private void FRC_ClearRxDescriptorsBuffers()
         {
+            if(!field_101.Value)
+            {
+                return;
+            }
 
-            bufferController.UpdateWriteStartOffset(FRC_frameDescriptor[2].BufferIndex);
-            bufferController.UpdateWriteStartOffset(FRC_frameDescriptor[3].BufferIndex);
+            for(var index = FRC_FirstReceiveFrameDescriptor; index < FRC_NumberOfFrameDescriptors; ++index)
+            {
+                bufferController.Clear(FRC_frameDescriptor[index].BufferIndex);
+            }
+        }
+
+        private void FRC_SaveActiveRxDescriptorBufferWriteOffset()
+        {
+            bufferController.UpdateWriteStartOffset(FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor].BufferIndex);
         }
 
         private void FRC_SnifferTransmitFrame(byte[] frame)
@@ -5168,26 +5395,34 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     return; 
                 }
 
-                field_146.Value = 0;
+                FRC_ResetWordCounter();
                 currentDisassembleSubFrame = 0;
                 currentDisassembleSubFrameStartWord = 0;
+                currentDisassembleSubFrameBytes = 0;
                 currentFrameOffset = startOffset;
+
+                FRC_ResolveLeadingReceiveFrameDescriptor();
             }
 
             while(field_146.Value < FRC_FrameLength && currentFrameOffset < endOffset)
             {
                 var descriptor = FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor];
 
-                var crcLength = (descriptor.Field_49.Value && dynamicFrameLength && field_61.Value) ? CRC_CrcWidth : 0;
-                var subframeTotal = Math.Min(FRC_FrameLength - currentDisassembleSubFrameStartWord, descriptor.Words);
-                if(subframeTotal < crcLength)
+                var crcLength = descriptor.Field_153.Value ? CRC_CrcWidth : 0;
+                var crcCountsInFrameLength = (crcLength > 0) && dynamicFrameLength && field_61.Value;
+                var remaining = FRC_FrameLength - currentDisassembleSubFrameStartWord;
+                if(crcCountsInFrameLength && remaining < crcLength)
                 {
                     this.Log(LogLevel.Error, "frame too small to contain CRC");
                     return;
                 }
-                var payloadTotal = subframeTotal - crcLength;
-                var bytesConsumed = field_146.Value - currentDisassembleSubFrameStartWord;
-                var bytesToWrite = (uint)Math.Min((long)(payloadTotal - bytesConsumed), (long)(endOffset - currentFrameOffset));
+
+                var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveReceiveFrameDescriptor);
+
+                var payloadTotal = excludeFromWordCounter
+                                   ? descriptor.Words
+                                   : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
+                var bytesToWrite = (uint)Math.Min((long)(payloadTotal - currentDisassembleSubFrameBytes), (long)(endOffset - currentFrameOffset));
                 if(currentFrameOffset + bytesToWrite > (uint)currentFrame.Length)
                 {
                     this.Log(LogLevel.Error, "frame too small, payload");
@@ -5203,8 +5438,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                     var captureOffset = (field_146.Value + skipCount) - field_77.Value;
                     currentFrameOffset += bytesToWrite;
-                    field_146.Value += bytesToWrite;
-                    bytesConsumed += bytesToWrite;
+                    if(!excludeFromWordCounter)
+                    {
+                        FRC_AdvanceWordCounter(bytesToWrite);
+                    }
+                    currentDisassembleSubFrameBytes += bytesToWrite;
 
                     FRC_WritePacketCaptureBuffer(pktCaptureBuff.ToArray(), (uint)captureOffset);
 
@@ -5221,13 +5459,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     }
                 }
 
-                if(bytesConsumed < payloadTotal)
+                if(currentDisassembleSubFrameBytes < payloadTotal)
                 {
 
                     break;
                 }
 
-                if(descriptor.Field_49.Value)
+                if(descriptor.Field_153.Value)
                 {
                     var crc = currentFrame.Skip((int)currentFrameOffset).Take((int)CRC_CrcWidth).ToArray();
 
@@ -5236,9 +5474,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     {
                         this.Log(LogLevel.Error, "frame too small, crc");
                     }
-                    if(dynamicFrameLength && field_61.Value)
+                    if(crcCountsInFrameLength)
                     {
-                        field_146.Value += (uint)crc.Length;
+                        FRC_AdvanceWordCounter((uint)crc.Length);
                     }
                     if(field_114.Value)
                     {
@@ -5256,20 +5494,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     }
                 }
 
-                switch(field_106.Value)
+                var nextDescriptor = FRC_SequenceFrameDescriptor(field_106.Value, FRC_FirstReceiveFrameDescriptor, currentDisassembleSubFrame + 1);
+                if(excludeFromWordCounter && nextDescriptor == FRC_ActiveReceiveFrameDescriptor)
                 {
-                case Enumeration_H.EnumerationHValue0:
-                case Enumeration_H.EnumerationHValue3:
-                    break;
-                case Enumeration_H.EnumerationHValue1:
-                    FRC_ActiveReceiveFrameDescriptor = 2 + currentDisassembleSubFrame % 2;
-                    break;
-                case Enumeration_H.EnumerationHValue2:
-                    FRC_ActiveReceiveFrameDescriptor = 3;
-                    break;
+                    this.Log(LogLevel.Error, "FCD{0} is excluded from WCNT but the FCD mode never advances past it, aborting frame disassembly.",
+                             FRC_ActiveReceiveFrameDescriptor);
+                    return;
                 }
+                FRC_ActiveReceiveFrameDescriptor = nextDescriptor;
                 currentDisassembleSubFrame++;
                 currentDisassembleSubFrameStartWord = (uint)field_146.Value;
+                currentDisassembleSubFrameBytes = 0;
             }
 
             if(!isFrameEnd)
@@ -5284,7 +5519,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 if(field_99.Value)
                 {
 
-                    bufferController.WriteData(descriptor.BufferIndex, 0x0);
+                    bufferController.WriteData(descriptor.BufferIndex, (byte)AGC_FrameRssiIntegerPartAdjusted);
                 }
                 if(field_100.Value)
                 {
@@ -5312,25 +5547,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
             }
 
-            switch(field_106.Value)
-            {
-            case Enumeration_H.EnumerationHValue0:
-            case Enumeration_H.EnumerationHValue1:
-            case Enumeration_H.EnumerationHValue2:
-                FRC_ActiveReceiveFrameDescriptor = 2;
-                break;
-            case Enumeration_H.EnumerationHValue3:
-                FRC_ActiveReceiveFrameDescriptor = 3;
-                break;
-            }
+            FRC_ActiveReceiveFrameDescriptor = FRC_SequenceFrameDescriptor(field_106.Value, FRC_FirstReceiveFrameDescriptor, 0);
 
         }
 
-        private void FRC_RestoreRxDescriptorsBufferWriteOffset()
+        private void FRC_RestoreActiveRxDescriptorBufferWriteOffset()
         {
-
-            bufferController.RestoreWriteOffset(FRC_frameDescriptor[2].BufferIndex);
-            bufferController.RestoreWriteOffset(FRC_frameDescriptor[3].BufferIndex);
+            bufferController.RestoreWriteOffset(FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor].BufferIndex);
         }
 
         private bool FRC_TrySetFrameLength(uint frameLength)
@@ -5397,36 +5620,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             PROTIMER_TriggerEvent(PROTIMER_Event.Syncword0Or1Detected);
 
-            for(uint i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
-            {
-                if(PROTIMER_captureCompareChannel[i].Field_56.Value && PROTIMER_captureCompareChannel[i].Field_232.Value == Enumeration_Q.EnumerationQValue1)
-                {
-                    var triggered = false;
-                    switch(PROTIMER_captureCompareChannel[i].Field_50.Value)
-                    {
-                    case Enumeration_R.EnumerationRValue4:
-                        triggered |= foundSyncWord0;
-                        break;
-                    case Enumeration_R.EnumerationRValue5:
-                        triggered |= foundSyncWord1;
-                        break;
-                    case Enumeration_R.EnumerationRValue6:
-                        triggered |= foundSyncWord2;
-                        break;
-                    case Enumeration_R.EnumerationRValue7:
-                        triggered |= foundSyncWord3;
-                        break;
-                    case Enumeration_R.EnumerationRValue8:
-                        triggered = true;
-                        break;
-                    }
-                    if(triggered)
-                    {
-                        PROTIMER_captureCompareChannel[i].Capture(PROTIMER_BaseCounterValue, PROTIMER_WrapCounterValue);
-                        PROTIMER_TriggerEvent(PROTIMER_GetCaptureCompareEventFromIndex(i));
-                    }
-                }
-            }
+            PROTIMER_CaptureOnSyncWordsDetected(foundSyncWord0, foundSyncWord1, foundSyncWord2, foundSyncWord3);
 
             field_179.Value |= foundSyncWord0;
             field_191.Value = field_179.Value;
@@ -5526,6 +5720,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             machine.ClockSource.ExecuteInLock(delegate
             {
                 Enumeration_AB previousState = RAC_currentRadioState;
+                bool forceLoopTransition = false;
 
                 if(signal == Enumeration_AC.EnumerationACValue1)
                 {
@@ -5637,10 +5832,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                             if(field_371.Value == Enumeration_AB.EnumerationABValue6
                                 && !RAC_TxEnable)
                             {
-
+                                forceLoopTransition = true;
                             }
                             else if(field_371.Value == Enumeration_AB.EnumerationABValue2
-                                     && !RAC_RxEnable)
+                                     && (!RAC_RxEnable || signal == Enumeration_AC.EnumerationACValue13))
                             {
                                 RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue4);
                             }
@@ -5690,7 +5885,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                             {
                                 RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue1);
                             }
-                            else if(!RAC_RxEnable)
+
+                            else if(!RAC_RxEnable || signal == Enumeration_AC.EnumerationACValue13)
                             {
                                 RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue4);
                             }
@@ -5737,9 +5933,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                             && (!field_339.Value || !field_338.Value))
                         {
                             if(field_314.Value == Enumeration_AB.EnumerationABValue2
-                                && !RAC_RxEnable)
+                                && (!RAC_RxEnable || signal == Enumeration_AC.EnumerationACValue13))
                             {
-
+                                forceLoopTransition = true;
                             }
                             else if(field_314.Value == Enumeration_AB.EnumerationABValue6
                                      && !RAC_TxEnable)
@@ -5771,8 +5967,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     }
                 }
 
-                if(previousState != RAC_currentRadioState)
+                if(previousState != RAC_currentRadioState || forceLoopTransition)
                 {
+                    if(forceLoopTransition)
+                    {
+                        RAC_ChangeRadioState(RAC_currentRadioState, allowSelfTransition: true);
+                    }
+
                     this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "RSM Update at {0}, signal:{1} channel={2} ({3}), transition: {4}->{5} (TX={6} RX={7}) Lbt={8}",
                              GetTime(), signal, LogicalChannel, MODEM_GetPhySignature(), previousState, RAC_currentRadioState, RAC_internalTxState, RAC_internalRxState, PROTIMER_listenBeforeTalkState);
 
@@ -5820,6 +6021,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     case Enumeration_AB.EnumerationABValue4:
                         field_340.Value = true;
                         field_338.Value = true;
+
+                        field_314.Value = Enumeration_AB.EnumerationABValue4;
                         break;
                     case Enumeration_AB.EnumerationABValue5:
                         field_352.Value = true;
@@ -5835,6 +6038,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     case Enumeration_AB.EnumerationABValue7:
                         field_356.Value = true;
                         field_354.Value = true;
+
+                        field_371.Value = Enumeration_AB.EnumerationABValue7;
                         break;
                     case Enumeration_AB.EnumerationABValue8:
                         field_342.Value = true;
@@ -5892,9 +6097,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RAC_ClearOngoingTx();
         }
 
-        private void RAC_ChangeRadioState(Enumeration_AB newState)
+        private void RAC_ChangeRadioState(Enumeration_AB newState, bool allowSelfTransition = false)
         {
-            if(newState != RAC_currentRadioState)
+            if(newState != RAC_currentRadioState || allowSelfTransition)
             {
                 RAC_previous3RadioState = RAC_previous2RadioState;
                 RAC_previous2RadioState = RAC_previous1RadioState;
@@ -5938,7 +6143,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 RAC_UpdateRadioStateMachine(Enumeration_AC.EnumerationACValue8);
                 RAC_internalRxState = Enumeration_Z.EnumerationZValue2;
-                FRC_SaveRxDescriptorsBufferWriteOffset();
+                FRC_ClearRxDescriptorsBuffers();
+                FRC_SaveActiveRxDescriptorBufferWriteOffset();
                 currentFrameOffset = MODEM_SyncWordBytes;
                 currentFrameByteOverTheAirTimeUs = MODEM_GetByteOverTheAirTimeUs();
 
@@ -5994,7 +6200,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 if(field_102.Value & !field_94.Value)
                 {
-                    FRC_RestoreRxDescriptorsBufferWriteOffset();
+                    FRC_RestoreActiveRxDescriptorBufferWriteOffset();
                 }
             }
 
@@ -6854,6 +7060,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private uint currentFrameCodedSymbolsPerInfoBit = 0;
         private int currentDisassembleSubFrame = 0;
         private uint currentDisassembleSubFrameStartWord = 0;
+
+        private uint currentDisassembleSubFrameBytes = 0;
         private SiLabs_ICMU cmu;
 
         private readonly IValueRegisterField[] field_375 = new IValueRegisterField[RFMAILBOX_MessageNumber];
@@ -6875,6 +7083,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly IValueRegisterField[] field_360 = new IValueRegisterField[RAC_NumberOfSequencerStorageRegisters];
         private readonly byte[] FRC_packetBufferCapture;
         private readonly FRC_FrameDescriptor[] FRC_frameDescriptor;
+        private readonly IFlagRegisterField[] field_410 = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
+        private readonly IFlagRegisterField[] field_411 = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
+        private readonly IFlagRegisterField[] field_408 = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
+        private readonly IFlagRegisterField[] field_409 = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
         private readonly Machine machine;
         private readonly CV32E40P sequencer;
         private readonly SiLabs_IRvConfig sequencerConfig;
@@ -6904,6 +7116,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private const ulong HalfMicrosecondFrequency = 2000000UL;
         const int SNIFF_SYNCWORD_SERIAL_LEN = 4;
         private const uint FRC_NumberOfFrameDescriptors = 4;
+
+        private const int FRC_FirstTransmitFrameDescriptor = 0;
+        private const int FRC_FirstReceiveFrameDescriptor = 2;
+
+        private const int FRC_NumberOfWordCounterCompareChannels = 3;
         private const uint FRC_PacketBufferCaptureSize = 48;
         private const uint FRC_RxFragmentLengthInBytes = 4;
 
@@ -7139,16 +7356,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             public uint Words => (uint)(Field_403.Value + 1);
 
+            public bool UnlimitedWords => Field_403.Value == 0xFF;
+
             public uint BufferIndex => (uint)Field_45.Value;
 
             public IValueRegisterField Field_403;
             public IValueRegisterField Field_45;
+
             public IFlagRegisterField Field_153;
             public IFlagRegisterField Field_49;
             public IValueRegisterField Field_55;
             public IFlagRegisterField Field_397;
             public IFlagRegisterField Field_40;
-
             public IFlagRegisterField Field_57;
         }
 

@@ -15,15 +15,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
     {
         public SiLabs_LFXO_2(Machine machine) : base(machine)
         {
-            Define_Registers();
         }
 
         partial void LFXO_Reset()
         {
             oscillatorOnDemand = false;
             oscillatorForce = false;
-
-            registers.Reset();
         }
 
         private void BusFault(uint exception)
@@ -113,6 +110,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         private bool OscillatorUsed
         {
             get { return oscillatorForce || (oscillatorOnDemand && cmu.OscLfxoRequested); }
+        }
+
+        private bool isEnabled
+        {
+            get { return OscillatorUsed; }
         }
 
         private bool oscillatorOnDemand = false;

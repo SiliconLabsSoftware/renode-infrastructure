@@ -15,13 +15,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             oscillatorOnDemand = false;
             oscillatorForce = false;
-
-            Define_Registers();
         }
 
         partial void LFRCO_Reset()
         {
-            registers.Reset();
         }
 
         partial void Ctrl_Forceen_Write(bool a, bool b)
@@ -61,7 +58,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             get { return oscillatorForce || (oscillatorOnDemand && cmu.OscLfrcoRequested); }
         }
 
-        private bool IsEnabled
+        private bool isEnabled
         {
             get { return IsUsed; }
         }

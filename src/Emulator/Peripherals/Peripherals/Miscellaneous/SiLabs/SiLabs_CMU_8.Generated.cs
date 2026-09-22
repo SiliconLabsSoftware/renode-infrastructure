@@ -24,7 +24,7 @@ using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    public partial class SiLabs_CMU_8 : BasicDoubleWordPeripheral, IKnownSize, SiLabs_IRegisterAccess
+    public partial class SiLabs_CMU_8 : BasicDoubleWordPeripheral, IKnownSize
     {
 
         private void Define_Registers()
@@ -3431,7 +3431,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         public override uint ReadDoubleWord(long address)
         {
-            OnRegisterAccess?.Invoke();
             long temp = address & 0x0FFF;
             switch(address & 0x3000)
             {
@@ -3445,7 +3444,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         public override void WriteDoubleWord(long address, uint value)
         {
-            OnRegisterAccess?.Invoke();
             long temp = address & 0x0FFF;
             switch(address & 0x3000)
             {
@@ -3466,8 +3464,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     break;
             }           
         }
-
-        public Action OnRegisterAccess { get; set; }
 
         protected enum Registers
         {

@@ -11,10 +11,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
     public partial class SiLabs_HFRCO_1 : BasicDoubleWordPeripheral, IKnownSize
     {
-        //------------------------------
-        public SiLabs_HFRCO_1(Machine machine) : base(machine)
+        public SiLabs_HFRCO_1(Machine machine, uint instance = 0) : base(machine)
         {
             Define_Registers();
+            localInstance = instance;
         }
 
         partial void HFRCO_Reset()
@@ -67,16 +67,17 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             get
             {
                 return oscillatorForce
-                    || (oscillatorOnDemand || cmu.OscHfrcoRequested);
+                    || (oscillatorOnDemand || cmu.OscHfrcoRequested(localInstance));
             }
         }
 
         private bool isEnabled
         {
-            get { return cmu.OscHfrcoEnabled; }
+            get { return cmu.OscHfrcoEnabled(localInstance); }
         }
 
         private bool oscillatorOnDemand = false;
         private bool oscillatorForce = false;
+        private readonly uint localInstance = 0;
     }
 }

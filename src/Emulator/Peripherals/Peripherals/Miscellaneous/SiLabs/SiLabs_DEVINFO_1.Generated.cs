@@ -1,38 +1,16 @@
 //
-// Copyright (c) 2010-2025 Silicon Labs
+// Copyright (c) 2010-2026 Silicon Labs
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
 /*  WARNING: Auto-Generated Peripheral  -  DO NOT EDIT
-    DEVINFO, Generated on : 2024-08-05 17:50:38.273238
+    DEVINFO, Generated on : 2026-08-14 17:17:24.224961
     DEVINFO, ID Version : 12af773e0bc64b7ab54b37e74a2b4aa6.1 */
 
-/* Here is the template for your defined by hand class. Don't forget to add your eventual constructor with extra parameter.
-
-* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 
-using System;
-using System.IO;
-using System.Collections.Generic;
-using Antmicro.Renode.Core;
-using Antmicro.Renode.Core.Structure.Registers;
-using Antmicro.Renode.Logging;
-using Antmicro.Renode.Exceptions;
-using Antmicro.Renode.Peripherals.CPU;
-using Antmicro.Renode.Peripherals.Bus;
-
-namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
-{
-    public partial class SiLabs_DEVINFO_1
-    {
-        public SiLabs_DEVINFO_1(Machine machine) : base(machine)
-        {
-            SiLabs_DEVINFO_1_constructor();
-        }
-    }
-}
-* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+// Note: The constructor has been removed from the auto-generated code.
+// Please implement your own constructor in a separate partial class file (.impl).
 
 using System;
 using System.IO;
@@ -42,18 +20,13 @@ using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    public partial class SiLabs_DEVINFO_1 : BasicDoubleWordPeripheral, IKnownSize
+    public partial class SiLabs_DEVINFO_1 : SiLabsPeripheral
     {
-        public SiLabs_DEVINFO_1(Machine machine) : base(machine)
-        {
-            Define_Registers();
-            SiLabs_DEVINFO_1_Constructor();
-        }
-
-        private void Define_Registers()
+        protected override DoubleWordRegisterCollection BuildRegistersCollection()
         {
             var registersMap = new Dictionary<long, DoubleWordRegister>
             {
@@ -77,7 +50,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 {(long)Registers.Main1_Moduleinfo, GenerateMain1_moduleinfoRegister()},
                 {(long)Registers.Main1_Legacy, GenerateMain1_legacyRegister()},
             };
-            registers = new DoubleWordRegisterCollection(this, registersMap);
+            return new DoubleWordRegisterCollection(this, registersMap);
         }
 
         public override void Reset()
@@ -87,7 +60,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
         
         // Main0_Revision - Offset : 0x100
-        protected DoubleWordRegister  GenerateMain0_revisionRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_revisionRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main0_revision_datarevision_field, 
                     valueProviderCallback: (_) => {
@@ -103,7 +76,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Revision_Write(_, __));
         
         // Main0_Embmsize - Offset : 0x104
-        protected DoubleWordRegister  GenerateMain0_embmsizeRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_embmsizeRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 16, out main0_embmsize_nvm_field, 
                     valueProviderCallback: (_) => {
@@ -141,7 +114,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Embmsize_Write(_, __));
         
         // Main0_Stackmsize - Offset : 0x108
-        protected DoubleWordRegister  GenerateMain0_stackmsizeRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_stackmsizeRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 16, out main0_stackmsize_flash_field, 
                     valueProviderCallback: (_) => {
@@ -168,7 +141,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Stackmsize_Write(_, __));
         
         // Main0_Swcapa - Offset : 0x10C
-        protected DoubleWordRegister  GenerateMain0_swcapaRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_swcapaRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main0_swcapa_dataswcapa_field, 
                     valueProviderCallback: (_) => {
@@ -184,7 +157,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Swcapa_Write(_, __));
         
         // Main0_Hfrcocaldefault - Offset : 0x110
-        protected DoubleWordRegister  GenerateMain0_hfrcocaldefaultRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_hfrcocaldefaultRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main0_hfrcocaldefault_datahfrcocaldefault_field, 
                     valueProviderCallback: (_) => {
@@ -200,7 +173,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Hfrcocaldefault_Write(_, __));
         
         // Main0_Hfrcocalspeed - Offset : 0x114
-        protected DoubleWordRegister  GenerateMain0_hfrcocalspeedRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_hfrcocalspeedRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main0_hfrcocalspeed_datahfrcocalspeed_field, 
                     valueProviderCallback: (_) => {
@@ -216,7 +189,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Hfrcocalspeed_Write(_, __));
         
         // Main0_Eui64l - Offset : 0x118
-        protected DoubleWordRegister  GenerateMain0_eui64lRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_eui64lRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main0_eui64l_dataeui64l_field, 
                     valueProviderCallback: (_) => {
@@ -232,7 +205,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Eui64l_Write(_, __));
         
         // Main0_Eui64h - Offset : 0x11C
-        protected DoubleWordRegister  GenerateMain0_eui64hRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_eui64hRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main0_eui64h_dataeui64h_field, 
                     valueProviderCallback: (_) => {
@@ -248,7 +221,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Eui64h_Write(_, __));
         
         // Main0_Part - Offset : 0x120
-        protected DoubleWordRegister  GenerateMain0_partRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain0_partRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main0_part_datapart_field, 
                     valueProviderCallback: (_) => {
@@ -264,7 +237,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main0_Part_Write(_, __));
         
         // Spare0_Register_group - Offset : 0x124
-        protected DoubleWordRegister  GenerateSpare0_register_groupRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateSpare0_register_groupRegister() => new DoubleWordRegister(this, 0x0)
             .WithValueField(0, 32, out spare_register_group_dataspare_field[0], 
                     valueProviderCallback: (_) => {
                         Spare_Register_group_Dataspare_ValueProvider(0, _);
@@ -279,7 +252,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Spare_Register_group_Write(0, _, __));
         
         // Spare1_Register_group - Offset : 0x128
-        protected DoubleWordRegister  GenerateSpare1_register_groupRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateSpare1_register_groupRegister() => new DoubleWordRegister(this, 0x0)
             .WithValueField(0, 32, out spare_register_group_dataspare_field[1], 
                     valueProviderCallback: (_) => {
                         Spare_Register_group_Dataspare_ValueProvider(1, _);
@@ -294,7 +267,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Spare_Register_group_Write(1, _, __));
         
         // Spare2_Register_group - Offset : 0x12C
-        protected DoubleWordRegister  GenerateSpare2_register_groupRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateSpare2_register_groupRegister() => new DoubleWordRegister(this, 0x0)
             .WithValueField(0, 32, out spare_register_group_dataspare_field[2], 
                     valueProviderCallback: (_) => {
                         Spare_Register_group_Dataspare_ValueProvider(2, _);
@@ -309,7 +282,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Spare_Register_group_Write(2, _, __));
         
         // Spare3_Register_group - Offset : 0x130
-        protected DoubleWordRegister  GenerateSpare3_register_groupRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateSpare3_register_groupRegister() => new DoubleWordRegister(this, 0x0)
             .WithValueField(0, 32, out spare_register_group_dataspare_field[3], 
                     valueProviderCallback: (_) => {
                         Spare_Register_group_Dataspare_ValueProvider(3, _);
@@ -324,7 +297,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Spare_Register_group_Write(3, _, __));
         
         // Spare4_Register_group - Offset : 0x134
-        protected DoubleWordRegister  GenerateSpare4_register_groupRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateSpare4_register_groupRegister() => new DoubleWordRegister(this, 0x0)
             .WithValueField(0, 32, out spare_register_group_dataspare_field[4], 
                     valueProviderCallback: (_) => {
                         Spare_Register_group_Dataspare_ValueProvider(4, _);
@@ -339,7 +312,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Spare_Register_group_Write(4, _, __));
         
         // Spare5_Register_group - Offset : 0x138
-        protected DoubleWordRegister  GenerateSpare5_register_groupRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateSpare5_register_groupRegister() => new DoubleWordRegister(this, 0x0)
             .WithValueField(0, 32, out spare_register_group_dataspare_field[5], 
                     valueProviderCallback: (_) => {
                         Spare_Register_group_Dataspare_ValueProvider(5, _);
@@ -354,7 +327,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Spare_Register_group_Write(5, _, __));
         
         // Spare6_Register_group - Offset : 0x13C
-        protected DoubleWordRegister  GenerateSpare6_register_groupRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateSpare6_register_groupRegister() => new DoubleWordRegister(this, 0x0)
             .WithValueField(0, 32, out spare_register_group_dataspare_field[6], 
                     valueProviderCallback: (_) => {
                         Spare_Register_group_Dataspare_ValueProvider(6, _);
@@ -369,7 +342,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Spare_Register_group_Write(6, _, __));
         
         // Main1_Hfxocal - Offset : 0x1F4
-        protected DoubleWordRegister  GenerateMain1_hfxocalRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain1_hfxocalRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main1_hfxocal_datahfxocal_field, 
                     valueProviderCallback: (_) => {
@@ -385,7 +358,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main1_Hfxocal_Write(_, __));
         
         // Main1_Moduleinfo - Offset : 0x1F8
-        protected DoubleWordRegister  GenerateMain1_moduleinfoRegister() => new DoubleWordRegister(this, 0x0)
+        protected DoubleWordRegister GenerateMain1_moduleinfoRegister() => new DoubleWordRegister(this, 0x0)
             
             .WithValueField(0, 32, out main1_moduleinfo_datamoduleinfo_field, 
                     valueProviderCallback: (_) => {
@@ -401,7 +374,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main1_Moduleinfo_Write(_, __));
         
         // Main1_Legacy - Offset : 0x1FC
-        protected DoubleWordRegister  GenerateMain1_legacyRegister() => new DoubleWordRegister(this, 0x810000)
+        protected DoubleWordRegister GenerateMain1_legacyRegister() => new DoubleWordRegister(this, 0x810000)
             
             .WithValueField(0, 32, out main1_legacy_datalegacy_field, FieldMode.Read,
                     valueProviderCallback: (_) => {
@@ -415,29 +388,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Main1_Legacy_Write(_, __));
         
 
-        private uint ReadWFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a WFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadLFWSYNC()
-        {
-            this.Log(LogLevel.Warning, "Reading from a LFWSYNC/HVLFWSYNC Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadRFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a RFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        
-
-
-
-        
         // Main0_Revision - Offset : 0x100
     
         protected IValueRegisterField main0_revision_datarevision_field;
@@ -446,7 +396,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Revision_Datarevision_ValueProvider(ulong a);
         partial void Main0_Revision_Write(uint a, uint b);
         partial void Main0_Revision_Read(uint a, uint b);
-        
+
         // Main0_Embmsize - Offset : 0x104
     
         protected IValueRegisterField main0_embmsize_nvm_field;
@@ -465,7 +415,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Embmsize_Sram_ValueProvider(ulong a);
         partial void Main0_Embmsize_Write(uint a, uint b);
         partial void Main0_Embmsize_Read(uint a, uint b);
-        
+
         // Main0_Stackmsize - Offset : 0x108
     
         protected IValueRegisterField main0_stackmsize_flash_field;
@@ -479,7 +429,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Stackmsize_Psram_ValueProvider(ulong a);
         partial void Main0_Stackmsize_Write(uint a, uint b);
         partial void Main0_Stackmsize_Read(uint a, uint b);
-        
+
         // Main0_Swcapa - Offset : 0x10C
     
         protected IValueRegisterField main0_swcapa_dataswcapa_field;
@@ -488,7 +438,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Swcapa_Dataswcapa_ValueProvider(ulong a);
         partial void Main0_Swcapa_Write(uint a, uint b);
         partial void Main0_Swcapa_Read(uint a, uint b);
-        
+
         // Main0_Hfrcocaldefault - Offset : 0x110
     
         protected IValueRegisterField main0_hfrcocaldefault_datahfrcocaldefault_field;
@@ -497,7 +447,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Hfrcocaldefault_Datahfrcocaldefault_ValueProvider(ulong a);
         partial void Main0_Hfrcocaldefault_Write(uint a, uint b);
         partial void Main0_Hfrcocaldefault_Read(uint a, uint b);
-        
+
         // Main0_Hfrcocalspeed - Offset : 0x114
     
         protected IValueRegisterField main0_hfrcocalspeed_datahfrcocalspeed_field;
@@ -506,7 +456,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Hfrcocalspeed_Datahfrcocalspeed_ValueProvider(ulong a);
         partial void Main0_Hfrcocalspeed_Write(uint a, uint b);
         partial void Main0_Hfrcocalspeed_Read(uint a, uint b);
-        
+
         // Main0_Eui64l - Offset : 0x118
     
         protected IValueRegisterField main0_eui64l_dataeui64l_field;
@@ -515,7 +465,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Eui64l_Dataeui64l_ValueProvider(ulong a);
         partial void Main0_Eui64l_Write(uint a, uint b);
         partial void Main0_Eui64l_Read(uint a, uint b);
-        
+
         // Main0_Eui64h - Offset : 0x11C
     
         protected IValueRegisterField main0_eui64h_dataeui64h_field;
@@ -524,7 +474,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Eui64h_Dataeui64h_ValueProvider(ulong a);
         partial void Main0_Eui64h_Write(uint a, uint b);
         partial void Main0_Eui64h_Read(uint a, uint b);
-        
+
         // Main0_Part - Offset : 0x120
     
         protected IValueRegisterField main0_part_datapart_field;
@@ -533,8 +483,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main0_Part_Datapart_ValueProvider(ulong a);
         partial void Main0_Part_Write(uint a, uint b);
         partial void Main0_Part_Read(uint a, uint b);
-        
-        // Spare0_Register_group - Offset : 0x124
+
+        // Spare_Register_group - Offset : 0x124
     
     
         protected IValueRegisterField[] spare_register_group_dataspare_field = new IValueRegisterField[7];
@@ -543,25 +493,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Spare_Register_group_Dataspare_ValueProvider(ulong index, ulong a);
         partial void Spare_Register_group_Write(ulong index, uint a, uint b);
         partial void Spare_Register_group_Read(ulong index, uint a, uint b);
-        
-    
-    
-        
-    
-    
-        
-    
-    
-        
-    
-    
-        
-    
-    
-        
-    
-    
-        
+
         // Main1_Hfxocal - Offset : 0x1F4
     
         protected IValueRegisterField main1_hfxocal_datahfxocal_field;
@@ -570,7 +502,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main1_Hfxocal_Datahfxocal_ValueProvider(ulong a);
         partial void Main1_Hfxocal_Write(uint a, uint b);
         partial void Main1_Hfxocal_Read(uint a, uint b);
-        
+
         // Main1_Moduleinfo - Offset : 0x1F8
     
         protected IValueRegisterField main1_moduleinfo_datamoduleinfo_field;
@@ -579,7 +511,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main1_Moduleinfo_Datamoduleinfo_ValueProvider(ulong a);
         partial void Main1_Moduleinfo_Write(uint a, uint b);
         partial void Main1_Moduleinfo_Read(uint a, uint b);
-        
+
         // Main1_Legacy - Offset : 0x1FC
     
         protected IValueRegisterField main1_legacy_datalegacy_field;
@@ -587,65 +519,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Main1_Legacy_Datalegacy_ValueProvider(ulong a);
         partial void Main1_Legacy_Write(uint a, uint b);
         partial void Main1_Legacy_Read(uint a, uint b);
+
         partial void DEVINFO_Reset();
 
-        partial void SiLabs_DEVINFO_1_Constructor();
-
-        public bool Enabled = true;
-
-        private SiLabs_ICMU _cmu;
-        private SiLabs_ICMU cmu
+        public override bool Enabled
         {
-            get
+            get 
             {
-                if (Object.ReferenceEquals(_cmu, null))
-                {
-                    foreach(var cmu in machine.GetPeripheralsOfType<SiLabs_ICMU>())
-                    {
-                        _cmu = cmu;
-                    }
-                }
-                return _cmu;
-            }
-            set
-            {
-                _cmu = value;
+                // Define isEnabled in your partial class file
+                return isEnabled;
             }
         }
 
-        public override uint ReadDoubleWord(long offset)
-        {
-            long temp = offset & 0x0FFF;
-            switch(offset & 0x3000){
-                case 0x0000:
-                    return registers.Read(offset);
-                default:
-                    this.Log(LogLevel.Warning, "Reading from Set/Clr/Tgl is not supported.");
-                    return registers.Read(temp);
-            }
-        }
-
-        public override void WriteDoubleWord(long address, uint value)
-        {
-            long temp = address & 0x0FFF;
-            switch(address & 0x3000){
-                case 0x0000:
-                    registers.Write(address, value);
-                    break;
-                case 0x1000:
-                    registers.Write(temp, registers.Read(temp) | value);
-                    break;
-                case 0x2000:
-                    registers.Write(temp, registers.Read(temp) & ~value);
-                    break;
-                case 0x3000:
-                    registers.Write(temp, registers.Read(temp) ^ value);
-                    break;
-                default:
-                    this.Log(LogLevel.Error, "writing doubleWord to non existing offset {0:X}, case : {1:X}", address, address & 0x3000);
-                    break;
-            }           
-        }
+        protected override Type RegistersType => typeof(Registers);
 
         protected enum Registers
         {
@@ -728,10 +614,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             Main1_Hfxocal_TGL = 0x31F4,
             Main1_Moduleinfo_TGL = 0x31F8,
             Main1_Legacy_TGL = 0x31FC,
-        }   
-        
-        public long Size => 0x4000;
-
-        protected DoubleWordRegisterCollection registers;
+        }
     }
+
 }
