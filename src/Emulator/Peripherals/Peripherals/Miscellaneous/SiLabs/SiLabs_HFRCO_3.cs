@@ -11,9 +11,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
     public partial class SiLabs_HFRCO_3
     {
-        public SiLabs_HFRCO_3(Machine machine) : base(machine)
+        public SiLabs_HFRCO_3(Machine machine, uint instance = 0) : base(machine)
         {
-            Define_Registers();
+            localInstance = instance;
         }
 
         partial void HFRCO_Reset()
@@ -21,8 +21,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             oscillatorEM23OnDemand = false;
             oscillatorOnDemand = false;
             oscillatorForce = false;
-
-            registers.Reset();
         }
 
         partial void Ctrl_Forceen_Write(bool a, bool b)
@@ -72,17 +70,18 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             get
             {
                 return oscillatorForce
-                    || ((oscillatorOnDemand || oscillatorEM23OnDemand) && cmu.OscHfrcoRequested);
+                    || ((oscillatorOnDemand || oscillatorEM23OnDemand) && cmu.OscHfrcoRequested(localInstance));
             }
         }
 
-        private bool IsEnabled
+        private bool isEnabled
         {
-            get { return cmu.OscHfrcoEnabled; }
+            get { return cmu.OscHfrcoEnabled(localInstance); }
         }
 
         private bool oscillatorEM23OnDemand = false;
         private bool oscillatorOnDemand = false;
         private bool oscillatorForce = false;
+        private readonly uint localInstance = 0;
     }
 }

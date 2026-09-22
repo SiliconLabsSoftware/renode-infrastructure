@@ -56,7 +56,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
         }
 
-        public bool Enabled => enabled.Value;
+        public override bool Enabled => enabled.Value;
 
         public GPIO IRQ { get; }
 

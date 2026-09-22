@@ -587,6 +587,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             currentFrameOffset = 0;
             currentDisassembleSubFrame = 0;
             currentDisassembleSubFrameStartWord = 0;
+            currentDisassembleSubFrameBytes = 0;
             currentFrameByteOverTheAirTimeUs = 0;
             currentFrameElapsedAirtimeUs = 0;
 
@@ -711,6 +712,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                        || (FRC_txRawEventInterrupt.Value && FRC_txRawEventInterruptEnable.Value)
                        || (FRC_packetBufferStartInterrupt.Value && FRC_packetBufferStartInterruptEnable.Value)
                        || (FRC_packetBufferThresholdInterrupt.Value && FRC_packetBufferThresholdInterruptEnable.Value));
+                for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
+                {
+                    irq |= (FRC_wordCounterCompareInterrupt[channel].Value && FRC_wordCounterCompareInterruptEnable[channel].Value);
+                }
                 if(irq)
                 {
                     var interruptFlag = 0U;
@@ -827,6 +832,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                        || (FRC_seqTxRawEventInterrupt.Value && FRC_seqTxRawEventInterruptEnable.Value)
                        || (FRC_seqPacketBufferStartInterrupt.Value && FRC_seqPacketBufferStartInterruptEnable.Value)
                        || (FRC_seqPacketBufferThresholdInterrupt.Value && FRC_seqPacketBufferThresholdInterruptEnable.Value));
+                for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
+                {
+                    irq |= (FRC_seqWordCounterCompareInterrupt[channel].Value && FRC_seqWordCounterCompareInterruptEnable[channel].Value);
+                }
                 if(irq)
                 {
                     var interruptFlag = 0U;
@@ -2583,7 +2592,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(31, name: "DEMODENCLEAR")
                 },
                 {(long)RadioControllerRegisters.ForceStateTransition, new DoubleWordRegister(this)
-                    .WithEnumField<DoubleWordRegister, RAC_RadioState>(0, 3, out RAC_forceStateTransition, writeCallback: (_, __) =>
+                    .WithEnumField<DoubleWordRegister, RAC_RadioState>(0, 4, out RAC_forceStateTransition, writeCallback: (_, __) =>
                         {
                             RAC_forceStateActive.Value = true;
                         }, name: "FORCESTATE")
@@ -2839,7 +2848,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(12, 20)
                 },
                 {(long)FrameControllerRegisters.WordCounterCompare2, new DoubleWordRegister(this)
-                    .WithValueField(0, 12, name: "ADDRFIELDLOC")
+                    .WithValueField(0, 12, out FRC_addressFieldLocation, name: "ADDRFIELDLOC")
                     .WithReservedBits(12, 20)
                 },
                 {(long)FrameControllerRegisters.Command, new DoubleWordRegister(this)
@@ -2920,9 +2929,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out FRC_frameErrorInterrupt, name: "FRAMEERRORIF")
                     .WithFlag(7, name: "BLOCKERRORIF")
                     .WithFlag(8, out FRC_rxOverflowInterrupt, name: "RXOFIF")
-                    .WithFlag(9, name: "WCNTCMP0IF")
-                    .WithFlag(10, name: "WCNTCMP1IF")
-                    .WithFlag(11, name: "WCNTCMP2IF")
+                    .WithFlag(9, out FRC_wordCounterCompareInterrupt[0], name: "WCNTCMP0IF")
+                    .WithFlag(10, out FRC_wordCounterCompareInterrupt[1], name: "WCNTCMP1IF")
+                    .WithFlag(11, out FRC_wordCounterCompareInterrupt[2], name: "WCNTCMP2IF")
                     .WithFlag(12, name: "ADDRERRORIF")
                     .WithFlag(13, name: "BUSERRORIF")
                     .WithFlag(14, out FRC_rxRawEventInterrupt, name: "RXRAWEVENTIF")
@@ -2955,9 +2964,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out FRC_frameErrorInterruptEnable, name: "FRAMEERRORIEN")
                     .WithFlag(7, name: "BLOCKERRORIEN")
                     .WithFlag(8, out FRC_rxOverflowInterruptEnable, name: "RXOFIEN")
-                    .WithFlag(9, name: "WCNTCMP0IEN")
-                    .WithFlag(10, name: "WCNTCMP1IEN")
-                    .WithFlag(11, name: "WCNTCMP2IEN")
+                    .WithFlag(9, out FRC_wordCounterCompareInterruptEnable[0], name: "WCNTCMP0IEN")
+                    .WithFlag(10, out FRC_wordCounterCompareInterruptEnable[1], name: "WCNTCMP1IEN")
+                    .WithFlag(11, out FRC_wordCounterCompareInterruptEnable[2], name: "WCNTCMP2IEN")
                     .WithFlag(12, name: "ADDRERRORIEN")
                     .WithFlag(13, name: "BUSERRORIEN")
                     .WithFlag(14, out FRC_rxRawEventInterruptEnable, name: "RXRAWEVENTIEN")
@@ -2990,9 +2999,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out FRC_seqFrameErrorInterrupt, name: "FRAMEERRORSEQIF")
                     .WithFlag(7, name: "BLOCKERRORSEQIF")
                     .WithFlag(8, out FRC_seqRxOverflowInterrupt, name: "RXOFSEQIF")
-                    .WithFlag(9, name: "WCNTCMP0SEQIF")
-                    .WithFlag(10, name: "WCNTCMP1SEQIF")
-                    .WithFlag(11, name: "WCNTCMP2SEQIF")
+                    .WithFlag(9, out FRC_seqWordCounterCompareInterrupt[0], name: "WCNTCMP0SEQIF")
+                    .WithFlag(10, out FRC_seqWordCounterCompareInterrupt[1], name: "WCNTCMP1SEQIF")
+                    .WithFlag(11, out FRC_seqWordCounterCompareInterrupt[2], name: "WCNTCMP2SEQIF")
                     .WithFlag(12, name: "ADDRERRORSEQIF")
                     .WithFlag(13, name: "BUSERRORSEQIF")
                     .WithFlag(14, out FRC_seqRxRawEventInterrupt, name: "RXRAWEVENTSEQIF")
@@ -3025,9 +3034,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(6, out FRC_seqFrameErrorInterruptEnable, name: "FRAMEERRORSEQIEN")
                     .WithFlag(7, name: "BLOCKERRORSEQIEN")
                     .WithFlag(8, out FRC_seqRxOverflowInterruptEnable, name: "RXOFSEQIEN")
-                    .WithFlag(9, name: "WCNTCMP0SEQIEN")
-                    .WithFlag(10, name: "WCNTCMP1SEQIEN")
-                    .WithFlag(11, name: "WCNTCMP2SEQIEN")
+                    .WithFlag(9, out FRC_seqWordCounterCompareInterruptEnable[0], name: "WCNTCMP0SEQIEN")
+                    .WithFlag(10, out FRC_seqWordCounterCompareInterruptEnable[1], name: "WCNTCMP1SEQIEN")
+                    .WithFlag(11, out FRC_seqWordCounterCompareInterruptEnable[2], name: "WCNTCMP2SEQIEN")
                     .WithFlag(12, name: "ADDRERRORSEQIEN")
                     .WithFlag(13, name: "BUSERRORSEQIEN")
                     .WithFlag(14, out FRC_seqRxRawEventInterruptEnable, name: "RXRAWEVENTSEQIEN")
@@ -3154,7 +3163,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         .WithValueField(12, 2, out FRC_frameDescriptor[i].CrcSkipWords, name: "SKIPCRC")
                         .WithFlag(14, out FRC_frameDescriptor[i].SkipWhitening, name: "SKIPWHITE")
                         .WithFlag(15, out FRC_frameDescriptor[i].AddTrailData, name: "ADDTRAILTXDATA")
-                        .WithReservedBits(16, 16)
+                        .WithFlag(16, out FRC_frameDescriptor[i].ExcludeSubframeFromWcnt, name: "EXCLUDESUBFRAMEWCNT")
+                        .WithReservedBits(17, 15)
                 );
             }
 
@@ -3447,6 +3457,97 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        // A compare match requires every comparator enabled in CCn_CTRL to match on the same tick.
+        // BASE and WRAP are the low and high words of a single 64-bit compare, not two independent
+        // compares: sequencer firmware arms a channel from a 64-bit ptick (PROTIMER_CCTimerStartPtick
+        // writes WRAP=ptick>>32, BASE=ptick&0xFFFFFFFF with WRAPMATCHEN|BASEMATCHEN), so matching on
+        // either half on its own fires up to a full BASECNT cycle early.
+        // PREMATCHEN is not modelled here, see PROTIMER_UpdateCompareTimer.
+        private bool PROTIMER_CaptureCompareMatches(uint index)
+        {
+            var channel = PROTIMER_captureCompareChannel[index];
+
+            if(!channel.Enable.Value || channel.Mode.Value != PROTIMER_CaptureCompareMode.Compare)
+            {
+                return false;
+            }
+
+            // With no comparator enabled there is nothing to match against.
+            if(!channel.BaseMatchEnable.Value && !channel.WrapMatchEnable.Value)
+            {
+                return false;
+            }
+
+            if(channel.BaseMatchEnable.Value && channel.BaseValue.Value != PROTIMER_baseCounterValue)
+            {
+                return false;
+            }
+
+            if(channel.WrapMatchEnable.Value && channel.WrapValue.Value != PROTIMER_wrapCounterValue)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        // Latches the live BASECNT/WRAPCNT into every enabled capture channel whose input source matches the
+        // detected sync word.
+        private void PROTIMER_CaptureOnSyncWordsDetected(bool foundSyncWord0, bool foundSyncWord1, bool foundSyncWord2, bool foundSyncWord3)
+        {
+            for(var i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
+            {
+                var channel = PROTIMER_captureCompareChannel[i];
+                if(!channel.Enable.Value || channel.Mode.Value != PROTIMER_CaptureCompareMode.Capture)
+                {
+                    continue;
+                }
+
+                var triggered = false;
+                switch(channel.CaptureInputSource.Value)
+                {
+                case PROTIMER_CaptureInputSource.DemodulatorFoundSyncWord0:
+                    triggered = foundSyncWord0;
+                    break;
+                case PROTIMER_CaptureInputSource.DemodulatorFoundSyncWord1:
+                    triggered = foundSyncWord1;
+                    break;
+                case PROTIMER_CaptureInputSource.DemodulatorFoundSyncWord0or1:
+                    triggered = foundSyncWord0 || foundSyncWord1;
+                    break;
+                }
+
+                if(triggered)
+                {
+                    channel.Capture(PROTIMER_BaseCounterValue, PROTIMER_WrapCounterValue);
+                    PROTIMER_TriggerEvent((PROTIMER_Event)((uint)PROTIMER_Event.CaptureCompareChannel0Event + i));
+                }
+            }
+        }
+
+        // Evaluates the channels whose compare includes BASECNT. Compound BASE+WRAP compares are
+        // only evaluated here (and never from PROTIMER_IncrementWrapCounter) because BASECNT is the
+        // comparator that advances last: WRAPCNT is a qualifier that has to already hold the target
+        // value by the time BASECNT reaches it.
+        private void PROTIMER_CheckCaptureCompareBaseMatches()
+        {
+            for(uint i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
+            {
+                if(PROTIMER_captureCompareChannel[i].BaseMatchEnable.Value && PROTIMER_CaptureCompareMatches(i))
+                {
+                    PROTIMER_HandleCaptureCompareMatch(i);
+                }
+            }
+        }
+
+        private void PROTIMER_HandleCaptureCompareMatch(uint index)
+        {
+            PROTIMER_captureCompareChannel[index].InterruptField.Value = true;
+            PROTIMER_captureCompareChannel[index].SeqInterruptField.Value = true;
+            UpdateInterrupts();
+            PROTIMER_TriggerEvent((PROTIMER_Event)((uint)PROTIMER_Event.CaptureCompareChannel0Event + index));
+        }
+
         private void PROTIMER_IncrementBaseCounter(uint increment = 1)
         {
             if(proTimer.Enabled)
@@ -3457,26 +3558,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             PROTIMER_baseCounterValue += (ushort)increment;
 
-            for(var i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
-            {
-                var triggered = PROTIMER_captureCompareChannel[i].Enable.Value
-                    && PROTIMER_captureCompareChannel[i].BaseMatchEnable.Value
-                    && PROTIMER_captureCompareChannel[i].Mode.Value == PROTIMER_CaptureCompareMode.Compare
-                    && PROTIMER_baseCounterValue == PROTIMER_captureCompareChannel[i].BaseValue.Value;
-
-                if(triggered)
-                {
-                    PROTIMER_captureCompareChannel[i].InterruptField.Value = true;
-                    PROTIMER_captureCompareChannel[i].SeqInterruptField.Value = true;
-                    UpdateInterrupts();
-                    PROTIMER_TriggerEvent((PROTIMER_Event)((uint)PROTIMER_Event.CaptureCompareChannel0Event + i));
-                }
-            }
+            // BASECNT == BASECNTTOP is only observable here, before the counter rolls over.
+            PROTIMER_CheckCaptureCompareBaseMatches();
 
             if(PROTIMER_baseCounterValue >= PROTIMER_baseCounterTop.Value)
             {
                 PROTIMER_HandleBaseCounterOverflow();
                 PROTIMER_baseCounterValue = 0x0;
+
+                // Re-evaluate against the rolled-over BASECNT and the WRAPCNT the overflow advanced,
+                // so a target sitting at the start of a wrap is not missed.
+                PROTIMER_CheckCaptureCompareBaseMatches();
             }
         }
 
@@ -3515,17 +3607,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             for(var i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
             {
-                var triggered = PROTIMER_captureCompareChannel[i].Enable.Value
+                // Channels that also compare BASECNT are handled by PROTIMER_CheckCaptureCompareBaseMatches().
+                if(!PROTIMER_captureCompareChannel[i].BaseMatchEnable.Value
                     && PROTIMER_captureCompareChannel[i].WrapMatchEnable.Value
-                    && PROTIMER_captureCompareChannel[i].Mode.Value == PROTIMER_CaptureCompareMode.Compare
-                    && PROTIMER_wrapCounterValue == PROTIMER_captureCompareChannel[i].WrapValue.Value;
-
-                if(triggered)
+                    && PROTIMER_CaptureCompareMatches((uint)i))
                 {
-                    PROTIMER_captureCompareChannel[i].InterruptField.Value = true;
-                    PROTIMER_captureCompareChannel[i].SeqInterruptField.Value = true;
-                    UpdateInterrupts();
-                    PROTIMER_TriggerEvent((PROTIMER_Event)((uint)PROTIMER_Event.CaptureCompareChannel0Event + i));
+                    PROTIMER_HandleCaptureCompareMatch((uint)i);
                 }
             }
 
@@ -3702,34 +3789,49 @@ namespace Antmicro.Renode.Peripherals.Wireless
             // Check for Capture/Compare channels that are enabled and set in Compare mode
             for(int i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; i++)
             {
-                if(PROTIMER_captureCompareChannel[i].Enable.Value
-                    && PROTIMER_captureCompareChannel[i].Mode.Value == PROTIMER_CaptureCompareMode.Compare)
-                {
-                    // Base match enabled and base counter is sourced by pre counter overflows
-                    if(PROTIMER_captureCompareChannel[i].BaseMatchEnable.Value
-                        && PROTIMER_baseCounterSource.Value == PROTIMER_BaseCounterSource.PreCounterOverflow
-                        && PROTIMER_captureCompareChannel[i].BaseValue.Value > PROTIMER_baseCounterValue)
-                    {
-                        uint temp = (uint)(PROTIMER_captureCompareChannel[i].BaseValue.Value - PROTIMER_baseCounterValue);
-                        if(temp < limit)
-                        {
-                            limit = temp;
-                        }
-                        PROTIMER_preCounterSourcedBitmask |= ((uint)PROTIMER_PreCountOverflowSourced.CaptureCompareChannel0 << i);
-                    }
+                var channel = PROTIMER_captureCompareChannel[i];
 
-                    // Wrap match enabled and wrap counter is sourced by pre counter overflows
-                    if(PROTIMER_captureCompareChannel[i].WrapMatchEnable.Value
-                        && PROTIMER_wrapCounterSource.Value == PROTIMER_WrapCounterSource.PreCounterOverflow
-                        && PROTIMER_captureCompareChannel[i].WrapValue.Value > PROTIMER_wrapCounterValue)
+                if(!channel.Enable.Value || channel.Mode.Value != PROTIMER_CaptureCompareMode.Compare)
+                {
+                    continue;
+                }
+
+                var compoundCompare = channel.BaseMatchEnable.Value && channel.WrapMatchEnable.Value;
+
+                // A compound BASE+WRAP compare cannot match before WRAPCNT reaches the target wrap,
+                // so while the wrap words differ the BASE target is not an instant of interest. The
+                // limit is still bounded by the BASECNT overflow that advances WRAPCNT, which brings
+                // us back here once the wrap words match.
+                if(compoundCompare && channel.WrapValue.Value != PROTIMER_wrapCounterValue)
+                {
+                    continue;
+                }
+
+                // Base match enabled and base counter is sourced by pre counter overflows
+                if(channel.BaseMatchEnable.Value
+                    && PROTIMER_baseCounterSource.Value == PROTIMER_BaseCounterSource.PreCounterOverflow
+                    && channel.BaseValue.Value > PROTIMER_baseCounterValue)
+                {
+                    uint temp = (uint)(channel.BaseValue.Value - PROTIMER_baseCounterValue);
+                    if(temp < limit)
                     {
-                        uint temp = (uint)(PROTIMER_captureCompareChannel[i].WrapValue.Value - PROTIMER_wrapCounterValue);
-                        if(temp < limit)
-                        {
-                            limit = temp;
-                        }
-                        PROTIMER_preCounterSourcedBitmask |= ((uint)PROTIMER_PreCountOverflowSourced.CaptureCompareChannel0 << i);
+                        limit = temp;
                     }
+                    PROTIMER_preCounterSourcedBitmask |= ((uint)PROTIMER_PreCountOverflowSourced.CaptureCompareChannel0 << i);
+                }
+
+                // Wrap match enabled and wrap counter is sourced by pre counter overflows. For a
+                // compound compare the BASE target above already covers the match instant.
+                if(channel.WrapMatchEnable.Value && !compoundCompare
+                    && PROTIMER_wrapCounterSource.Value == PROTIMER_WrapCounterSource.PreCounterOverflow
+                    && channel.WrapValue.Value > PROTIMER_wrapCounterValue)
+                {
+                    uint temp = (uint)(channel.WrapValue.Value - PROTIMER_wrapCounterValue);
+                    if(temp < limit)
+                    {
+                        limit = temp;
+                    }
+                    PROTIMER_preCounterSourcedBitmask |= ((uint)PROTIMER_PreCountOverflowSourced.CaptureCompareChannel0 << i);
                 }
             }
 
@@ -4276,32 +4378,224 @@ namespace Antmicro.Renode.Peripherals.Wireless
             return Enumerable.Repeat<byte>(0x0, (int)CRC_CrcWidth).ToArray();
         }
 
-        private void FRC_RestoreRxDescriptorsBufferWriteOffset()
+        // BUFRESTOREFRAMEERROR/BUFRESTORERXABORTED save and restore the active receive buffer
+        // selected by ACTIVERXFCD (FCD2 or FCD3).
+        private void FRC_RestoreActiveRxDescriptorBufferWriteOffset()
         {
-            // Descriptors 2 and 3 are used for RX.
-            bufferController.RestoreWriteOffset(FRC_frameDescriptor[2].BufferIndex);
-            bufferController.RestoreWriteOffset(FRC_frameDescriptor[3].BufferIndex);
+            bufferController.RestoreWriteOffset(FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor].BufferIndex);
         }
 
-        private void FRC_SaveRxDescriptorsBufferWriteOffset()
+        // FRC_RXCTRL.BUFCLEAR: the BUFC buffer selected by an RX descriptor is cleared before any frame data is
+        // written to it. Both descriptors of the RX pair are cleared, since either can be selected while the
+        // frame is disassembled, and this runs before the write offsets are saved so that a BUFRESTORE on a
+        // frame error rewinds to the cleared buffer rather than to a stale offset.
+        private void FRC_ClearRxDescriptorsBuffers()
         {
-            // Descriptors 2 and 3 are used for RX.
-            bufferController.UpdateWriteStartOffset(FRC_frameDescriptor[2].BufferIndex);
-            bufferController.UpdateWriteStartOffset(FRC_frameDescriptor[3].BufferIndex);
+            if(!FRC_rxBufferClear.Value)
+            {
+                return;
+            }
+
+            for(var index = FRC_FirstReceiveFrameDescriptor; index < FRC_NumberOfFrameDescriptors; ++index)
+            {
+                bufferController.Clear(FRC_frameDescriptor[index].BufferIndex);
+            }
         }
 
-        // True when the active TX PHY places the sync word in a dedicated leading FCD (FCD0) rather than the
-        // payload, i.e. the BLE LE Coded layout where the FRC generates the access address for the demodulator:
-        // SYNCDATA=1, TXFCDMODE=2 (FCD0 once, then FCD1...), and FCD0 is a CRC-less subframe whose length equals 
-        // the sync word. In that case the sync word is emitted through the modulator sync path and FRC payload 
-        // assembly begins at the payload descriptor (FCD1).
-        private bool FRC_TxLeadingSyncDescriptorActive()
+        private void FRC_SaveActiveRxDescriptorBufferWriteOffset()
         {
-            return MODEM_syncData.Value
+            bufferController.UpdateWriteStartOffset(FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor].BufferIndex);
+        }
+
+        // Descriptor sequencing within a frame, per the FCD modes in the design book: mode 0 always uses the
+        // low descriptor of the pair, mode 3 always the high one, mode 1 alternates between them, and mode 2
+        // uses the low descriptor for the first subframe and the high one for all the remaining subframes.
+        // 'firstDescriptor' selects the pair (FCD0/FCD1 for TX, FCD2/FCD3 for RX) and 'completedSubframes' is
+        // the number of subframes already handled in the frame, so passing 0 yields the descriptor a frame
+        // starts on.
+        private int FRC_SequenceFrameDescriptor(FRC_FrameDescriptorMode mode, int firstDescriptor, int completedSubframes)
+        {
+            switch(mode)
+            {
+            case FRC_FrameDescriptorMode.FrameDescriptorMode0:
+                return firstDescriptor;
+            case FRC_FrameDescriptorMode.FrameDescriptorMode1:
+                return firstDescriptor + (completedSubframes % 2);
+            case FRC_FrameDescriptorMode.FrameDescriptorMode2:
+                return firstDescriptor + ((completedSubframes > 0) ? 1 : 0);
+            case FRC_FrameDescriptorMode.FrameDescriptorMode3:
+                return firstDescriptor + 1;
+            default:
+                this.Log(LogLevel.Error, "Invalid FCD mode ({0}).", mode);
+                return firstDescriptor;
+            }
+        }
+
+        // Resets WCNT at the start of a frame. A compare channel programmed to 0 matches immediately, which is
+        // the usual setting for LENGTHFIELDLOC when the length field is the first word of the frame.
+        private void FRC_ResetWordCounter()
+        {
+            FRC_wordCounter.Value = 0;
+            FRC_UpdateWordCounterCompareInterrupts(0, 0);
+        }
+
+        // Advances WCNT by a number of words and raises the compare interrupts of every value the counter
+        // reaches on the way. Frame assembly and disassembly move WCNT a subframe or a fragment at a time rather
+        // than word by word, so a single advance can cross several compare values.
+        private void FRC_AdvanceWordCounter(uint words)
+        {
+            var previous = (uint)FRC_wordCounter.Value;
+            FRC_wordCounter.Value = previous + words;
+            FRC_UpdateWordCounterCompareInterrupts(previous + 1, previous + words);
+        }
+
+        // The WCNT compare channels hold FRAMELENGTH, LENGTHFIELDLOC and ADDRFIELDLOC, and their flags let
+        // software (or the sequencer) act on the corresponding frame boundary: the end of the frame, the arrival
+        // of the length field, and the arrival of the address field -- the last one doubling as a "N bytes
+        // received" trigger for software frame filtering when hardware address filtering is not used.
+        private void FRC_UpdateWordCounterCompareInterrupts(uint firstWordReached, uint lastWordReached)
+        {
+            var compareValues = new uint[]
+            {
+                (uint)FRC_frameLength.Value,
+                (uint)FRC_lengthFieldLocation.Value,
+                (uint)FRC_addressFieldLocation.Value,
+            };
+
+            var raised = false;
+            for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
+            {
+                if(compareValues[channel] < firstWordReached || compareValues[channel] > lastWordReached)
+                {
+                    continue;
+                }
+
+                FRC_wordCounterCompareInterrupt[channel].Value = true;
+                FRC_seqWordCounterCompareInterrupt[channel].Value = true;
+                raised = true;
+            }
+
+            if(raised)
+            {
+                UpdateInterrupts();
+            }
+        }
+
+        // FRC_FCDn.EXCLUDESUBFRAMEWCNT keeps a subframe's words out of the word counter, so that FRAMELENGTH and
+        // LENGTHFIELDLOC do not count them -- the register description gives the sync word sent as the first
+        // subframe as the example. Such a subframe is bounded by WORDS alone, which makes the unlimited WORDS
+        // sentinel (0xFF, "the rest of the frame") meaningless: it would never terminate, so it is reported and
+        // the subframe is counted normally instead.
+        private bool FRC_SubframeExcludedFromWordCounter(FRC_FrameDescriptor descriptor, int index)
+        {
+            if(!descriptor.ExcludeSubframeFromWcnt.Value)
+            {
+                return false;
+            }
+
+            if(descriptor.UnlimitedWords)
+            {
+                this.Log(LogLevel.Error, "FCD{0} sets EXCLUDESUBFRAMEWCNT together with an unlimited WORDS, counting the subframe in WCNT instead.", index);
+                return false;
+            }
+
+            return true;
+        }
+
+        // True when frame descriptor 'index' is the dedicated leading sync FCD of the BLE LE Coded layout rather
+        // than a payload descriptor: the sync word travels in the data stream (SYNCDATA=1) yet is emitted through
+        // the modulator sync path because the FRC generates the access address for the demodulator in RXSEARCH
+        // (Linecode), TXFCDMODE=2 (FCD0 once, then FCD1...), and the subframe is CRC-less with a length equal to
+        // the sync word.
+        private bool FRC_TxLeadingSyncDescriptor(int index)
+        {
+            return index == 0
+                   && MODEM_syncData.Value
                    && MODEM_GetRadioSymbolCoding() == RadioSymbolCoding.Linecode
                    && FRC_txFrameDescriptorMode.Value == FRC_FrameDescriptorMode.FrameDescriptorMode2
-                   && !FRC_frameDescriptor[0].CalculateCrc.Value
+                   && !FRC_frameDescriptor[0].IncludeCrc.Value
                    && FRC_frameDescriptor[0].Words == MODEM_SyncWordBytes;
+        }
+
+        // True when the leading descriptor of a frame cannot contribute any transmit words of its own, so
+        // hardware moves straight on to the next descriptor in the FCD sequence. Two cases occur in practice:
+        // the descriptor holds the BLE LE Coded access address, which the modulator sync path emits instead, or
+        // the PHY points it at a BUFC buffer the stack never fills because both the payload and the dynamic
+        // length field live in the next descriptor's buffer. This only applies while resolving the first
+        // descriptor of a frame: an empty buffer encountered once assembly is under way is a real underflow.
+        private bool FRC_TxLeadingDescriptorContributesNoData(int index)
+        {
+            return FRC_TxLeadingSyncDescriptor(index)
+                   || bufferController.BytesAvailable(FRC_frameDescriptor[index].BufferIndex) == 0;
+        }
+
+        // Advances the active TX descriptor past any leading descriptors that contribute no data, so that both
+        // the dynamic frame length decoding and the subframe loop start at the descriptor which actually holds
+        // the frame. Bounded by the number of descriptors so a mode that cycles between them cannot spin.
+        private void FRC_ResolveLeadingTransmitFrameDescriptor()
+        {
+            for(var skipped = 0; skipped < FRC_NumberOfFrameDescriptors; ++skipped)
+            {
+                var current = FRC_ActiveTransmitFrameDescriptor;
+                if(!FRC_TxLeadingDescriptorContributesNoData(current))
+                {
+                    return;
+                }
+
+                var next = FRC_SequenceFrameDescriptor(FRC_txFrameDescriptorMode.Value, FRC_FirstTransmitFrameDescriptor, skipped + 1);
+                if(next == current)
+                {
+                    return;
+                }
+
+                this.Log(LogLevel.Debug, "FRC assemble: FCD{0} contributes no data, starting the frame at FCD{1}", current, next);
+                FRC_ActiveTransmitFrameDescriptor = next;
+            }
+        }
+
+        // RX counterpart of FRC_TxLeadingSyncDescriptor: the sync word travels in the data stream (SYNCDATA=1)
+        // but the Demodulator has already removed it before the FRC sees the frame, so a leading descriptor that
+        // only describes that sync word must not consume payload bytes into its buffer. Hardware marks such a
+        // subframe by keeping it out of the word counter (FRC_FCDn.EXCLUDESUBFRAMEWCNT names this exact case) or,
+        // for BLE LE Coded, by having the FRC generate the access address itself.
+        private bool FRC_RxLeadingSyncDescriptor(int index)
+        {
+            if(index != FRC_FirstReceiveFrameDescriptor
+               || FRC_rxFrameDescriptorMode.Value != FRC_FrameDescriptorMode.FrameDescriptorMode2
+               || !MODEM_syncData.Value)
+            {
+                return false;
+            }
+
+            var descriptor = FRC_frameDescriptor[index];
+            return !descriptor.IncludeCrc.Value
+                   && descriptor.Words == MODEM_SyncWordBytes
+                   && (descriptor.ExcludeSubframeFromWcnt.Value
+                       || MODEM_GetRadioSymbolCoding() == RadioSymbolCoding.Linecode);
+        }
+
+        // Advances the active RX descriptor past a leading descriptor that receives nothing, so the first
+        // payload bytes are written to the buffer that is meant to hold them. Bounded like the transmit
+        // counterpart so a mode that cycles between descriptors cannot spin.
+        private void FRC_ResolveLeadingReceiveFrameDescriptor()
+        {
+            for(var skipped = 0; skipped < FRC_NumberOfFrameDescriptors; ++skipped)
+            {
+                var current = FRC_ActiveReceiveFrameDescriptor;
+                if(!FRC_RxLeadingSyncDescriptor(current))
+                {
+                    return;
+                }
+
+                var next = FRC_SequenceFrameDescriptor(FRC_rxFrameDescriptorMode.Value, FRC_FirstReceiveFrameDescriptor, skipped + 1);
+                if(next == current)
+                {
+                    return;
+                }
+
+                this.Log(LogLevel.Debug, "FRC disassemble: FCD{0} receives no data, starting the frame at FCD{1}", current, next);
+                FRC_ActiveReceiveFrameDescriptor = next;
+            }
         }
 
         private byte[] FRC_AssembleFrame()
@@ -4326,15 +4620,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
 
             // The access address of the BLE LE Coded layout lives in a dedicated leading sync FCD, not in the
-            // payload. Since it has already been emitted via the modulator sync path above, FRC payload assembly
-            // must start at the payload descriptor instead of re-emitting the sync FCD as data. This also makes
-            // the dynamic length field and payload read from the payload buffer, matching the hardware WCNT /
-            // FRAMELENGTH which span the payload only (DFLOFFSET accounts for the PDU header, not the access
-            // address).
-            if(FRC_TxLeadingSyncDescriptorActive())
-            {
-                FRC_ActiveTransmitFrameDescriptor = 1;
-            }
+            // payload, and a PHY may equally point the leading FCD at a buffer the stack never fills. Either way
+            // assembly must start at the descriptor that actually holds the frame instead of re-emitting the
+            // sync FCD as data or underflowing on an empty buffer. This also makes the dynamic length field and
+            // payload read from the payload buffer, matching the hardware WCNT / FRAMELENGTH which span the
+            // payload only (DFLOFFSET accounts for the PDU header, not the access address).
+            FRC_ResolveLeadingTransmitFrameDescriptor();
 
             var descriptor = FRC_frameDescriptor[FRC_ActiveTransmitFrameDescriptor];
             var frameLength = 0u;
@@ -4366,24 +4657,29 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return new byte[0];
             }
 
-            FRC_wordCounter.Value = 0;
+            FRC_ResetWordCounter();
             for(var subframe = 0; FRC_wordCounter.Value < FRC_FrameLength; ++subframe)
             {
-                // Hardware semantics: CALCCRC is the bit that marks the subframe whose end carries
-                // the CRC. INCLUDECRC only governs whether the dynamic frame length value is
-                // considered to include those CRC bytes (combined with FRC_DFLCTRL.DFLINCLUDECRC).
-                // So only reserve / emit CRC bytes for descriptors with CALCCRC=1, otherwise the
-                // PHR-only descriptor (e.g. 802.15.4 FCD0 with INCLUDECRC=1, CALCCRC=0) would
-                // incorrectly try to emit a CRC after a 1-byte subframe.
-                var crcLength = (descriptor.CalculateCrc.Value && dynamicFrameLength && FRC_dynamicFrameCrcIncluded.Value) ? CRC_CrcWidth : 0;
-                // Assemble subframe
-                var length = Math.Min((uint)(FRC_FrameLength - FRC_wordCounter.Value), descriptor.Words);
-                if(length < crcLength)
+                // Per FRC_FCDn, INCLUDECRC is the bit that appends the calculated CRC after this subframe's
+                // data, while CALCCRC only selects whether the subframe feeds the CRC accumulator. A subframe
+                // is (WORDS+1) words excluding any CRC it includes, so the CRC is reserved out of the remaining
+                // FRAMELENGTH budget rather than out of WORDS, and only when DFLINCLUDECRC says FRAMELENGTH
+                // counts the CRC bytes at all.
+                var crcLength = descriptor.IncludeCrc.Value ? CRC_CrcWidth : 0;
+                var crcCountsInFrameLength = (crcLength > 0) && dynamicFrameLength && FRC_dynamicFrameCrcIncluded.Value;
+                var remaining = (uint)(FRC_FrameLength - FRC_wordCounter.Value);
+                if(crcCountsInFrameLength && remaining < crcLength)
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame (CRC would exceed DFL), partial frame: {0}", BitConverter.ToString(frame.ToArray()));
                     return new byte[0];
                 }
-                length -= crcLength;
+
+                var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveTransmitFrameDescriptor);
+                // Assemble subframe. An excluded subframe is sized by WORDS alone, since FRAMELENGTH does not
+                // account for its words.
+                var length = excludeFromWordCounter
+                             ? descriptor.Words
+                             : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
                 if(!bufferController.TryReadBytes(descriptor.BufferIndex, length, out var payload))
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.Concat(payload).ToArray()));
@@ -4391,42 +4687,34 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     return new byte[0];
                 }
                 frame = frame.Concat(payload);
-                FRC_wordCounter.Value += length;
+                if(!excludeFromWordCounter)
+                {
+                    FRC_AdvanceWordCounter(length);
+                }
 
-                if(descriptor.CalculateCrc.Value)
+                if(descriptor.IncludeCrc.Value)
                 {
                     frame = frame.Concat(CRC_CalculateCRC());
-                    FRC_wordCounter.Value += crcLength;
+                    if(crcCountsInFrameLength)
+                    {
+                        FRC_AdvanceWordCounter(crcLength);
+                    }
                 }
 
                 // Select next frame descriptor
-                switch(FRC_txFrameDescriptorMode.Value)
+                var nextDescriptor = FRC_SequenceFrameDescriptor(FRC_txFrameDescriptorMode.Value, FRC_FirstTransmitFrameDescriptor, subframe + 1);
+                if(excludeFromWordCounter && nextDescriptor == FRC_ActiveTransmitFrameDescriptor)
                 {
-                case FRC_FrameDescriptorMode.FrameDescriptorMode0:
-                case FRC_FrameDescriptorMode.FrameDescriptorMode3:
-                    break;
-                case FRC_FrameDescriptorMode.FrameDescriptorMode1:
-                    FRC_ActiveTransmitFrameDescriptor = subframe % 2;
-                    break;
-                case FRC_FrameDescriptorMode.FrameDescriptorMode2:
-                    FRC_ActiveTransmitFrameDescriptor = 1;
-                    break;
+                    this.Log(LogLevel.Error, "FCD{0} is excluded from WCNT but the FCD mode never advances past it, aborting frame assembly.",
+                             FRC_ActiveTransmitFrameDescriptor);
+                    return new byte[0];
                 }
+                FRC_ActiveTransmitFrameDescriptor = nextDescriptor;
                 descriptor = FRC_frameDescriptor[FRC_ActiveTransmitFrameDescriptor];
             }
 
             // Prepare for next frame
-            switch(FRC_txFrameDescriptorMode.Value)
-            {
-            case FRC_FrameDescriptorMode.FrameDescriptorMode0:
-            case FRC_FrameDescriptorMode.FrameDescriptorMode1:
-            case FRC_FrameDescriptorMode.FrameDescriptorMode2:
-                FRC_ActiveTransmitFrameDescriptor = 0;
-                break;
-            case FRC_FrameDescriptorMode.FrameDescriptorMode3:
-                FRC_ActiveTransmitFrameDescriptor = 1;
-                break;
-            }
+            FRC_ActiveTransmitFrameDescriptor = FRC_SequenceFrameDescriptor(FRC_txFrameDescriptorMode.Value, FRC_FirstTransmitFrameDescriptor, 0);
 
             this.Log(LogLevel.Noisy, "Frame assembled: {0}", BitConverter.ToString(frame.ToArray()));
             return frame.ToArray();
@@ -4577,30 +4865,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             PROTIMER_TriggerEvent(PROTIMER_Event.Syncword0Or1Detected);
 
-            for(var i = 0; i < PROTIMER_NumberOfCaptureCompareChannels; ++i)
-            {
-                if(PROTIMER_captureCompareChannel[i].Enable.Value && PROTIMER_captureCompareChannel[i].Mode.Value == PROTIMER_CaptureCompareMode.Capture)
-                {
-                    var triggered = false;
-                    switch(PROTIMER_captureCompareChannel[i].CaptureInputSource.Value)
-                    {
-                    case PROTIMER_CaptureInputSource.DemodulatorFoundSyncWord0:
-                        triggered |= foundSyncWord0;
-                        break;
-                    case PROTIMER_CaptureInputSource.DemodulatorFoundSyncWord1:
-                        triggered |= foundSyncWord1;
-                        break;
-                    case PROTIMER_CaptureInputSource.DemodulatorFoundSyncWord0or1:
-                        triggered = true;
-                        break;
-                    }
-                    if(triggered)
-                    {
-                        PROTIMER_captureCompareChannel[i].Capture(PROTIMER_BaseCounterValue, PROTIMER_WrapCounterValue);
-                        PROTIMER_TriggerEvent((PROTIMER_Event)((uint)PROTIMER_Event.CaptureCompareChannel0Event + i));
-                    }
-                }
-            }
+            PROTIMER_CaptureOnSyncWordsDetected(foundSyncWord0, foundSyncWord1, false, false);
 
             MODEM_rxFrameWithSyncWord0DetectedInterrupt.Value |= foundSyncWord0;
             MODEM_seqRxFrameWithSyncWord0DetectedInterrupt.Value = MODEM_rxFrameWithSyncWord0DetectedInterrupt.Value;
@@ -4655,10 +4920,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     return; // FRAMEERROR
                 }
 
-                FRC_wordCounter.Value = 0;
+                FRC_ResetWordCounter();
                 currentDisassembleSubFrame = 0;
                 currentDisassembleSubFrameStartWord = 0;
+                currentDisassembleSubFrameBytes = 0;
                 currentFrameOffset = startOffset;
+
+                // The Demodulator has already stripped the sync word from the bytes handed to us, so a leading
+                // descriptor that only describes that sync word must not swallow the first payload bytes.
+                FRC_ResolveLeadingReceiveFrameDescriptor();
             }
 
             // Deliver the payload of this slice: from currentFrameOffset up to endOffset, or until the whole
@@ -4669,24 +4939,27 @@ namespace Antmicro.Renode.Peripherals.Wireless
             {
                 var descriptor = FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor];
 
-                // Assemble subframe.
-                // The loop is symmetric with FRC_AssembleFrame() on the TX side. CALCCRC marks the
-                // subframe whose end carries the CRC; INCLUDECRC only affects whether the CRC bytes
-                // are accounted for in the dynamic frame length value. When the descriptor's bytes
-                // end with the CRC and the DFL already counts them (DFLINCLUDECRC=1), the CRC bytes
-                // are NOT part of the payload written into the host buffer: they are read separately
-                // below. We reserve CRC_CrcWidth bytes for the CRC unconditionally on the CRC-emit
-                // descriptor, regardless of how WORDS was programmed.
-                var crcLength = (descriptor.CalculateCrc.Value && dynamicFrameLength && FRC_dynamicFrameCrcIncluded.Value) ? CRC_CrcWidth : 0;
-                var subframeTotal = Math.Min(FRC_FrameLength - currentDisassembleSubFrameStartWord, descriptor.Words);
-                if(subframeTotal < crcLength)
+                // Disassemble subframe.
+                // The loop is symmetric with FRC_AssembleFrame() on the TX side: INCLUDECRC is the bit that
+                // places the CRC after this subframe's data and CALCCRC only feeds the CRC accumulator. A
+                // subframe is (WORDS+1) words excluding that CRC, so the CRC bytes are not part of the payload
+                // written into the host buffer -- they are read separately below -- and they are reserved out of
+                // the remaining FRAMELENGTH budget only when DFLINCLUDECRC says FRAMELENGTH counts them.
+                var crcLength = descriptor.IncludeCrc.Value ? CRC_CrcWidth : 0;
+                var crcCountsInFrameLength = (crcLength > 0) && dynamicFrameLength && FRC_dynamicFrameCrcIncluded.Value;
+                var remaining = FRC_FrameLength - currentDisassembleSubFrameStartWord;
+                if(crcCountsInFrameLength && remaining < crcLength)
                 {
                     this.Log(LogLevel.Error, "frame too small to contain CRC");
                     return;
                 }
-                var payloadTotal = subframeTotal - crcLength;
-                var bytesConsumed = FRC_wordCounter.Value - currentDisassembleSubFrameStartWord;
-                var bytesToWrite = (uint)Math.Min((long)(payloadTotal - bytesConsumed), (long)(endOffset - currentFrameOffset));
+
+                var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveReceiveFrameDescriptor);
+                // An excluded subframe is sized by WORDS alone, since FRAMELENGTH does not account for its words.
+                var payloadTotal = excludeFromWordCounter
+                                   ? descriptor.Words
+                                   : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
+                var bytesToWrite = (uint)Math.Min((long)(payloadTotal - currentDisassembleSubFrameBytes), (long)(endOffset - currentFrameOffset));
                 if(currentFrameOffset + bytesToWrite > (uint)currentFrame.Length)
                 {
                     this.Log(LogLevel.Error, "frame too small, payload");
@@ -4703,8 +4976,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     // computed before WCNT advances so chunked delivery lands at the right offset.
                     var captureOffset = (FRC_wordCounter.Value + skipCount) - FRC_packetBufferStartAddress.Value;
                     currentFrameOffset += bytesToWrite;
-                    FRC_wordCounter.Value += bytesToWrite;
-                    bytesConsumed += bytesToWrite;
+                    if(!excludeFromWordCounter)
+                    {
+                        FRC_AdvanceWordCounter(bytesToWrite);
+                    }
+                    currentDisassembleSubFrameBytes += bytesToWrite;
 
                     FRC_WritePacketCaptureBuffer(pktCaptureBuff.ToArray(), (uint)captureOffset);
 
@@ -4721,14 +4997,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     }
                 }
 
-                if(bytesConsumed < payloadTotal)
+                if(currentDisassembleSubFrameBytes < payloadTotal)
                 {
                     // The slice ends inside this subframe: resume from here on the next call.
                     break;
                 }
 
                 // The subframe payload is fully delivered: read (and optionally store) its CRC.
-                if(descriptor.CalculateCrc.Value)
+                if(descriptor.IncludeCrc.Value)
                 {
                     var crc = currentFrame.Skip((int)currentFrameOffset).Take((int)CRC_CrcWidth).ToArray();
                     // TODO: Check CRC
@@ -4738,9 +5014,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     {
                         this.Log(LogLevel.Error, "frame too small, crc");
                     }
-                    if(dynamicFrameLength && FRC_dynamicFrameCrcIncluded.Value)
+                    if(crcCountsInFrameLength)
                     {
-                        FRC_wordCounter.Value += (uint)crc.Length;
+                        FRC_AdvanceWordCounter((uint)crc.Length);
                     }
                     if(FRC_rxStoreCrc.Value)
                     {
@@ -4759,20 +5035,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
 
                 // Select next frame descriptor
-                switch(FRC_rxFrameDescriptorMode.Value)
+                var nextDescriptor = FRC_SequenceFrameDescriptor(FRC_rxFrameDescriptorMode.Value, FRC_FirstReceiveFrameDescriptor, currentDisassembleSubFrame + 1);
+                if(excludeFromWordCounter && nextDescriptor == FRC_ActiveReceiveFrameDescriptor)
                 {
-                case FRC_FrameDescriptorMode.FrameDescriptorMode0:
-                case FRC_FrameDescriptorMode.FrameDescriptorMode3:
-                    break;
-                case FRC_FrameDescriptorMode.FrameDescriptorMode1:
-                    FRC_ActiveReceiveFrameDescriptor = 2 + currentDisassembleSubFrame % 2;
-                    break;
-                case FRC_FrameDescriptorMode.FrameDescriptorMode2:
-                    FRC_ActiveReceiveFrameDescriptor = 3;
-                    break;
+                    this.Log(LogLevel.Error, "FCD{0} is excluded from WCNT but the FCD mode never advances past it, aborting frame disassembly.",
+                             FRC_ActiveReceiveFrameDescriptor);
+                    return;
                 }
+                FRC_ActiveReceiveFrameDescriptor = nextDescriptor;
                 currentDisassembleSubFrame++;
                 currentDisassembleSubFrameStartWord = (uint)FRC_wordCounter.Value;
+                currentDisassembleSubFrameBytes = 0;
             }
 
             if(!isFrameEnd)
@@ -4788,9 +5061,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 var descriptor = FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor];
                 if(FRC_rxAppendRssi.Value)
                 {
-                    // AGC RSSI register value? or RSSIINT field?
-                    // RSSI value [...] represented as a signed 2-complement integer dB number.
-                    bufferController.WriteData(descriptor.BufferIndex, 0x0);
+                    // The RSSI appended to the frame is the frame RSSI latched at sync detection, i.e. the same
+                    // value AGC_FRAMERSSI.FRAMERSSIINT reports, as a signed two's complement dBm integer.
+                    bufferController.WriteData(descriptor.BufferIndex, (byte)AGC_FrameRssiIntegerPartAdjusted);
                 }
                 if(FRC_rxAppendStatus.Value)
                 {
@@ -4814,17 +5087,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
 
             // Prepare for next frame
-            switch(FRC_rxFrameDescriptorMode.Value)
-            {
-            case FRC_FrameDescriptorMode.FrameDescriptorMode0:
-            case FRC_FrameDescriptorMode.FrameDescriptorMode1:
-            case FRC_FrameDescriptorMode.FrameDescriptorMode2:
-                FRC_ActiveReceiveFrameDescriptor = 2;
-                break;
-            case FRC_FrameDescriptorMode.FrameDescriptorMode3:
-                FRC_ActiveReceiveFrameDescriptor = 3;
-                break;
-            }
+            FRC_ActiveReceiveFrameDescriptor = FRC_SequenceFrameDescriptor(FRC_rxFrameDescriptorMode.Value, FRC_FirstReceiveFrameDescriptor, 0);
 
             this.Log(LogLevel.Noisy, "Frame disassembled, frame descriptor now is {0}", FRC_ActiveReceiveFrameDescriptor);
         }
@@ -4891,7 +5154,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             // means that the WRITEOFFSET is restored to the value prior to receiving this frame. READOFFSET is not modified.
             if(FRC_rxBufferRestoreOnRxAborted.Value)
             {
-                FRC_RestoreRxDescriptorsBufferWriteOffset();
+                FRC_RestoreActiveRxDescriptorBufferWriteOffset();
             }
 
             // RENODE-354
@@ -4946,7 +5209,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 // any extra quantum slack in currentFrameElapsedAirtimeUs).
                 RAC_UpdateRadioStateMachine(RAC_RadioStateMachineSignal.FrameDetected);
                 RAC_internalRxState = RAC_InternalRxState.Frame;
-                FRC_SaveRxDescriptorsBufferWriteOffset();
+                FRC_ClearRxDescriptorsBuffers();
+                FRC_SaveActiveRxDescriptorBufferWriteOffset();
                 currentFrameOffset = MODEM_SyncWordBytes;
                 currentFrameByteOverTheAirTimeUs = MODEM_GetByteOverTheAirTimeUs();
 
@@ -5011,7 +5275,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 if(FRC_rxBufferRestoreOnFrameError.Value & !FRC_rxAcceptCrcErrors.Value)
                 {
-                    FRC_RestoreRxDescriptorsBufferWriteOffset();
+                    FRC_RestoreActiveRxDescriptorBufferWriteOffset();
                 }
             }
 
@@ -5450,7 +5714,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         }
                         else
                         {
-                            if(!RAC_RxEnable)
+                            // RAC->CMD.RSDIS causes the RXEN signal to pulse low for a clock cycle
+                            if(!RAC_RxEnable || signal == RAC_RadioStateMachineSignal.RxDisable)
                             {
                                 RAC_ChangeRadioState(RAC_RadioState.RxPoweringDown);
                             }
@@ -6056,6 +6321,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private uint currentFrameCodedSymbolsPerInfoBit = 0;
         private int currentDisassembleSubFrame = 0;
         private uint currentDisassembleSubFrameStartWord = 0;
+        // Payload bytes of the current RX subframe already delivered. Tracked separately from WCNT because a
+        // subframe excluded from the word counter would otherwise never appear to make progress.
+        private uint currentDisassembleSubFrameBytes = 0;
         private SiLabs_ICMU cmu;
 
         private IFlagRegisterField PROTIMER_seqListenBeforeTalkSuccessInterrupt;
@@ -6300,6 +6568,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IValueRegisterField FRC_wordCounter;
         private IValueRegisterField FRC_frameLength;
         private IValueRegisterField FRC_lengthFieldLocation;
+        private IValueRegisterField FRC_addressFieldLocation;
         private IFlagRegisterField FRC_txDoneInterrupt;
         private IValueRegisterField FRC_packetBufferCount;
         private IFlagRegisterField FRC_packetBufferStop;
@@ -6441,8 +6710,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly IValueRegisterField[] HOSTMAILBOX_messagePointer = new IValueRegisterField[MailboxMessageNumber];
         private readonly PROTIMER_TimeoutCounter[] PROTIMER_timeoutCounter;
         private readonly PROTIMER_CaptureCompareChannel[] PROTIMER_captureCompareChannel;
-        private readonly byte[] FRC_packetBufferCapture;
+        private readonly byte[] FRC_packetBufferCapture;        
         private readonly FRC_FrameDescriptor[] FRC_frameDescriptor;
+        private readonly IFlagRegisterField[] FRC_wordCounterCompareInterrupt = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
+        private readonly IFlagRegisterField[] FRC_wordCounterCompareInterruptEnable = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
+        private readonly IFlagRegisterField[] FRC_seqWordCounterCompareInterrupt = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
+        private readonly IFlagRegisterField[] FRC_seqWordCounterCompareInterruptEnable = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
         private const uint SetRegisterOffset = 0x1000;
         private const uint ClearRegisterOffset = 0x2000;
         private const uint ToggleRegisterOffset = 0x3000;
@@ -6452,6 +6725,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private const ulong HalfMicrosecondFrequency = 2000000UL;
         const int SNIFF_SYNCWORD_SERIAL_LEN = 4;
         private const uint FRC_NumberOfFrameDescriptors = 4;
+        // FCD0/FCD1 form the transmit descriptor pair, FCD2/FCD3 the receive pair.
+        private const int FRC_FirstTransmitFrameDescriptor = 0;
+        private const int FRC_FirstReceiveFrameDescriptor = 2;
+        // Only the compare channels backed by a register in this model: WCNTCMP0/1/2.
+        private const int FRC_NumberOfWordCounterCompareChannels = 3;
         private const uint FRC_PacketBufferCaptureSize = 48;
         private const uint FRC_RxFragmentLengthInBytes = 4;
         // FRC.CTRL.RATESELECT value that selects the alternate convolutional coding (CODINGB => BLE S=2 / 500 kbps).
@@ -6735,22 +7013,29 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private class FRC_FrameDescriptor
         {
             // Hardware semantics: WORDS is the number of words consumed by the subframe minus one
-            // (an 8-bit field on this part). There is no sentinel value meaning "consume the rest"
-            // -- the FRC sequencer simply clamps each subframe to (WORDS+1) and keeps iterating
-            // until WCNT reaches FRAMELENGTH. Callers that pass a "huge" WORDS (e.g. RAIL programs
-            // 0xFF on the data subframe) rely on this clamp degenerating into "remaining frame
-            // bytes" via the Math.Min() in the assemble/disassemble loops.
+            // (an 8-bit field on this part). The FRC sequencer clamps each subframe to (WORDS+1) and
+            // keeps iterating until WCNT reaches FRAMELENGTH, so the unlimited setting used by RAIL on
+            // the data subframe degenerates into "remaining frame words" via the Math.Min() in the
+            // assemble/disassemble loops.
             public uint Words => (uint)(WordsField.Value + 1);
+
+            // WORDS=0xFF selects an unlimited subframe: it runs to the end of the frame and the subframe
+            // counter is not used.
+            public bool UnlimitedWords => WordsField.Value == 0xFF;
 
             public uint BufferIndex => (uint)BufferField.Value;
 
             public IValueRegisterField WordsField;
             public IValueRegisterField BufferField;
+            // INCLUDECRC inserts (TX) or extracts (RX) the CRC at the end of the subframe, while CALCCRC
+            // only selects whether the subframe's words feed the CRC accumulator. CALCCRC has no observable
+            // effect while CRC_CalculateCRC() is mocked.
             public IFlagRegisterField IncludeCrc;
             public IFlagRegisterField CalculateCrc;
             public IValueRegisterField CrcSkipWords;
             public IFlagRegisterField SkipWhitening;
             public IFlagRegisterField AddTrailData;
+            public IFlagRegisterField ExcludeSubframeFromWcnt;
         }
 
         private enum FRC_FSMState

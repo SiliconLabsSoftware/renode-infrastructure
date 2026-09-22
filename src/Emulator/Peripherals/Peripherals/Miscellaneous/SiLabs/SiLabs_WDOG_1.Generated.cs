@@ -6,7 +6,7 @@
 //
 
 /*  WARNING: Auto-Generated Peripheral  -  DO NOT EDIT
-    WDOG, Generated on : 2026-05-26 18:53:25.698150
+    WDOG, Generated on : 2026-06-10 11:52:04.493727
     WDOG, ID Version : e7dbbe64a00c423492ad4ec2993c323e.1 */
 
 // Note: The constructor has been removed from the auto-generated code.
@@ -24,10 +24,9 @@ using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    public partial class SiLabs_WDOG_1 : BasicDoubleWordPeripheral, IKnownSize, SiLabs_IRegisterAccess
+    public partial class SiLabs_WDOG_1 : SiLabsPeripheral
     {
-
-        private void Define_Registers()
+        protected override DoubleWordRegisterCollection BuildRegistersCollection()
         {
             var registersMap = new Dictionary<long, DoubleWordRegister>
             {
@@ -41,8 +40,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 {(long)Registers.Lock, GenerateLockRegister()},
                 {(long)Registers.Syncbusy, GenerateSyncbusyRegister()},
             };
-            registers = new DoubleWordRegisterCollection(this, registersMap);
-
+            return new DoubleWordRegisterCollection(this, registersMap);
         }
 
         public override void Reset()
@@ -51,49 +49,49 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             WDOG_Reset();
         }
         
-        protected enum CFG_CLRSRC
+        protected enum CFG_CLRSRC : ulong
         {
             SW = 0, // A write to the clear bit will clear the WDOG counter
             PRSSRC0 = 1, // A rising edge on the PRS Source 0 will clear the WDOG counter
         }
         
-        protected enum CFG_EM1RUN
+        protected enum CFG_EM1RUN : ulong
         {
             DISABLE = 0, // WDOG timer is frozen in EM1.
             ENABLE = 1, // WDOG timer is running in EM1.
         }
         
-        protected enum CFG_EM2RUN
+        protected enum CFG_EM2RUN : ulong
         {
             DISABLE = 0, // WDOG timer is frozen in EM2.
             ENABLE = 1, // WDOG timer is running in EM2.
         }
         
-        protected enum CFG_EM3RUN
+        protected enum CFG_EM3RUN : ulong
         {
             DISABLE = 0, // WDOG timer is frozen in EM3.
             ENABLE = 1, // WDOG timer is running in EM3.
         }
         
-        protected enum CFG_EM4BLOCK
+        protected enum CFG_EM4BLOCK : ulong
         {
             DISABLE = 0, // EM4 can be entered by software. See EMU for detailed description.
             ENABLE = 1, // EM4 cannot be entered by software.
         }
         
-        protected enum CFG_DEBUGRUN
+        protected enum CFG_DEBUGRUN : ulong
         {
             DISABLE = 0, // WDOG timer is frozen in debug mode
             ENABLE = 1, // WDOG timer is running in debug mode
         }
         
-        protected enum CFG_WDOGRSTDIS
+        protected enum CFG_WDOGRSTDIS : ulong
         {
             EN = 0, // A timeout will cause a WDOG reset
             DIS = 1, // A timeout will not cause a WDOG reset
         }
         
-        protected enum CFG_PERSEL
+        protected enum CFG_PERSEL : ulong
         {
             SEL0 = 0, // Timeout period of 9 wdog cycles
             SEL1 = 1, // Timeout period of 17 wdog cycles
@@ -113,7 +111,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             SEL15 = 15, // Timeout period of 256k wdog cycles
         }
         
-        protected enum CFG_WARNSEL
+        protected enum CFG_WARNSEL : ulong
         {
             DIS = 0, // Disable
             SEL1 = 1, // Warning timeout is 25% of the Timeout.
@@ -121,7 +119,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             SEL3 = 3, // Warning timeout is 75% of the Timeout.
         }
         
-        protected enum CFG_WINSEL
+        protected enum CFG_WINSEL : ulong
         {
             DIS = 0, // Disabled.
             SEL1 = 1, // Window timeout is 12.5% of the Timeout.
@@ -133,13 +131,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             SEL7 = 7, // Window timeout is 87.5% of the Timeout.
         }
         
-        protected enum CMD_CLEAR
+        protected enum CMD_CLEAR : ulong
         {
             UNCHANGED = 0, // WDOG timer is unchanged.
             CLEARED = 1, // WDOG timer is cleared to 0.
         }
         
-        protected enum STATUS_LOCK
+        protected enum STATUS_LOCK : ulong
         {
             UNLOCKED = 0, // All WDOG lockable registers are unlocked.
             LOCKED = 1, // All WDOG lockable registers are locked.
@@ -499,37 +497,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             .WithWriteCallback((_, __) => Syncbusy_Write(_, __));
         
 
-        private uint ReadWFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a WFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadLFWSYNC()
-        {
-            this.Log(LogLevel.Warning, "Reading from a LFWSYNC/HVLFWSYNC Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        private uint ReadRFIFO()
-        {
-            this.Log(LogLevel.Warning, "Reading from a RFIFO Field, value returned will always be 0");
-            return 0x0;
-        }
-
-        
-        private void WriteWSTATIC()
-        {
-            if(Enabled)
-            {
-                // throw new InvalidOperationException("Bus fault trying to write to a WSTATIC register while peripheral is enabled");
-                this.Log(LogLevel.Error, "Trying to write to a WSTATIC register while peripheral is enabled EN = {0}", Enabled);
-            }
-        }
-
-
-
-        
         // Ipversion - Offset : 0x0
     
         protected IValueRegisterField ipversion_ipversion_field;
@@ -537,8 +504,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Ipversion_Ipversion_ValueProvider(ulong a);
         partial void Ipversion_Write(uint a, uint b);
         partial void Ipversion_Read(uint a, uint b);
-        
-        
+
         // En - Offset : 0x4
     
         protected IFlagRegisterField en_en_bit;
@@ -551,8 +517,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void En_Disabling_ValueProvider(bool a);
         partial void En_Write(uint a, uint b);
         partial void En_Read(uint a, uint b);
-        
-        
+
         // Cfg - Offset : 0x8
     
         protected IEnumRegisterField<CFG_CLRSRC> cfg_clrsrc_bit;
@@ -624,8 +589,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
         partial void Cfg_Write(uint a, uint b);
         partial void Cfg_Read(uint a, uint b);
-        
-        
+
         // Cmd - Offset : 0xC
     
         protected IEnumRegisterField<CMD_CLEAR> cmd_clear_bit;
@@ -641,8 +605,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
         partial void Cmd_Write(uint a, uint b);
         partial void Cmd_Read(uint a, uint b);
-        
-        
+
         // Status - Offset : 0x14
     
         protected IEnumRegisterField<STATUS_LOCK> status_lock_bit;
@@ -650,8 +613,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Status_Lock_ValueProvider(STATUS_LOCK a);
         partial void Status_Write(uint a, uint b);
         partial void Status_Read(uint a, uint b);
-        
-        
+
         // If - Offset : 0x18
     
         protected IFlagRegisterField if_tout_bit;
@@ -680,8 +642,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void If_Pem1_ValueProvider(bool a);
         partial void If_Write(uint a, uint b);
         partial void If_Read(uint a, uint b);
-        
-        
+
         // Ien - Offset : 0x1C
     
         protected IFlagRegisterField ien_tout_bit;
@@ -710,8 +671,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Ien_Pem1_ValueProvider(bool a);
         partial void Ien_Write(uint a, uint b);
         partial void Ien_Read(uint a, uint b);
-        
-        
+
         // Lock - Offset : 0x20
     
         protected IValueRegisterField lock_lockkey_field;
@@ -719,8 +679,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Lock_Lockkey_ValueProvider(ulong a);
         partial void Lock_Write(uint a, uint b);
         partial void Lock_Read(uint a, uint b);
-        
-        
+
         // Syncbusy - Offset : 0x24
     
         protected IFlagRegisterField syncbusy_cmd_bit;
@@ -728,80 +687,18 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         partial void Syncbusy_Cmd_ValueProvider(bool a);
         partial void Syncbusy_Write(uint a, uint b);
         partial void Syncbusy_Read(uint a, uint b);
-        
+
         partial void WDOG_Reset();
 
-        public bool Enabled
+        public override bool Enabled
         {
             get 
             {
                 return en_en_bit.Value;
             }
-            set 
-            {
-                en_en_bit.Value = value;
-            }
         }
 
-        private SiLabs_ICMU _cmu;
-        private SiLabs_ICMU cmu
-        {
-            get
-            {
-                if (Object.ReferenceEquals(_cmu, null))
-                {
-                    foreach(var cmu in machine.GetPeripheralsOfType<SiLabs_ICMU>())
-                    {
-                        _cmu = cmu;
-                    }
-                }
-                return _cmu;
-            }
-            set
-            {
-                _cmu = value;
-            }
-        }
-
-        public override uint ReadDoubleWord(long address)
-        {
-            OnRegisterAccess?.Invoke();
-            long temp = address & 0x0FFF;
-            switch(address & 0x3000)
-            {
-                case 0x0000:
-                    return registers.Read(temp);
-                default:
-                    this.Log(LogLevel.Warning, "Reading from Set/Clr/Tgl is not supported.");
-                    return registers.Read(temp);
-            }
-        }
-
-        public override void WriteDoubleWord(long address, uint value)
-        {
-            OnRegisterAccess?.Invoke();
-            long temp = address & 0x0FFF;
-            switch(address & 0x3000)
-            {
-                case 0x0000:
-                    registers.Write(temp, value);
-                    break;
-                case 0x1000:
-                    registers.Write(temp, registers.Read(temp) | value);
-                    break;
-                case 0x2000:
-                    registers.Write(temp, registers.Read(temp) & ~value);
-                    break;
-                case 0x3000:
-                    registers.Write(temp, registers.Read(temp) ^ value);
-                    break;
-                default:
-                    this.Log(LogLevel.Error, "writing doubleWord to non existing offset {0:X}, case : {1:X}", address, address & 0x3000);
-                    break;
-            }           
-        }
-
-        public Action OnRegisterAccess { get; set; }
+        protected override Type RegistersType => typeof(Registers);
 
         protected enum Registers
         {
@@ -844,10 +741,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             Ien_TGL = 0x301C,
             Lock_TGL = 0x3020,
             Syncbusy_TGL = 0x3024,
-        }   
-        
-        public long Size => 0x4000;
-
-        protected DoubleWordRegisterCollection registers;
+        }
     }
+
 }

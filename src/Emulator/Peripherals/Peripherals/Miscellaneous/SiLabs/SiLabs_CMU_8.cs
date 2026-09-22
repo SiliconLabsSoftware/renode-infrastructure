@@ -23,6 +23,29 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             CMU_Reset();
         }
 
+        public ulong WdogClockFrequency(uint instance)
+        {
+            SiLabs_WdogClksel clksel;
+            switch(instance)
+            {
+            case 0:
+                clksel = (SiLabs_WdogClksel)wdog0clkctrl_clksel_field.Value;
+                break;
+            case 1:
+                clksel = SiLabs_WdogClksel.HclkDiv1024;
+                break;
+            default:
+                this.Log(LogLevel.Warning, "WdogClockFrequency: unknown WDOG instance {0}", instance);
+                return 0UL;
+            }
+            return SiLabs_CMU_Constants.WdogFrequencyFromClksel(clksel, hfxoFrequency);
+        }
+
+        public bool GetPeripheralClockEnable(IPeripheral peripheral)
+        {
+            return true; // Default to true for peripherals not handled by this method
+        }
+
         public bool OscPerpllEnabled(uint instance)
         {
             // PERPLL is not present on CMU_8
@@ -51,23 +74,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             // missing QSPIPLL reference clock
         }
 
-        public ulong HfxoFrequency 
+        public ulong HfxoFrequency
         {
             get
             {
                 return hfxoFrequency;
             }
-        }
-
-        public ulong WdogClockFrequency(uint instance)
-        {
-            if(instance != 0)
-            {
-                this.Log(LogLevel.Warning, "WdogClockFrequency: WDOG{0} not present on CMU_8", instance);
-                return 0UL;
-            }
-            var clksel = (SiLabs_WdogClksel)wdog0clkctrl_clksel_field.Value;
-            return SiLabs_CMU_Constants.WdogFrequencyFromClksel(clksel, hfxoFrequency);
         }
 
         public bool OscLfrcoRequested
@@ -311,15 +323,23 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
-        public bool OscHfrcoEnabled
+        public bool OscHfrcoEnabled(uint instance)
         {
-            get { return clken0_hfrco0_bit.Value; }
+            if(instance != 0)
+            {
+                this.Log(LogLevel.Error, "{0} is an invalid instance for HFRCO", instance);
+                    return false;
+            }
+            return clken0_hfrco0_bit.Value;
         }
 
-        public bool OscHfrcoRequested
+        public bool OscHfrcoRequested(uint instance)
         {
-            get
+            if(instance != 0)
             {
+                this.Log(LogLevel.Error, "{0} is an invalid instance for HFRCO", instance);
+                return false;
+            }
                 return exportclkctrl_clkoutsel0_field.Value == EXPORTCLKCTRL_CLKOUTSEL0.HFRCODPLL
                     || exportclkctrl_clkoutsel1_field.Value == EXPORTCLKCTRL_CLKOUTSEL1.HFRCODPLL
                     || exportclkctrl_clkoutsel2_field.Value == EXPORTCLKCTRL_CLKOUTSEL2.HFRCODPLL
@@ -347,7 +367,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                         && Pixelrz0Enabled
                     );
                 // missing QSPIPLL reference clock
-            }
         }
 
         public bool OscLfrcoEnabled

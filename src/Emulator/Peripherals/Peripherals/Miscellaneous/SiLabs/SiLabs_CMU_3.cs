@@ -34,14 +34,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             status_lock_bit.Value = STATUS_LOCK.UNLOCKED;
         }
 
-        public ulong HfxoFrequency 
-        {
-            get
-            {
-                return hfxoFrequency;
-            }
-        }
-
         public ulong WdogClockFrequency(uint instance)
         {
             SiLabs_WdogClksel clksel;
@@ -82,6 +74,39 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             // SOCPLL is not present on CMU_3
             return false;
+        }
+
+        public bool GetPeripheralClockEnable(IPeripheral peripheral)
+        {
+            return true; // Default to true for peripherals not handled by this method
+        }
+
+        public SiLabs_IHFXO hfxo
+        {
+            get
+            {
+                if(Object.ReferenceEquals(_hfxo, null))
+                {
+                    foreach(var hfxo in machine.GetPeripheralsOfType<SiLabs_IHFXO>())
+                    {
+                        _hfxo = hfxo;
+                    }
+                }
+                return _hfxo;
+            }
+
+            set
+            {
+                _hfxo = value;
+            }
+        }
+
+        public ulong HfxoFrequency
+        {
+            get
+            {
+                return hfxoFrequency;
+            }
         }
 
         // Temporary implementation to check if a peripheral is enabled as those peripherals are not used
@@ -162,10 +187,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             get { return clken0_lfrco_bit.Value; }
         }
 
-        public bool OscHfrcoRequested
+        public bool OscHfrcoRequested(uint instance)
         {
-            get
+            if(instance != 0)
             {
+                this.Log(LogLevel.Error, "{0} is an invalid instance for HFRCO", instance);
+                return false;
+            }
                 return exportclkctrl_clkoutsel0_field.Value == EXPORTCLKCTRL_CLKOUTSEL0.HFRCODPLL
                     || exportclkctrl_clkoutsel1_field.Value == EXPORTCLKCTRL_CLKOUTSEL1.HFRCODPLL
                     || exportclkctrl_clkoutsel2_field.Value == EXPORTCLKCTRL_CLKOUTSEL2.HFRCODPLL
@@ -180,12 +208,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                         em01grpcclkctrl_clksel_field.Value == EM01GRPCCLKCTRL_CLKSEL.HFRCODPLL
                         && IsEm01GrpcClkEnabled()
                     );
-            }
         }
 
-        public bool OscHfrcoEnabled
+        public bool OscHfrcoEnabled(uint instance)
         {
-            get { return clken0_hfrco0_bit.Value; }
+            if(instance != 0)
+            {
+                this.Log(LogLevel.Error, "{0} is an invalid instance for HFRCO", instance);
+                return false;
+            }
+            return clken0_hfrco0_bit.Value;
         }
 
         public bool OscHfrcoEM23Requested
@@ -492,26 +524,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             temp[0] = Burtc0Enabled && clken0_burtc_bit.Value;
 
             return temp.ContainsValue(true);
-        }
-
-        public SiLabs_IHFXO hfxo
-        {
-            get
-            {
-                if(Object.ReferenceEquals(_hfxo, null))
-                {
-                    foreach(var hfxo in machine.GetPeripheralsOfType<SiLabs_IHFXO>())
-                    {
-                        _hfxo = hfxo;
-                    }
-                }
-                return _hfxo;
-            }
-
-            set
-            {
-                _hfxo = value;
-            }
         }
 
         private SiLabs_IDPLL dpll0

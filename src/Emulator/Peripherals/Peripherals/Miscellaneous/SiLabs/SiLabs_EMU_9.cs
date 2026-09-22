@@ -36,6 +36,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
+        public void AddEnterSleepHook(Action hook)
+        {
+            emuBase.AddEnterSleepHook(hook);
+        }
+
+        public void AddExitSleepHook(Action hook)
+        {
+            emuBase.AddExitSleepHook(hook);
+        }
+
         public void AddEnterDeepSleepHook(Action hook)
         {
             emuBase.AddEnterDeepSleepHook(hook);

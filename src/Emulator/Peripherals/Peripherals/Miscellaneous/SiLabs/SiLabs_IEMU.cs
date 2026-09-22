@@ -14,6 +14,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
     public interface SiLabs_IEmu
     {
         /// <summary>
+        /// Method to add a hook when entering Sleep.
+        /// </summary>
+        void AddEnterSleepHook(Action hook);
+
+        /// <summary>
+        /// Method to add a hook when exiting Sleep.
+        /// </summary>
+        void AddExitSleepHook(Action hook);
+
+        /// <summary>
         /// Method to add a hook when entering Deep Sleep.
         /// </summary>
         void AddEnterDeepSleepHook(Action hook);

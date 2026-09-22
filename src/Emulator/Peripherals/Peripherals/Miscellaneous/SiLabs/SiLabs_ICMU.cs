@@ -24,9 +24,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
     // Helper constants and conversions shared across CMU implementations.
     public static class SiLabs_CMU_Constants
     {
-        public const ulong LfrcoFrequency  = 32768UL;
-        public const ulong LfxoFrequency   = 32768UL;
-        public const ulong UlfrcoFrequency = 1000UL;
 
         // Convert a CLKSEL value into the corresponding clock frequency in
         // Hz. The HCLKDIV1024 source is approximated as HFXO / 1024, which
@@ -37,19 +34,25 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             switch(clksel)
             {
-            case SiLabs_WdogClksel.Disabled:    return 0UL;
-            case SiLabs_WdogClksel.Lfrco:       return LfrcoFrequency;
-            case SiLabs_WdogClksel.Lfxo:        return LfxoFrequency;
-            case SiLabs_WdogClksel.Ulfrco:      return UlfrcoFrequency;
+            case SiLabs_WdogClksel.Disabled: return 0UL;
+            case SiLabs_WdogClksel.Lfrco: return LfrcoFrequency;
+            case SiLabs_WdogClksel.Lfxo: return LfxoFrequency;
+            case SiLabs_WdogClksel.Ulfrco: return UlfrcoFrequency;
             case SiLabs_WdogClksel.HclkDiv1024: return hfxoFrequency / 1024UL;
-            default:                            return 0UL;
+            default: return 0UL;
             }
         }
+
+        public const ulong LfrcoFrequency  = 32768UL;
+        public const ulong LfxoFrequency   = 32768UL;
+        public const ulong UlfrcoFrequency = 1000UL;
     }
 
     public interface SiLabs_ICMU
     {
-        ulong HfxoFrequency {get; }
+        bool GetPeripheralClockEnable(IPeripheral peripheral);
+
+        ulong HfxoFrequency { get; }
 
         // Returns the frequency, in Hz, that the WDOG instance is currently 
         // clocked at. A return value of 0 means the selected source is 
@@ -60,9 +63,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         bool OscLfrcoEnabled { get; }
 
-        bool OscHfrcoRequested { get; }
+        bool OscHfrcoRequested(uint instance);
 
-        bool OscHfrcoEnabled { get; }
+        bool OscHfrcoEnabled(uint instance);
 
         bool OscHfrcoEM23Requested { get; }
 

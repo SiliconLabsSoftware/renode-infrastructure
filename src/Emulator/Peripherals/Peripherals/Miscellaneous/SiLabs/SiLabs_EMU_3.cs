@@ -6,10 +6,21 @@
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
+using System;
+using System.Collections.Generic;
+
+using Antmicro.Renode.Core;
+using Antmicro.Renode.Peripherals;
+
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    public partial class SiLabs_EMU_3 : BasicDoubleWordPeripheral, IKnownSize
+    public partial class SiLabs_EMU_3 : SiLabs_IEmu
     {
+        partial void SiLabs_EMU_3_Constructor()
+        {
+            emuBase = new SiLabs_EMU_Base(machine, this);
+        }
+
         partial void EMU_Reset()
         {
             registers.Reset();
@@ -25,5 +36,37 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 rstcause_sysreq_bit.Value = false;
             }
         }
+
+        public void AddEnterSleepHook(Action hook)
+        {
+            emuBase.AddEnterSleepHook(hook);
+        }
+
+        public void AddExitSleepHook(Action hook)
+        {
+            emuBase.AddExitSleepHook(hook);
+        }
+
+        public void AddEnterDeepSleepHook(Action hook)
+        {
+            emuBase.AddEnterDeepSleepHook(hook);
+        }
+
+        public void AddExitDeepSleepHook(Action hook)
+        {
+            emuBase.AddExitDeepSleepHook(hook);
+        }
+
+        public void UpdatePeripheralEnabledStatus(IPeripheral peripheral, bool enabled)
+        {
+            emuBase.UpdatePeripheralEnabledStatus(peripheral, enabled);
+        }
+
+        public List<IPeripheral> GetNoRetainPeripherals()
+        {
+            return emuBase.GetNoRetainPeripherals();
+        }
+
+        private SiLabs_EMU_Base emuBase;
     }
 }

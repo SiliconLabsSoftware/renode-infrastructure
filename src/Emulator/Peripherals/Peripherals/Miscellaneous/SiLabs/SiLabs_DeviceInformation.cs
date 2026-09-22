@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 
+using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.Memory;
@@ -17,10 +18,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
     public class SiLabs_DeviceInformation : DeviceInformation, IDoubleWordPeripheral, IKnownSize
     {
-        public SiLabs_DeviceInformation(DeviceFamily deviceFamily, ushort deviceNumber, MappedMemory flashDevice, MappedMemory sramDevice, byte productRevision = 0)
+        public SiLabs_DeviceInformation(Machine machine, DeviceFamily deviceFamily, ushort deviceNumber, MappedMemory flashDevice, MappedMemory sramDevice, byte productRevision = 0)
             : base(deviceFamily, deviceNumber, flashDevice, sramDevice, productRevision)
         {
-            UID = ++count;
+            this.machine = machine;
             registers = BuildRegisters();
         }
 
@@ -45,8 +46,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             get
             {
-                // TODO: for now we just return the UID
-                return (ulong)UID;
+                // TODO: for now we just return the machine unique object id
+                return (ulong)machine.UniqueObjectId;
             }
         }
 
@@ -54,11 +55,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             get
             {
-                return (ulong)(OUI64 + UID);
+                 return OUI64 + (ulong)machine.UniqueObjectId;
             }
         }
-
-        private static uint count = 0;
 
         private DoubleWordRegisterCollection BuildRegisters()
         {
@@ -562,9 +561,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
 
-        private readonly ulong UID;
-        public static readonly ulong OUI64 = 0xCCCCCC0000000000;
-
+        private static readonly ulong OUI64 = 0xCCCCCC0000000000;
+        private readonly Machine machine;
         private readonly DoubleWordRegisterCollection registers;
 
         private enum Registers

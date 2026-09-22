@@ -82,6 +82,8 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
         }
 
+        public override bool Enabled => enable.Value;
+
         public GPIO IRQ { get; }
 
         public GPIO AlternateIRQ { get; }
@@ -317,14 +319,6 @@ namespace Antmicro.Renode.Peripherals.Timers
             timer.Limit = limit;
             timer.Enabled = true;
             timer.Value = currentValue;
-        }
-
-        private void WriteWSTATIC()
-        {
-            if(enable.Value)
-            {
-                this.Log(LogLevel.Error, "Trying to write to a WSTATIC register while peripheral is enabled EN = {0}", enable);
-            }
         }
 
         private void TimerLimitReached()
