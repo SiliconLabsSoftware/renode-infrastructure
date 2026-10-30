@@ -29,6 +29,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         partial void CMU_Reset()
         {
+            // The register map is its own collection, which base.Reset() does not reach. Without
+            // this, clock selections and enables survive a reset into the next boot.
+            registers.Reset();
             sysclkctrl_clksel_field.Value = SYSCLKCTRL_CLKSEL.FSRCO;
             status_calrdy_bit.Value = true;
             status_lock_bit.Value = STATUS_LOCK.UNLOCKED;
