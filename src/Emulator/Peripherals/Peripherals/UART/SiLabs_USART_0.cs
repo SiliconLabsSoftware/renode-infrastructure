@@ -115,7 +115,8 @@ namespace Antmicro.Renode.Peripherals.UART
         {
             base.Reset();
             isEnabled = false;
-            spiSlaveDevice = null;
+            // The SPI child is not cleared: it is registered by the platform description, which
+            // is structure rather than state, and Register() is not called again after a reset.
             startIndex = 0xFF;
             rxInProgress = false;
             compareTimer.Enabled = false;
@@ -346,6 +347,14 @@ namespace Antmicro.Renode.Peripherals.UART
 
         private void UpdateInterrupts()
         {
+            // RXDATAV follows the receive buffer: clearing the flag while data is still buffered
+            // has no lasting effect, so a driver that reads one byte per interrupt and then
+            // clears RXDATAVIF is interrupted again until the buffer drains.
+            if(Count > 0)
+            {
+                rxDataValidInterrupt.Value = true;
+                receiveDataValidFlag.Value = true;
+            }
             machine.ClockSource.ExecuteInLock(delegate
             {
                 var txIrq = ((txCompleteInterruptEnable.Value && txCompleteInterrupt.Value)
@@ -378,25 +387,38 @@ namespace Antmicro.Renode.Peripherals.UART
             transferCompleteFlag.Value = false;
             if(operationModeField.Value == OperationMode.Synchronous)
             {
+                byte result;
                 if(spiSlaveDevice != null)
                 {
-                    var result = spiSlaveDevice.Transmit(data);
-                    WriteChar(result);
+                    result = spiSlaveDevice.Transmit(data);
                 }
                 else
                 {
                     this.Log(LogLevel.Warning, "Writing data in synchronous mode, but no device is currently connected.");
-                    WriteChar(0x0);
+                    result = 0x0;
                 }
+                CompleteSynchronousFrame(result);
+                return;
             }
-            else
-            {
-                TransmitCharacter(data);
-                txBufferLevelInterrupt.Value = true;
-                txCompleteInterrupt.Value = true;
-                UpdateInterrupts();
-            }
+            TransmitCharacter(data);
+            txBufferLevelInterrupt.Value = true;
+            txCompleteInterrupt.Value = true;
+            UpdateInterrupts();
             transferCompleteFlag.Value = true;
+            TriggerCompareTimerStartEvent(TimeCompareStartSource.TxEndOfFrame);
+            TriggerCompareTimerStartEvent(TimeCompareStartSource.TxComplete);
+        }
+
+        // A synchronous (SPI master) frame completes like an asynchronous one: the received byte
+        // is buffered and TXC and TXBL are raised, so a driver that advances on the TX interrupt
+        // sees every frame finish.
+        private void CompleteSynchronousFrame(byte result)
+        {
+            WriteChar(result);
+            txBufferLevelInterrupt.Value = true;
+            txCompleteInterrupt.Value = true;
+            transferCompleteFlag.Value = true;
+            UpdateInterrupts();
             TriggerCompareTimerStartEvent(TimeCompareStartSource.TxEndOfFrame);
             TriggerCompareTimerStartEvent(TimeCompareStartSource.TxComplete);
         }
