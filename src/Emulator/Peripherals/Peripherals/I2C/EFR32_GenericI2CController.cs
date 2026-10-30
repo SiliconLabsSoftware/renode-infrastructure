@@ -29,6 +29,7 @@ namespace Antmicro.Renode.Peripherals.I2C
 
         public override void Reset()
         {
+            busBusy = false; busHold = false; nacked = false; busState = BusState.Idle;
             currentAddress = 0;
             isWrite = false;
             waitingForAddressByte = false;
@@ -59,13 +60,19 @@ namespace Antmicro.Renode.Peripherals.I2C
         protected DoubleWordRegister GenerateCommandRegister() => new DoubleWordRegister(this)
             .WithValueField(0, 8, FieldMode.Write, name: "COMMAND", writeCallback: (_, v) => HandleCommand((Command)v));
 
+        // Firmware that drives the controller directly rather than through emlib polls STATE, for
+        // example CMD.START, TXDATA=address, wait for BUSHOLD, then test for ADDRACK and NACKED.
+        // The fields follow the reference manual's bus state machine: BUSHOLD is set whenever
+        // the master is waiting for software (address byte, ACK/NACK seen, data received), STATE
+        // walks IDLE/START/ADDR/ADDRACK/DATA/DATAACK, and NACKED latches the last address or data
+        // acknowledge until the next START/STOP.
         protected DoubleWordRegister GenerateStateRegister() => new DoubleWordRegister(this)
-            .WithTaggedFlag("BUSY", 0)
-            .WithTaggedFlag("MASTER", 1)
-            .WithTaggedFlag("TRANSMITTER", 2)
-            .WithTaggedFlag("NACKED", 3)
-            .WithTaggedFlag("BUSHOLD", 4)
-            .WithTag("STATE", 5, 3)
+            .WithFlag(0, FieldMode.Read, valueProviderCallback: _ => busBusy, name: "BUSY")
+            .WithFlag(1, FieldMode.Read, valueProviderCallback: _ => busBusy, name: "MASTER")
+            .WithFlag(2, FieldMode.Read, valueProviderCallback: _ => busBusy && isWrite, name: "TRANSMITTER")
+            .WithFlag(3, FieldMode.Read, valueProviderCallback: _ => nacked, name: "NACKED")
+            .WithFlag(4, FieldMode.Read, valueProviderCallback: _ => busHold, name: "BUSHOLD")
+            .WithValueField(5, 3, FieldMode.Read, valueProviderCallback: _ => (uint)busState, name: "STATE")
             .WithReservedBits(8, 24);
 
         protected DoubleWordRegister GenerateStatusRegister() => new DoubleWordRegister(this)
@@ -135,6 +142,48 @@ namespace Antmicro.Renode.Peripherals.I2C
                 }
             );
 
+        // Series 2 (xG2x) semantics for the interrupt flag register: IF reads the RAW flags -- IEN
+        // gates only the IRQ line -- and a write of 1 SETS a flag; clearing is done through the
+        // IF_CLR alias. The Series-1 generator above returns flags masked by IEN and clears on
+        // write; emlib's polling-mode I2C_Transfer() never enables interrupts, so it needs the raw
+        // flags.
+        protected DoubleWordRegister GenerateRawInterruptFlagRegister() => interruptsManager.GetRegister<DoubleWordRegister>(
+                valueProviderCallback: (irq, __) => interruptsManager.IsSet(irq),
+                writeCallback: (irq, prevValue, newValue) =>
+                {
+                    if(newValue && !IsNotSettable(irq))
+                    {
+                        interruptsManager.SetInterrupt(irq);
+                    }
+                }
+            );
+
+        protected void SetInterruptFlags(uint mask)
+        {
+            foreach(var irq in Enum.GetValues(typeof(Interrupt)).Cast<Interrupt>())
+            {
+                if(((mask >> (int)irq) & 1) != 0 && !IsNotSettable(irq))
+                {
+                    interruptsManager.SetInterrupt(irq);
+                }
+            }
+        }
+
+        protected void ClearInterruptFlags(uint mask)
+        {
+            foreach(var irq in Enum.GetValues(typeof(Interrupt)).Cast<Interrupt>())
+            {
+                if(((mask >> (int)irq) & 1) != 0 && !IsNotSettable(irq))
+                {
+                    interruptsManager.ClearInterrupt(irq);
+                }
+            }
+        }
+
+        // TXBL and RXDATAV are derived from buffer state ([NotSettable]); software cannot set or
+        // clear them.
+        private static bool IsNotSettable(Interrupt irq) => irq == Interrupt.TransmitBufferLevel || irq == Interrupt.ReceiveDataValid;
+
         private byte ReadRxByte()
         {
             if(rxBuffer.TryDequeue(out var result))
@@ -195,6 +244,22 @@ namespace Antmicro.Renode.Peripherals.I2C
                     interruptsManager.SetInterrupt(Interrupt.MasterStopCondition);
                     break;
 
+                case Command.AbortTransmission:
+                    // Abort: release the bus, drop anything queued, back to idle. emlib issues this
+                    // when a transfer times out or errors, so no state may carry into the next one.
+                    this.Log(LogLevel.Noisy, "Abort transmission");
+                    txBuffer.Clear();
+                    isWrite = false;
+                    waitingForAddressByte = false;
+                    targetPeripheral?.FinishTransmission();
+                    targetPeripheral = null;
+                    busBusy = false; busHold = false; nacked = false; busState = BusState.Idle;
+                    interruptsManager.SetInterrupt(Interrupt.TransmitBufferLevel);
+                    break;
+                case Command.ContinueTransmission:
+                case Command.ClearPendingCommands:
+                    // Nothing pending is ever modelled; accept silently.
+                    break;
                 case Command.ClearTransmitBufferAndShiftRegister:
                     this.Log(LogLevel.Noisy, "Cleared TX buffer");
                     txBuffer.Clear();
@@ -220,11 +285,15 @@ namespace Antmicro.Renode.Peripherals.I2C
             }
 
             interruptsManager.SetInterrupt(Interrupt.StartCondition);
+            busBusy = true;
+            nacked = false;
             switch(txBuffer.Count)
             {
             case 0:
                 // the first byte contains device address and R/W flag; we have to wait for it
                 waitingForAddressByte = true;
+                busState = BusState.Start;
+                busHold = true;
                 interruptsManager.SetInterrupt(Interrupt.BusHold);
                 // TODO: here we should also set I2Cn_STATE to 0x57 according to p.442
                 break;
@@ -245,8 +314,17 @@ namespace Antmicro.Renode.Peripherals.I2C
         private void OnStopCommand()
         {
             interruptsManager.SetInterrupt(Interrupt.MasterStopCondition);
+            busBusy = false;
+            busHold = false;
+            nacked = false;
+            busState = BusState.Idle;
+            waitingForAddressByte = false;
             if(!isWrite)
             {
+                // A STOP ends the transaction for the slave too: II2CPeripheral implementations
+                // reset their register-pointer state in FinishTransmission(), so the first data
+                // byte of the next write is taken as a register address, not as more data.
+                targetPeripheral?.FinishTransmission();
                 return;
             }
 
@@ -255,6 +333,7 @@ namespace Antmicro.Renode.Peripherals.I2C
             interruptsManager.SetInterrupt(Interrupt.TransmitBufferLevel);
             interruptsManager.SetInterrupt(Interrupt.TransferCompleted);
             isWrite = false;
+            targetPeripheral?.FinishTransmission();
         }
 
         private void OnAckCommand()
@@ -294,16 +373,26 @@ namespace Antmicro.Renode.Peripherals.I2C
             isWrite = (currentAddress & 0x1) == 0;
             currentAddress >>= 1;
 
+            // The address phase has completed either way, so the bus state advances to ADDRACK and
+            // the master keeps holding the bus for software. Only `nacked` distinguishes the two
+            // outcomes - and it is the ONLY thing that does, for firmware that reads STATE rather
+            // than the interrupt flags: a probe of an absent address must read ADDRACK with
+            // NACKED set.
+            busState = BusState.AddressAck;
+            busHold = true;
+
             // Try getting the peripheral that the transmission is targeting
             // If a peripheral at that address is not present, raise a NACK
             if(!TryGetByAddress(currentAddress, out targetPeripheral))
             {
+                nacked = true;
                 interruptsManager.SetInterrupt(Interrupt.NotAcknowledgeReceived);
                 this.Log(LogLevel.Warning, "Trying to address non-existent I2C peripheral with address 0x{0:x}", currentAddress);
                 return;
             }
 
             // Device exists, ACK the address byte
+            nacked = false;
             interruptsManager.SetInterrupt(Interrupt.AcknowledgeReceived);
 
             // Immediately read data from the device if the transfer is a read
@@ -324,12 +413,16 @@ namespace Antmicro.Renode.Peripherals.I2C
             // The byte was already written to the Tx buffer; only need to update ACK state now
             // If there is a device connected at the current address, then simulate an ACK.
             // Otherwise, raise a NACK
+            busState = BusState.DataAck;
+            busHold = true;
             if(targetPeripheral == null)
             {
+                nacked = true;
                 interruptsManager.SetInterrupt(Interrupt.NotAcknowledgeReceived);
             }
             else
             {
+                nacked = false;
                 interruptsManager.SetInterrupt(Interrupt.AcknowledgeReceived);
             }
         }
@@ -376,6 +469,22 @@ namespace Antmicro.Renode.Peripherals.I2C
             }
 
             slave.Write(data.ToArray());
+        }
+
+        private bool busBusy;
+        private bool busHold;
+        private bool nacked;
+        private BusState busState;
+
+        private enum BusState
+        {
+            Idle = 0,
+            Wait = 1,
+            Start = 2,
+            Address = 3,
+            AddressAck = 4,
+            Data = 5,
+            DataAck = 6,
         }
 
         private int currentAddress;
