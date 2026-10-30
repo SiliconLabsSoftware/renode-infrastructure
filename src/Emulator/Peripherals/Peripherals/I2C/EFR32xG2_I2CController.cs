@@ -8,6 +8,7 @@ using System.Collections.Generic;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
+using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 
 namespace Antmicro.Renode.Peripherals.I2C
@@ -22,7 +23,7 @@ namespace Antmicro.Renode.Peripherals.I2C
                     .WithTag("IPVERSION", 0, 32)
                 },
                 {(long)Registers.Enable, new DoubleWordRegister(this)
-                    .WithTaggedFlag("ENABLE", 0)
+                    .WithFlag(0, name: "EN")
                     .WithReservedBits(1, 31)
                 },
                 {(long)Registers.Control, GenerateControlRegister()},
@@ -38,7 +39,7 @@ namespace Antmicro.Renode.Peripherals.I2C
                 {(long)Registers.ReceiveBufferDoubleDataPeek, GenerateReceiveBufferDoubleDataPeekRegister()},
                 {(long)Registers.TransmitBufferData, GenerateTransmitBufferDataRegister()},
                 {(long)Registers.TransmitBufferDoubleData, GenerateTransmitBufferDoubleDataRegister()},
-                {(long)Registers.InterruptFlag, GenerateInterruptFlagRegister()},
+                {(long)Registers.InterruptFlag, GenerateRawInterruptFlagRegister()},
                 {(long)Registers.InterruptEnable, GenerateInterruptEnableRegister()},
                 {(long)Registers.InterruptFlagClear, GenerateInterruptFlagClearRegister()},
             };
@@ -47,12 +48,39 @@ namespace Antmicro.Renode.Peripherals.I2C
 
         public uint ReadDoubleWord(long offset)
         {
-            return registers.Read(offset);
+            // SET/CLR/TGL aliases read back the base register.
+            return registers.Read(offset & 0xFFF);
         }
 
         public void WriteDoubleWord(long offset, uint value)
         {
-            registers.Write(offset, value);
+            // Series-2 peripherals alias every register at +0x1000 (SET), +0x2000 (CLR) and
+            // +0x3000 (TGL). emlib drives this block almost entirely through them: I2C_Enable()
+            // is EN_SET, I2C_IntClear() is IF_CLR, I2C_IntEnable() is IEN_SET.
+            var alias = offset >> 12;
+            var baseOffset = offset & 0xFFF;
+            if(alias == 0)
+            {
+                registers.Write(offset, value);
+                return;
+            }
+            if(baseOffset == (long)Registers.InterruptFlag)
+            {
+                switch(alias)
+                {
+                case 1: SetInterruptFlags(value); break;
+                case 2: ClearInterruptFlags(value); break;
+                default: this.Log(LogLevel.Warning, "IF_TGL is not modelled (value 0x{0:X})", value); break;
+                }
+                return;
+            }
+            var current = registers.Read(baseOffset);
+            switch(alias)
+            {
+            case 1: registers.Write(baseOffset, current | value); break;
+            case 2: registers.Write(baseOffset, current & ~value); break;
+            default: registers.Write(baseOffset, current ^ value); break;
+            }
         }
 
         public override void Reset()
