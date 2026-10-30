@@ -102,7 +102,8 @@ namespace Antmicro.Renode.Peripherals.UART
             base.Reset();
             isEnabled = false;
             syncBusy = false;
-            spiSlaveDevice = null;
+            // The SPI child is not cleared: it is registered by the platform description, which
+            // is structure rather than state, and Register() is not called again after a reset.
             deferredActionsMask = 0;
             deferTimer.Enabled = false;
             RxFifoLevel.Set(false);
