@@ -97,6 +97,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                         {
                             fsmLock.Value = true;
                         }
+                        else
+                        {
+                            // Setting DISONDEMAND releases the FSM lock. emlib's CMU_HFXOInit
+                            // locks the HFXO, waits for STATUS.FSMLOCK, then sets DISONDEMAND
+                            // and waits for FSMLOCK to clear. Parts with CMD.MANUALOVERRIDE
+                            // (xG22) also clear it through that command, but parts with FSMLOCK
+                            // and no MANUALOVERRIDE (xG21) rely on this alone.
+                            fsmLock.Value = false;
+                        }
                     }, name: "DISONDEMAND")
                     .WithFlag(2, name: "KEEPWARM")
                     .WithReservedBits(3, 1)
