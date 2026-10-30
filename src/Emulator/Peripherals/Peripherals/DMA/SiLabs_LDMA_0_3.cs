@@ -522,7 +522,11 @@ namespace Antmicro.Renode.Peripherals.DMA
                         name: "DSTADDR")
                 ;
                 DescriptorLinkStructureAddressRegister = new DoubleWordRegister(parent)
-                    .WithEnumField<DoubleWordRegister, AddressingMode>(0, 1, FieldMode.Read,
+                    // LINKMODE is written by software together with LINKADDR (emlib's
+                    // LDMA_StartTransfer writes an absolute address) and decides how the LINKLOAD
+                    // that follows resolves it, so it must not keep the last descriptor's mode.
+                    .WithEnumField<DoubleWordRegister, AddressingMode>(0, 1,
+                        writeCallback: (_, value) => descriptor.LinkMode = value,
                         valueProviderCallback: _ => descriptor.LinkMode,
                         name: "LINKMODE")
                     .WithFlag(1,
@@ -569,6 +573,12 @@ namespace Antmicro.Renode.Peripherals.DMA
 
             public void LinkLoad()
             {
+                // LINKLOAD loads the linked descriptor AND enables the channel ("Set bit to load
+                // the linked descriptor and enable channel"); emlib's LDMA_StartTransfer starts
+                // every transfer this way and never writes CHEN. The field is set directly so
+                // the descriptor is loaded before anything starts.
+                enabled = true;
+                Done = false;
                 LoadDescriptor();
                 if(!RequestDisable && (ExecutesOnLoad || SignalIsOn))
                 {
@@ -748,6 +758,12 @@ namespace Antmicro.Renode.Peripherals.DMA
                 if(Done)
                 {
                     pullTimer.Enabled = false;
+                    if(!descriptor.Link)
+                    {
+                        // The last descriptor of a chain has no link: the channel disables
+                        // itself, and firmware polls CHSTATUS for that to detect completion.
+                        enabled = false;
+                    }
                 }
             }
 
