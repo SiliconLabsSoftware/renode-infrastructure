@@ -245,7 +245,18 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
             public uint Size => 64u << (int)Field_17.Value;
 
-            public uint Address { get; set; }
+            public uint Address
+            {
+                get
+                {
+                    return address;
+                }
+
+                set
+                {
+                    address = value;
+                }
+            }
 
             public uint ReadOffset
             {
@@ -474,6 +485,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             public IValueRegisterField Field_24;
             public IEnumRegisterField<BUFC_ThresholdMode> Field_21;
             public IValueRegisterField Field_20;
+            private uint address;
             private uint readOffset;
             private uint writeOffset;
             private readonly SiLabs_BUFC_Base parent;

@@ -13,6 +13,7 @@ using System.Linq;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
+using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.CPU;
@@ -125,10 +126,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             protocolTimerRegistersCollection = BuildProtocolTimerRegistersCollection();
             modulatorAndDemodulatorRegistersCollection = BuildModulatorAndDemodulatorRegistersCollection();
             automaticGainControlRegistersCollection = BuildAutomaticGainControlRegistersCollection();
-
             hostPortalRegistersCollection = BuildHostPortalRegistersCollection();
             lpw0PortalRegistersCollection = BuildLpw0PortalRegistersCollection();
-
             rfMailboxRegistersCollection = BuildRfMailboxRegistersCollection();
             fswMailboxRegistersCollection = BuildFswMailboxRegistersCollection();
 
@@ -688,17 +687,22 @@ namespace Antmicro.Renode.Peripherals.Wireless
         public void Reset()
         {
             currentFrame = null;
+            currentFrameSender = null;
+            currentFrameTxStart = TimeInterval.Empty;
+            currentFrameChannel = 0;
             currentFrameOffset = 0;
             currentDisassembleSubFrame = 0;
             currentDisassembleSubFrameStartWord = 0;
             currentDisassembleSubFrameBytes = 0;
             currentFrameByteOverTheAirTimeUs = 0;
             currentFrameElapsedAirtimeUs = 0;
+            currentFrameCodedSymbolsPerInfoBit = 0;
 
             FRC_rxFrameExitPending = false;
             FRC_rxDonePending = false;
+            FRC_rxAbortInProgress = false;
 
-            RAC_ongoingRxCollided = false;
+            RAC_rxFailReason = Enumeration_AG.EnumerationAGValue0;
             RAC_previous1RadioState = Enumeration_AB.EnumerationABValue0;
             RAC_previous2RadioState = Enumeration_AB.EnumerationABValue0;
             RAC_previous3RadioState = Enumeration_AB.EnumerationABValue0;
@@ -1103,14 +1107,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             });
         }
 
-        public void InteferenceQueueChangedCallback()
-        {
-            if(RAC_currentRadioState == Enumeration_AB.EnumerationABValue2 || RAC_currentRadioState == Enumeration_AB.EnumerationABValue3)
-            {
-                AGC_UpdateRssi();
-            }
-        }
-
         public UInt64 PacketTraceRadioTimestamp()
         {
             TrySyncTime();
@@ -1357,69 +1353,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         public void ReceiveFrame(byte[] frame, IRadio sender)
         {
-            var txStartTime = InterferenceQueue.GetTxStartTime(sender);
-            if(txStartTime == TimeInterval.Empty)
-            {
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "ReceiveFrame() at {0} on channel {1} ({2}) ({3}): Dropping (TX was aborted)",
-                         GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString());
-                return;
-            }
-
-            TrySyncTime();
-            var txRxSimulatorDelayUs = (GetTime() - txStartTime).TotalMicroseconds;
-
-            this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "ReceiveFrame() at {0} on channel {1} ({2}) ({3}): TX started at {4} (diff: {5})",
-                     GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString(), txStartTime, txRxSimulatorDelayUs);
-
-            if(RAC_internalRxState != Enumeration_Z.EnumerationZValue0)
-            {
-                RAC_ongoingRxCollided = true;
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (RX already ongoing - collision)");
-                return;
-            }
-
-            if(!InterferenceQueue.TryGetTxSignature(sender, out var senderSignature))
-            {
-                throw new Antmicro.Renode.Exceptions.RecoverableException(
-                    "ReceiveFrame: no TX signature found for sender although a TX start time was resolved");
-            }
-
-            if(!MODEM_GetPhySignature().IsDecodeCompatibleWith(senderSignature))
-            {
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (incompatible PHY: sender={0}, local={1})",
-                         senderSignature, MODEM_GetPhySignature());
-                return;
-            }
-
-            currentFrameCodedSymbolsPerInfoBit = senderSignature.CodedSymbolsPerInfoBit;
-
-            RAC_internalRxState = Enumeration_Z.EnumerationZValue1;
-            double delayUs = MODEM_GetTxChainDelayUs() + MODEM_GetPreambleOverTheAirTimeUs() + MODEM_GetSyncWordOverTheAirTimeUs();
-            field_161.Value = MODEM_DemodulatorState.FrameSearch;
-
-            currentFrame = frame;
-
-            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
-
-            if(InterferenceQueue.AnyOtherOnAir(sender, Channel))
-            {
-                RAC_ongoingRxCollided = true;
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "RX starting with co-channel interference already on air -> collision");
-            }
-
-            if(delayUs > txRxSimulatorDelayUs && PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs) > 0)
-            {
-                currentFrameElapsedAirtimeUs = 0;
-                rxTimer.Frequency = PROTIMER_GetPreCntOverflowFrequency();
-                rxTimer.Limit = PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs);
-                rxTimer.Enabled = true;
-            }
-            else
-            {
-                currentFrameElapsedAirtimeUs = txRxSimulatorDelayUs - delayUs;
-                RAC_RxTimerLimitReached();
-            }
-            FrcSnifferReceiveFrame(frame);
+            TryReceiveFrame(frame, sender, rxStartedMidPacket: false);
         }
 
         public uint PROTIMER_BaseCounterValue
@@ -1556,6 +1490,21 @@ namespace Antmicro.Renode.Peripherals.Wireless
         public bool LogBasicRadioActivityAsError = false;
         public bool LogInterrupts = false;
 
+        private void InteferenceQueueChangedCallback()
+        {
+            if(!EmulationManager.Instance.CurrentEmulation.TryGetMachineName(machine, out _))
+            {
+                return;
+            }
+
+            if(RAC_currentRadioState == Enumeration_AB.EnumerationABValue2 || RAC_currentRadioState == Enumeration_AB.EnumerationABValue3)
+            {
+                AGC_UpdateRssi();
+            }
+
+            CheckOngoingRx();
+        }
+
         private void Write<T>(DoubleWordRegisterCollection registersCollection, string regionName, long offset, uint value)
         where T : struct, IComparable, IFormattable
         {
@@ -1594,7 +1543,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         where T : struct, IComparable, IFormattable
         {
             var byteOffset = (int)(offset & 0x3);
-
             var registerValue = Read<T>(registersCollection, regionName, offset - byteOffset, true);
             var result = (byte)((registerValue >> byteOffset*8) & 0xFF);
             return result;
@@ -2416,7 +2364,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)Registers_G.RegG_12, new DoubleWordRegister(this)
                     .WithValueField(0, 8, FieldMode.Read, name: "REG_G_12_FIELD_1")
                     .WithValueField(8, 4, FieldMode.Read, name: "REG_G_12_FIELD_2")
-
                     .WithValueField(12, 2, FieldMode.Read, valueProviderCallback: _ => MODEM_GetCodedSymbolsPerInfoBit() == 2u ? 1u : 0u, name: "REG_G_12_FIELD_3")
                     .WithFlag(14, FieldMode.Read, valueProviderCallback: _ => field_210.Value != Enumeration_O.EnumerationOValue3, name: "REG_G_12_FIELD_4")
                     .WithFlag(15, FieldMode.Read, valueProviderCallback: _ => field_210.Value == Enumeration_O.EnumerationOValue3, name: "REG_G_12_FIELD_5")
@@ -2476,7 +2423,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                     PROTIMER_Enabled = false;
                                     break;
                                 case Enumeration_U.EnumerationUValue1:
-
                                     break;
                                 default:
                                     PROTIMER_Enabled = false;
@@ -2569,7 +2515,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(22, 10)
                 },
                 {(long)Registers_H.RegH_7, new DoubleWordRegister(this)
-
                     .WithValueField(0, 16, valueProviderCallback: _ => 0, name: "REG_H_7_FIELD_1")
                     .WithReservedBits(16, 16)
                 },
@@ -2586,7 +2531,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         {
                             PROTIMER_latchedBaseCounterValue = PROTIMER_BaseCounterValue;
                             PROTIMER_latchedWrapCounterValue = PROTIMER_WrapCounterValue;
-
                             return 0;
                         }, name: "REG_H_10_FIELD_1")
                     .WithReservedBits(16, 16)
@@ -2602,7 +2546,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         {
                             PROTIMER_seqLatchedBaseCounterValue = PROTIMER_BaseCounterValue;
                             PROTIMER_seqLatchedWrapCounterValue = PROTIMER_WrapCounterValue;
-
                             return 0;
                         }, name: "REG_H_48_FIELD_1")
                     .WithReservedBits(16, 16)
@@ -2889,7 +2832,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 },
                 {(long)Registers_H.RegH_29, new DoubleWordRegister(this)
                     .WithValueField(0, 16,
-
                         valueProviderCallback: _ => { return field_243.Value ? (ushort)PROTIMER_fixedBackoffRandomValue : (ushort)random.Next(); },
                         writeCallback: (_, value) => { if(!field_243.Value) { PROTIMER_fixedBackoffRandomValue = (uint)value; } },
                         name: "REG_H_29_FIELD_1")
@@ -2964,7 +2906,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             for(var index = 0; index < PROTIMER_NumberOfCaptureCompareChannels; index++)
             {
                 var i = index;
-
                 registerDictionary.Add(startOffset + blockSize * i + controlOffset,
                     new DoubleWordRegister(this)
                         .WithFlag(0, out PROTIMER_captureCompareChannel[i].Field_56, name: "REG_H_27_FIELD_4")
@@ -2984,7 +2925,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         .WithReservedBits(27, 5)
                         .WithWriteCallback((_, __) => PROTIMER_UpdateCompareTimer(i))
                 );
-
                 registerDictionary.Add(startOffset + blockSize * i + preOffset,
                     new DoubleWordRegister(this)
                         .WithValueField(0, 16, out PROTIMER_captureCompareChannel[i].Field_304,
@@ -3000,7 +2940,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                             }, name: "REG_H_27_FIELD_17")
                         .WithReservedBits(16, 16)
                 );
-
                 registerDictionary.Add(startOffset + blockSize * i + baseOffset,
                     new DoubleWordRegister(this)
                         .WithValueField(0, 32, out PROTIMER_captureCompareChannel[i].Field_44,
@@ -3011,7 +2950,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                 return PROTIMER_captureCompareChannel[i].Field_44.Value;
                             }, name: "REG_H_27_FIELD_18")
                 );
-
                 registerDictionary.Add(startOffset + blockSize * i + wrapOffset,
                     new DoubleWordRegister(this)
                         .WithValueField(0, 32, out PROTIMER_captureCompareChannel[i].Field_407,
@@ -3022,7 +2960,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                 return PROTIMER_captureCompareChannel[i].Field_407.Value;
                             }, name: "REG_H_27_FIELD_19")
                 );
-
                 registerDictionary.Add(startOffset + blockSize * i + wrapLowLimitOffset,
                     new DoubleWordRegister(this)
                         .WithValueField(0, 32, out PROTIMER_captureCompareChannel[i].Field_405,
@@ -3034,7 +2971,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                 return 0;
                             }, name: "REG_H_27_FIELD_20")
                 );
-
                 registerDictionary.Add(startOffset + blockSize * i + wrapHighLimitOffset,
                     new DoubleWordRegister(this)
                         .WithValueField(0, 32, out PROTIMER_captureCompareChannel[i].Field_404,
@@ -3046,7 +2982,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                 return 0;
                             }, name: "REG_H_27_FIELD_21")
                 );
-
                 registerDictionary.Add(startOffset + blockSize * i + baseLowLimitOffset,
                     new DoubleWordRegister(this)
                         .WithValueField(0, 32, out PROTIMER_captureCompareChannel[i].Field_42,
@@ -3058,7 +2993,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                 return 0;
                             }, name: "REG_H_27_FIELD_22")
                 );
-
                 registerDictionary.Add(startOffset + blockSize * i + baseHighLimitOffset,
                     new DoubleWordRegister(this)
                         .WithValueField(0, 32, out PROTIMER_captureCompareChannel[i].Field_41,
@@ -3114,7 +3048,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(16, 16)
                 },
                 {(long)Registers_I.RegI_6, new DoubleWordRegister(this)
-                    .WithFlag(0, out field_306, writeCallback: (_, value) => { if (value) {RAC_UpdateRadioStateMachine();} }, name: "REG_I_6_FIELD_1")
+                    .WithFlag(0, out field_306, writeCallback: (_, value) => { if (value) {RAC_TxEnable = false; RAC_UpdateRadioStateMachine();} }, name: "REG_I_6_FIELD_1")
                     .WithFlag(1, name: "REG_I_6_FIELD_2")
                     .WithReservedBits(2, 1)
                     .WithFlag(3, name: "REG_I_6_FIELD_3")
@@ -3513,11 +3447,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(17, 15)
                 },
                 {(long)Registers_K.RegK_13, new DoubleWordRegister(this)
-                    .WithValueField(0, 28, out field_380, name: "REG_K_13_FIELD_1")
+                    .WithValueField(0, 28, out field_380, writeCallback: (_, __) => TryAcquireOnAirFrames(), name: "REG_K_13_FIELD_1")
                     .WithReservedBits(28, 4)
                 },
                 {(long)Registers_K.RegK_15, new DoubleWordRegister(this, 0x001)
-                    .WithEnumField<DoubleWordRegister, Enumeration_AE>(0, 9, out field_382, name: "REG_K_15_FIELD_1")
+                    .WithEnumField<DoubleWordRegister, Enumeration_AE>(0, 9, out field_382, writeCallback: (_, __) => TryAcquireOnAirFrames(), name: "REG_K_15_FIELD_1")
                     .WithReservedBits(9, 23)
                 },
                 {(long)Registers_K.RegK_17, new DoubleWordRegister(this)
@@ -3561,7 +3495,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(7, name: "REG_C_3_FIELD_4")
                     .WithFlag(8, out field_109, FieldMode.Read, name: "REG_C_3_FIELD_5")
                     .WithFlag(9, FieldMode.Read, valueProviderCallback: _ => true, name: "REG_C_3_FIELD_6")
-                    .WithFlag(10, FieldMode.Read, valueProviderCallback: _ => false, name: "REG_C_3_FIELD_7")
+                    .WithFlag(10, FieldMode.Read, valueProviderCallback: _ => FRC_rxAbortInProgress, name: "REG_C_3_FIELD_7")
                     .WithFlag(11, name: "REG_C_3_FIELD_8")
                     .WithFlag(12, name: "REG_C_3_FIELD_9")
                     .WithFlag(13, name: "REG_C_3_FIELD_10")
@@ -3663,7 +3597,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(0, out field_114, name: "REG_C_20_FIELD_1")
                     .WithFlag(1, out field_94, name: "REG_C_20_FIELD_2")
                     .WithFlag(2, name: "REG_C_20_FIELD_3")
-                    .WithFlag(3, name: "REG_C_20_FIELD_4")
+                    .WithFlag(3, name: "REG_C_20_FIELD_4") 
                     .WithFlag(4, out field_101, name: "REG_C_20_FIELD_5")
                     .WithFlag(5, out field_102, name: "REG_C_20_FIELD_6")
                     .WithFlag(6, out field_103, name: "REG_C_20_FIELD_7")
@@ -3947,9 +3881,157 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         .WithValueField(16, 8, FieldMode.Read, valueProviderCallback: _ => FRC_packetBufferCapture[i * 4 + 2], writeCallback: (_, value) => FRC_packetBufferCapture[i * 4 + 2] = (byte)value, name: $"PKTBUF{i * 4 + 2}")
                         .WithValueField(24, 8, FieldMode.Read, valueProviderCallback: _ => FRC_packetBufferCapture[i * 4 + 3], writeCallback: (_, value) => FRC_packetBufferCapture[i * 4 + 3] = (byte)value, name: $"PKTBUF{i * 4 + 3}")
                 );
-            }
-            ;
+            };
             return new DoubleWordRegisterCollection(this, registerDictionary);
+        }
+
+        private void TryAcquireOnAirFrames()
+        {
+            CheckOngoingRx();
+
+            if(RAC_currentRadioState != Enumeration_AB.EnumerationABValue2)
+            {
+                return;
+            }
+
+            foreach(var packet in InterferenceQueue.GetLivePackets())
+            {
+                if(packet.Sender == this || packet.Channel != Channel)
+                {
+                    continue;
+                }
+                TryReceiveFrame(packet.PacketContent, packet.Sender, rxStartedMidPacket: true);
+            }
+        }
+
+        private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket)
+        {
+            TimeInterval txStartTime = InterferenceQueue.GetTxStartTime(sender);
+            if(txStartTime == TimeInterval.Empty)
+            {
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}): Dropping (TX was aborted)",
+                         GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString());
+                return;
+            }
+
+            TrySyncTime();
+            var txRxSimulatorDelayUs = (GetTime() - txStartTime).TotalMicroseconds;
+
+            if(RAC_internalRxState != Enumeration_Z.EnumerationZValue0)
+            {
+                if(sender == currentFrameSender && txStartTime == currentFrameTxStart)
+                {
+                    return;
+                }
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}): TX started at {4} (diff: {5})",
+                         GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString(), txStartTime, txRxSimulatorDelayUs);
+                RAC_rxFailReason |= Enumeration_AG.EnumerationAGValue1;
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (RX already ongoing - collision)");
+                return;
+            }
+
+            this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}): TX started at {4} (diff: {5})",
+                     GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString(), txStartTime, txRxSimulatorDelayUs);
+
+            if(!InterferenceQueue.TryGetTxSignature(sender, out var senderSignature))
+            {
+                throw new RecoverableException(
+                    "TryReceiveFrame: no TX signature found for sender although a TX start time was resolved");
+            }
+
+            if(!MODEM_GetPhySignature().IsDecodeCompatibleWith(senderSignature))
+            {
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (incompatible PHY: sender={0}, local={1})",
+                         senderSignature, MODEM_GetPhySignature());
+                return;
+            }
+
+            currentFrameCodedSymbolsPerInfoBit = senderSignature.CodedSymbolsPerInfoBit;
+
+            double txChainDelayUs = MODEM_GetTxChainDelayUs();
+            double preambleUs = MODEM_GetPreambleOverTheAirTimeUs();
+            double syncUs = MODEM_GetSyncWordOverTheAirTimeUs();
+            double delayUs = txChainDelayUs + preambleUs + syncUs;
+
+            if(rxStartedMidPacket)
+            {
+                double elapsedAfterChainUs = Math.Max(0, txRxSimulatorDelayUs - txChainDelayUs);
+                double remainingPreambleUs = Math.Max(0, preambleUs - elapsedAfterChainUs);
+                double minHeardPreambleUs = preambleUs * MODEM_MinimumHeardPreambleFraction;
+                if(remainingPreambleUs < minHeardPreambleUs)
+                {
+                    this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                             "Dropping (insufficient preamble): at {0} on channel {1} ({2}) remaining={3}us min={4}us",
+                             GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), remainingPreambleUs, minHeardPreambleUs);
+                    currentFrameCodedSymbolsPerInfoBit = 0;
+                    return;
+                }
+            }
+
+            RAC_internalRxState = Enumeration_Z.EnumerationZValue1;
+            field_161.Value = MODEM_DemodulatorState.FrameSearch;
+
+            currentFrame = frame;
+            currentFrameSender = sender;
+            currentFrameTxStart = txStartTime;
+            currentFrameChannel = Channel;
+
+            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
+
+            if(InterferenceQueue.AnyOtherOnAir(sender, Channel))
+            {
+                RAC_rxFailReason |= Enumeration_AG.EnumerationAGValue1;
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "RX starting with co-channel interference already on air -> collision");
+            }
+
+            if(delayUs > txRxSimulatorDelayUs && PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs) > 0)
+            {
+                currentFrameElapsedAirtimeUs = 0;
+                rxTimer.Frequency = PROTIMER_GetPreCntOverflowFrequency();
+                rxTimer.Limit = PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs);
+                rxTimer.Enabled = true;
+            }
+            else
+            {
+                currentFrameElapsedAirtimeUs = txRxSimulatorDelayUs - delayUs;
+                RAC_RxTimerLimitReached();
+            }
+            FrcSnifferReceiveFrame(frame);
+        }
+
+        private void CheckOngoingRx()
+        {
+            if(RAC_internalRxState == Enumeration_Z.EnumerationZValue0)
+            {
+                return;
+            }
+
+            if(InterferenceQueue.WasTransmissionAborted(currentFrameSender, currentFrameTxStart))
+            {
+                if(RAC_currentRadioState == Enumeration_AB.EnumerationABValue3)
+                {
+                    this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                             "TX aborted after sync at {0} on channel {1} ({2}); RX will fail",
+                             GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString());
+                    RAC_rxFailReason |= Enumeration_AG.EnumerationAGValue2;
+                }
+                else
+                {
+                    this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                             "Dropping (TX was aborted) at {0} on channel {1} ({2})",
+                             GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString());
+                    RAC_ClearOngoingRx();
+                }
+                return;
+            }
+
+            if(RAC_internalRxState == Enumeration_Z.EnumerationZValue1 && Channel != currentFrameChannel)
+            {
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                         "Dropping (retuned away before sync) at {0} on channel {1} ({2})",
+                         GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString());
+                RAC_ClearOngoingRx();
+            }
         }
 
         private void PROTIMER_UpdateTxRequestState()
@@ -4059,12 +4141,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             field_259.Value = false;
             field_255.Value = false;
             field_248.Value = false;
-
             if(!field_243.Value)
             {
                 field_244.Value = field_256.Value;
             }
-
             field_252.Value = 0;
 
             PROTIMER_listenBeforeTalkState = Enumeration_S.EnumerationSValue1;
@@ -4136,7 +4216,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     field_283.Value = true;
                     UpdateInterrupts();
                     PROTIMER_TriggerEvent(PROTIMER_Event.ListenBeforeTalkSuccess);
-
                     PROTIMER_TriggerEvent(PROTIMER_Event.ClearChannelAssessmentMeasurementCompleted);
                 }
                 else
@@ -4673,7 +4752,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             {
                 return 1u;
             }
-
             if(RAC_internalRxState != Enumeration_Z.EnumerationZValue0 && currentFrameCodedSymbolsPerInfoBit != 0)
             {
                 return currentFrameCodedSymbolsPerInfoBit;
@@ -4875,7 +4953,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     if(PROTIMER_listenBeforeTalkState != Enumeration_S.EnumerationSValue0)
                     {
                         PROTIMER_ListenBeforeTalkCcaCompleted();
-
                         if(PROTIMER_listenBeforeTalkState == Enumeration_S.EnumerationSValue2)
                         {
                             AGC_RestartRssiTimer();
@@ -4981,6 +5058,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        private void FRC_CompleteRxAbort()
+        {
+            FRC_rxAbortInProgress = false;
+            field_92.Value = true;
+            field_121.Value = true;
+        }
+
         private void FRC_RxAbortCommand()
         {
             if(RAC_currentRadioState != Enumeration_AB.EnumerationABValue3)
@@ -4993,6 +5077,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 FRC_RestoreActiveRxDescriptorBufferWriteOffset();
             }
 
+            FRC_rxAbortInProgress = true;
             RAC_UpdateRadioStateMachine(Enumeration_AC.EnumerationACValue27);
             UpdateInterrupts();
         }
@@ -5032,10 +5117,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private void FrcSnifferReceiveFrame(byte[] frame)
         {
             PtiFrameStart?.Invoke(SiLabs_PacketTraceFrameType.Receive);
-
-            int syncWordBytes = Math.Min((int) MODEM_SyncWordBytes, SNIFF_SYNCWORD_SERIAL_LEN);
+            int syncWordBytes = Math.Min((int) MODEM_SyncWordBytes, SniffSyncWordSerialLength);
             var syncWord = frame.Take(syncWordBytes).ToArray();
-
             var frameData = frame.Skip(syncWordBytes).ToArray();
             if(field_88.Value)
             {
@@ -5043,7 +5126,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             if(field_89.Value)
             {
-                var syncWordPadded = new byte[SNIFF_SYNCWORD_SERIAL_LEN];
+                var syncWordPadded = new byte[SniffSyncWordSerialLength];
                 Array.Copy(syncWord, syncWordPadded, syncWord.Length);
                 PtiDataOut?.Invoke(syncWordPadded);
             }
@@ -5264,10 +5347,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
 
                 var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveTransmitFrameDescriptor);
-
+                var payloadBudget = crcCountsInFrameLength ? (remaining - crcLength) : remaining;
                 var length = excludeFromWordCounter
                              ? descriptor.Words
-                             : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
+                             : (descriptor.UnlimitedWords ? payloadBudget : Math.Min(payloadBudget, descriptor.Words));
                 if(!bufferController.TryReadBytes(descriptor.BufferIndex, length, out var payload))
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.Concat(payload).ToArray()));
@@ -5326,10 +5409,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private void FRC_SnifferTransmitFrame(byte[] frame)
         {
             PtiFrameStart?.Invoke(SiLabs_PacketTraceFrameType.Transmit);
-
-            int syncWordBytes = Math.Min((int)MODEM_SyncWordBytes, SNIFF_SYNCWORD_SERIAL_LEN);
+            int syncWordBytes = Math.Min((int)MODEM_SyncWordBytes, SniffSyncWordSerialLength);
             var syncWord = frame.Take(syncWordBytes).ToArray();
-
             var frameData = frame.Skip(syncWordBytes).ToArray();
             if(field_88.Value)
             {
@@ -5337,7 +5418,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             if(field_89.Value)
             {
-                var syncWordPadded = new byte[SNIFF_SYNCWORD_SERIAL_LEN];
+                var syncWordPadded = new byte[SniffSyncWordSerialLength];
                 Array.Copy(syncWord, syncWordPadded, syncWord.Length);
                 PtiDataOut?.Invoke(syncWordPadded);
             }
@@ -5351,7 +5432,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
-        private void FRC_DisassembleCurrentFrame(bool forceCrcError, uint startOffset, uint numBytes)
+        private void FRC_DisassembleCurrentFrame(uint startOffset, uint numBytes)
         {
             var dynamicFrameLength = (field_65.Value != Enumeration_F.EnumerationFValue0);
             var isFrameStart = (startOffset <= MODEM_SyncWordBytes);
@@ -5407,10 +5488,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
 
                 var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveReceiveFrameDescriptor);
-
+                var payloadBudget = crcCountsInFrameLength ? (remaining - crcLength) : remaining;
                 var payloadTotal = excludeFromWordCounter
                                    ? descriptor.Words
-                                   : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
+                                   : (descriptor.UnlimitedWords ? payloadBudget : Math.Min(payloadBudget, descriptor.Words));
                 var bytesToWrite = (uint)Math.Min((long)(payloadTotal - currentDisassembleSubFrameBytes), (long)(endOffset - currentFrameOffset));
                 if(currentFrameOffset + bytesToWrite > (uint)currentFrame.Length)
                 {
@@ -5424,7 +5505,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     var skipCount = (field_146.Value < field_77.Value)
                                     ? Math.Min(bytesToWrite, field_77.Value - field_146.Value) : 0;
                     var pktCaptureBuff = currentFrame.Skip((int)(currentFrameOffset + skipCount)).Take((int)(bytesToWrite - skipCount));
-
                     var captureOffset = (field_146.Value + skipCount) - field_77.Value;
                     currentFrameOffset += bytesToWrite;
                     if(!excludeFromWordCounter)
@@ -5456,7 +5536,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 if(descriptor.Field_153.Value)
                 {
                     var crc = currentFrame.Skip((int)currentFrameOffset).Take((int)CRC_CrcWidth).ToArray();
-
                     currentFrameOffset += (uint)crc.Length;
                     if(crc.Length != CRC_CrcWidth)
                     {
@@ -5508,7 +5587,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
                 if(field_100.Value)
                 {
-                    bufferController.WriteData(descriptor.BufferIndex, (forceCrcError) ? 0x00U : 0x80U);
+                    bufferController.WriteData(descriptor.BufferIndex, (RAC_RxWillFail) ? 0x00U : 0x80U);
                 }
                 if(field_96.Value)
                 {
@@ -5557,7 +5636,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             frameLength >>= (byte)field_63.Value;
             frameLength &= (1u << (byte)field_64.Value) - 1;
-
             int offset = (field_66.Value & 0x8) != 0
                 ? (int)(field_66.Value | unchecked((uint)~0xF))
                 : (int)field_66.Value;
@@ -5670,7 +5748,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private void RAC_PaRampingTimerHandleLimitReached()
         {
             paRampingTimer.Enabled = false;
-
             MODEM_TxRampingDoneInterrupt = true;
             field_311.Value = RAC_paOutputLevelRamping;
             UpdateInterrupts();
@@ -5707,10 +5784,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 if(signal == Enumeration_AC.EnumerationACValue1)
                 {
                     RAC_ClearOngoingTxOrRx();
-
                     RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue8);
                 }
-
                 else if(field_307.Value)
                 {
                     RAC_ClearOngoingTxOrRx();
@@ -5729,7 +5804,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     }
                 }
 
-                else if(signal == Enumeration_AC.EnumerationACValue3)
+                else if(signal == Enumeration_AC.EnumerationACValue3 )
                 {
                     if(RAC_currentRadioState == Enumeration_AB.EnumerationABValue6)
                     {
@@ -5858,7 +5933,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                             {
                                 RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue1);
                             }
-
                             else if(!RAC_RxEnable || signal == Enumeration_AC.EnumerationACValue13)
                             {
                                 RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue4);
@@ -5870,8 +5944,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     {
                         if(signal == Enumeration_AC.EnumerationACValue27)
                         {
-                            field_92.Value = true;
-                            field_121.Value = true;
+                            FRC_CompleteRxAbort();
                             RAC_ClearOngoingRx();
                             RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue4);
                         }
@@ -5976,12 +6049,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         field_334.Value = true;
                         break;
                     case Enumeration_AB.EnumerationABValue2:
-
                         field_76.Value = 0;
                         field_332.Value = true;
                         field_330.Value = true;
                         field_161.Value = MODEM_DemodulatorState.PreambleSearch;
                         FRC_UpdateRawMode();
+                        TryAcquireOnAirFrames();
                         break;
                     case Enumeration_AB.EnumerationABValue3:
                         field_328.Value = true;
@@ -5991,7 +6064,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     case Enumeration_AB.EnumerationABValue4:
                         field_340.Value = true;
                         field_338.Value = true;
-
                         field_314.Value = Enumeration_AB.EnumerationABValue4;
                         break;
                     case Enumeration_AB.EnumerationABValue5:
@@ -6001,14 +6073,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     case Enumeration_AB.EnumerationABValue6:
                         field_348.Value = true;
                         field_346.Value = true;
-
                         var frame = FRC_AssembleFrame();
                         TransmitFrame(frame);
                         break;
                     case Enumeration_AB.EnumerationABValue7:
                         field_356.Value = true;
                         field_354.Value = true;
-
                         field_371.Value = Enumeration_AB.EnumerationABValue7;
                         break;
                     case Enumeration_AB.EnumerationABValue8:
@@ -6031,7 +6101,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     {
                         AGC_UpdateRssi();
                     }
-
                     else if(RAC_currentRadioState != Enumeration_AB.EnumerationABValue2 && RAC_currentRadioState != Enumeration_AB.EnumerationABValue3)
                     {
                         AGC_StopRssiTimer();
@@ -6057,8 +6126,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
             FRC_rxFrameExitPending = false;
             FRC_rxDonePending = false;
             rxTimer.Enabled = false;
-            RAC_ongoingRxCollided = false;
+            RAC_rxFailReason = Enumeration_AG.EnumerationAGValue0;
             RAC_internalRxState = Enumeration_Z.EnumerationZValue0;
+            currentFrameSender = null;
+            currentFrameTxStart = TimeInterval.Empty;
+            currentFrameChannel = 0;
+            currentFrameCodedSymbolsPerInfoBit = 0;
         }
 
         private void RAC_ClearOngoingTxOrRx()
@@ -6086,17 +6159,22 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private void RAC_RxTimerLimitReached()
         {
             rxTimer.Enabled = false;
+            CheckOngoingRx();
+            if(RAC_internalRxState == Enumeration_Z.EnumerationZValue0)
+            {
+                return;
+            }
 
             if(RAC_internalRxState == Enumeration_Z.EnumerationZValue1)
             {
-                if(RAC_currentRadioState != Enumeration_AB.EnumerationABValue2)
+                if(RAC_currentRadioState != Enumeration_AB.EnumerationABValue2 || Channel != currentFrameChannel)
                 {
                     RAC_ClearOngoingRx();
                     this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping (not in RXSEARCH): at {0} (channel {1}) ({2}): {3}", GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), BitConverter.ToString(currentFrame));
                     return;
                 }
 
-                if(RAC_ongoingRxCollided)
+                if(RAC_RxWillFail)
                 {
                     RAC_ClearOngoingRx();
                     this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping (PRE/SYNC COLLISION): at {0} (channel {1}) ({2}): {3}", GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), BitConverter.ToString(currentFrame));
@@ -6126,7 +6204,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             {
                 if(((uint)currentFrame.Length - currentFrameOffset) > FRC_RxFragmentLengthInBytes)
                 {
-                    FRC_DisassembleCurrentFrame(RAC_ongoingRxCollided, currentFrameOffset, FRC_RxFragmentLengthInBytes);
+                    FRC_DisassembleCurrentFrame(currentFrameOffset, FRC_RxFragmentLengthInBytes);
                 }
                 if(RAC_TryArmRxDeliveryTimer())
                 {
@@ -6159,12 +6237,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
             PROTIMER_TriggerEvent(PROTIMER_Event.RxDone);
             PROTIMER_TriggerEvent(PROTIMER_Event.TxOrRxDone);
 
-            if(RAC_ongoingRxCollided)
+            if(RAC_RxWillFail)
             {
                 field_68.Value = true;
                 field_115.Value = true;
 
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping at {0}: RX collision", GetTime());
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping at {0}: RX fail ({1})", GetTime(), RAC_rxFailReason);
 
                 if(field_102.Value & !field_94.Value)
                 {
@@ -6172,12 +6250,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
             }
 
-            if(!RAC_ongoingRxCollided || field_94.Value)
+            if(!RAC_RxWillFail || field_94.Value)
             {
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Received at {0} on channel {1} ({2}) (RSSI={3}, collided={4}): {5}",
-                         GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), AGC_FrameRssiIntegerPart, RAC_ongoingRxCollided, BitConverter.ToString(currentFrame));
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Received at {0} on channel {1} ({2}) (RSSI={3}, crcFail={4}): {5}",
+                         GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), AGC_FrameRssiIntegerPart, RAC_rxFailReason, BitConverter.ToString(currentFrame));
 
-                FRC_DisassembleCurrentFrame(RAC_ongoingRxCollided, currentFrameOffset, (uint)currentFrame.Length - currentFrameOffset);
+                FRC_DisassembleCurrentFrame(currentFrameOffset, (uint)currentFrame.Length - currentFrameOffset);
 
                 field_104.Value = true;
                 field_123.Value = true;
@@ -6269,7 +6347,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Sending frame at {0} on channel {1} ({2}) ({3}): {4}",
                      GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString(), BitConverter.ToString(frame));
 
-            InterferenceQueue.Add(this, MODEM_GetPhySignature(), Channel, 0, frame);
+            InterferenceQueue.Add(this, MODEM_GetPhySignature(), Channel, 0 , frame);
 
             FRC_SnifferTransmitFrame(frame);
             FrameSent?.Invoke(this, frame);
@@ -6317,9 +6395,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         }
 
         private uint RAC_RxEnableMask => ((uint)field_365.Value
-
                                           | ((PROTIMER_RxEnable ? 1U : 0U) << 14)
-
                                         );
 
         private bool RAC_RxEnable => RAC_RxEnableMask != 0;
@@ -6331,6 +6407,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             get => RAC_txEnable;
             set
             {
+                value &= !field_306.Value;
                 var risingEdge = value && !RAC_txEnable;
                 RAC_txEnable = value;
 
@@ -6360,7 +6437,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         UpdateInterrupts();
 
                         paRampingTimer.Enabled = false;
-
                         field_311.Value = !value;
                         paRampingTimer.Value = 0;
                         paRampingTimer.Limit = RAC_PowerAmplifierRampingTimeUs;
@@ -6369,6 +6445,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
             }
         }
+
+        private bool RAC_RxWillFail => RAC_rxFailReason != Enumeration_AG.EnumerationAGValue0;
 
         private bool LPW0PORTAL_PowerUpAck
         {
@@ -6664,11 +6742,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IValueRegisterField field_214;
         private IFlagRegisterField field_212;
         private IFlagRegisterField field_226;
-
         private IFlagRegisterField field_213;
-
         private IFlagRegisterField field_166;
-
         private IFlagRegisterField field_165;
         private IFlagRegisterField field_160;
         private IValueRegisterField field_217;
@@ -6704,7 +6779,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IValueRegisterField field_267;
         private IValueRegisterField field_269;
         private IFlagRegisterField field_243;
-
         private uint PROTIMER_fixedBackoffRandomValue = 1;
         private IValueRegisterField field_242;
         private IValueRegisterField field_241;
@@ -6874,6 +6948,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private bool FRC_rxDonePending = false;
         private IFlagRegisterField field_78;
         private bool FRC_rxFrameExitPending = false;
+        private bool FRC_rxAbortInProgress = false;
         private IFlagRegisterField field_118;
         private IFlagRegisterField field_134;
         private IFlagRegisterField field_126;
@@ -6936,7 +7011,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private Enumeration_Z RAC_internalRxState = Enumeration_Z.EnumerationZValue0;
         private Enumeration_AA RAC_internalTxState = Enumeration_AA.EnumerationAAValue0;
-        private bool RAC_ongoingRxCollided = false;
+        private Enumeration_AG RAC_rxFailReason = Enumeration_AG.EnumerationAGValue0;
         private Enumeration_AB RAC_currentRadioState = Enumeration_AB.EnumerationABValue0;
         private Enumeration_AB RAC_previous1RadioState = Enumeration_AB.EnumerationABValue0;
         private Enumeration_AB RAC_previous2RadioState = Enumeration_AB.EnumerationABValue0;
@@ -7013,13 +7088,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IEnumRegisterField<Enumeration_AD> field_369;
 
         private byte[] currentFrame;
+        private IRadio currentFrameSender;
+        private TimeInterval currentFrameTxStart = TimeInterval.Empty;
+        private int currentFrameChannel;
         private uint currentFrameOffset = 0;
         private double currentFrameByteOverTheAirTimeUs = 0;
         private double currentFrameElapsedAirtimeUs = 0;
         private uint currentFrameCodedSymbolsPerInfoBit = 0;
         private int currentDisassembleSubFrame = 0;
         private uint currentDisassembleSubFrameStartWord = 0;
-
         private uint currentDisassembleSubFrameBytes = 0;
         private ISiLabs_CMU cmu;
 
@@ -7073,18 +7150,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private const uint ToggleRegisterOffset = 0x3000;
         private const ulong MicrosecondFrequency = 1000000UL;
         private const ulong HalfMicrosecondFrequency = 2000000UL;
-        const int SNIFF_SYNCWORD_SERIAL_LEN = 4;
+        private const int SniffSyncWordSerialLength = 4;
         private const uint FRC_NumberOfFrameDescriptors = 4;
-
         private const int FRC_FirstTransmitFrameDescriptor = 0;
         private const int FRC_FirstReceiveFrameDescriptor = 2;
-
         private const int FRC_NumberOfWordCounterCompareChannels = 3;
         private const uint FRC_PacketBufferCaptureSize = 48;
         private const uint FRC_RxFragmentLengthInBytes = 4;
-
         private const uint FRC_RateSelectCodingB = 2u;
-
         private const uint RAC_PowerAmplifierRampingTimeUs = 5;
         private const uint RAC_NumberOfSequencerStorageRegisters = 4;
         private const uint RAC_NumberOfScratchRegisters = 8;
@@ -7094,8 +7167,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private const uint PROTIMER_NumberOfCaptureCompareChannels = 12;
         private const uint PROTIMER_NumberOfListenBeforeTalkRandomBackoffValues = 8;
         private const uint PROTIMER_NumberOfCaptureCompareChannelPrsEvents = 5;
-
         private const double MODEM_BleCodedPhyPreambleOverTheAirTimeUs = 80.0;
+        private const double MODEM_MinimumHeardPreambleFraction = 0.5;
         private const uint MODEM_BlePhyRxChainDelayNanoS = 50000;
         private const uint MODEM_BlePhyRxDoneDelayNanoS = 11000;
         private const uint MODEM_BlePhyTxChainDelayNanoS = 3500;
@@ -7104,9 +7177,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private const uint MODEM_802154PhyRxDoneDelayNanoS = 6625;
         private const uint MODEM_802154PhyTxChainDelayNanoS = 500;
         private const uint MODEM_802154PhyTxDoneChainDelayNanoS = 0;
-
         private const uint AGC_RssiWrapCompensationOffsetDbm = 50;
-
         private const uint AGC_OQPSK250KbpsPhyCcaRssiMeasurePeriodUs = 128;
         private const uint AGC_OQPSK250KbpsPhyRssiMeasurePeriodUs = 8;
         private const uint AGC_OQPSK250KbpsPhyBackgroundRssiMeasurePeriodUs = 50;
@@ -7190,10 +7261,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {
                     Field_376.Value = true;
                     Field_400.Value = false;
-
-                    // TODO: Same pre-decrement as in SiLabs_xG24_LPW. It shifts compare matches one
-                    // precounter cycle earlier (compare == TOP never matches) and makes TOP 0 and 1
-                    // equivalent. Consider detecting the underflow in Update() instead.
                     Field_52.Value = Field_54.Value > 0 ? Field_54.Value - 1 : 0;
                     Field_300.Value = Field_302.Value;
                 }
@@ -7265,7 +7332,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     {
                         Field_400.Value = false;
                         Field_376.Value = true;
-
                         Field_52.Value = Field_54.Value > 0 ? Field_54.Value - 1 : 0;
                         Field_300.Value = Field_302.Value;
                         Synchronized?.Invoke();
@@ -7321,7 +7387,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             public IValueRegisterField Field_403;
             public IValueRegisterField Field_45;
-
             public IFlagRegisterField Field_153;
             public IFlagRegisterField Field_49;
             public IValueRegisterField Field_55;
@@ -7505,6 +7570,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
             EnumerationACValue25  = 25,
             EnumerationACValue26  = 26,
             EnumerationACValue27  = 27,
+        }
+
+        [Flags]
+        private enum Enumeration_AG
+        {
+            EnumerationAGValue0   = 0,
+            EnumerationAGValue1   = 1 << 0,
+            EnumerationAGValue2   = 1 << 1,
         }
 
         private enum Enumeration_Z
@@ -7815,7 +7888,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegC_84               = 0x017C,
             RegC_85               = 0x0180,
             RegC_86               = 0x0184,
-
             RegC_87               = 0x1000,
             RegC_88               = 0x1004,
             RegC_89               = 0x1008,
@@ -7902,7 +7974,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegC_170              = 0x117C,
             RegC_171              = 0x1180,
             RegC_172              = 0x1184,
-
             RegC_173              = 0x2000,
             RegC_174              = 0x2004,
             RegC_175              = 0x2008,
@@ -7989,7 +8060,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegC_256              = 0x217C,
             RegC_257              = 0x2180,
             RegC_258              = 0x2184,
-
             RegC_259              = 0x3000,
             RegC_260              = 0x3004,
             RegC_261              = 0x3008,
@@ -8317,7 +8387,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegG_235              = 0x0580,
             RegG_236              = 0x0584,
             RegG_237              = 0x0588,
-
             RegG_238              = 0x1000,
             RegG_239              = 0x1004,
             RegG_240              = 0x1008,
@@ -8555,7 +8624,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegG_472              = 0x1580,
             RegG_473              = 0x1584,
             RegG_474              = 0x1588,
-
             RegG_475              = 0x2000,
             RegG_476              = 0x2004,
             RegG_477              = 0x2008,
@@ -8793,7 +8861,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegG_709              = 0x2580,
             RegG_710              = 0x2584,
             RegG_711              = 0x2588,
-
             RegG_712              = 0x3000,
             RegG_713              = 0x3004,
             RegG_714              = 0x3008,
@@ -9116,7 +9183,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegA_79               = 0x0168,
             RegA_80               = 0x0180,
             RegA_81               = 0x0184,
-
             RegA_82               = 0x1000,
             RegA_83               = 0x1004,
             RegA_84               = 0x1008,
@@ -9198,7 +9264,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegA_160              = 0x1168,
             RegA_161              = 0x1180,
             RegA_162              = 0x1184,
-
             RegA_163              = 0x2000,
             RegA_164              = 0x2004,
             RegA_165              = 0x2008,
@@ -9280,7 +9345,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegA_241              = 0x2168,
             RegA_242              = 0x2180,
             RegA_243              = 0x2184,
-
             RegA_244              = 0x3000,
             RegA_245              = 0x3004,
             RegA_246              = 0x3008,
@@ -9375,7 +9439,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegB_7                = 0x0018,
             RegB_8                = 0x001C,
             RegB_9                = 0x0020,
-
             RegB_10               = 0x1000,
             RegB_11               = 0x1004,
             RegB_12               = 0x1008,
@@ -9385,7 +9448,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegB_16               = 0x1018,
             RegB_17               = 0x101C,
             RegB_18               = 0x1020,
-
             RegB_19               = 0x2000,
             RegB_20               = 0x2004,
             RegB_21               = 0x2008,
@@ -9395,7 +9457,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegB_25               = 0x2018,
             RegB_26               = 0x201C,
             RegB_27               = 0x2020,
-
             RegB_28               = 0x3000,
             RegB_29               = 0x3004,
             RegB_30               = 0x3008,
@@ -9559,7 +9620,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegH_148              = 0x0274,
             RegH_149              = 0x0278,
             RegH_150              = 0x027C,
-
             RegH_151              = 0x1000,
             RegH_152              = 0x1004,
             RegH_153              = 0x1008,
@@ -9710,7 +9770,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegH_298              = 0x1274,
             RegH_299              = 0x1278,
             RegH_300              = 0x127C,
-
             RegH_301              = 0x2000,
             RegH_302              = 0x2004,
             RegH_303              = 0x2008,
@@ -9861,7 +9920,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegH_448              = 0x2274,
             RegH_449              = 0x2278,
             RegH_450              = 0x227C,
-
             RegH_451              = 0x3000,
             RegH_452              = 0x3004,
             RegH_453              = 0x3008,
@@ -10161,7 +10219,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegI_143              = 0x07F4,
             RegI_144              = 0x07F8,
             RegI_145              = 0x07FC,
-
             RegI_146              = 0x1000,
             RegI_147              = 0x1004,
             RegI_148              = 0x1008,
@@ -10307,7 +10364,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegI_288              = 0x17F4,
             RegI_289              = 0x17F8,
             RegI_290              = 0x17FC,
-
             RegI_291              = 0x2000,
             RegI_292              = 0x2004,
             RegI_293              = 0x2008,
@@ -10453,7 +10509,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegI_433              = 0x27F4,
             RegI_434              = 0x27F8,
             RegI_435              = 0x27FC,
-
             RegI_436              = 0x3000,
             RegI_437              = 0x3004,
             RegI_438              = 0x3008,
@@ -10646,7 +10701,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegK_41               = 0x00A0,
             RegK_42               = 0x00A4,
             RegK_43               = 0x00A8,
-
             RegK_44               = 0x1000,
             RegK_45               = 0x1004,
             RegK_46               = 0x1008,
@@ -10690,7 +10744,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegK_84               = 0x10A0,
             RegK_85               = 0x10A4,
             RegK_86               = 0x10A8,
-
             RegK_87               = 0x2000,
             RegK_88               = 0x2004,
             RegK_89               = 0x2008,
@@ -10734,7 +10787,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegK_127              = 0x20A0,
             RegK_128              = 0x20A4,
             RegK_129              = 0x20A8,
-
             RegK_130              = 0x3000,
             RegK_131              = 0x3004,
             RegK_132              = 0x3008,
@@ -10788,21 +10840,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegD_4                = 0x000C,
             RegD_5                = 0x0040,
             RegD_6                = 0x0044,
-
             RegD_7                = 0x1000,
             RegD_8                = 0x1004,
             RegD_9                = 0x1008,
             RegD_10               = 0x100C,
             RegD_11               = 0x1040,
             RegD_12               = 0x1044,
-
             RegD_13               = 0x2000,
             RegD_14               = 0x2004,
             RegD_15               = 0x2008,
             RegD_16               = 0x200C,
             RegD_17               = 0x2040,
             RegD_18               = 0x2044,
-
             RegD_19               = 0x3000,
             RegD_20               = 0x3004,
             RegD_21               = 0x3008,
@@ -10819,21 +10868,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegJ_4                = 0x000C,
             RegJ_5                = 0x0040,
             RegJ_6                = 0x0044,
-
             RegJ_7                = 0x1000,
             RegJ_8                = 0x1004,
             RegJ_9                = 0x1008,
             RegJ_10               = 0x100C,
             RegJ_11               = 0x1040,
             RegJ_12               = 0x1044,
-
             RegJ_13               = 0x2000,
             RegJ_14               = 0x2004,
             RegJ_15               = 0x2008,
             RegJ_16               = 0x200C,
             RegJ_17               = 0x2040,
             RegJ_18               = 0x2044,
-
             RegJ_19               = 0x3000,
             RegJ_20               = 0x3004,
             RegJ_21               = 0x3008,
@@ -10857,7 +10903,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegE_11               = 0x0028,
             RegE_12               = 0x002C,
             RegE_13               = 0x0030,
-
             RegE_14               = 0x1000,
             RegE_15               = 0x1004,
             RegE_16               = 0x1008,
@@ -10871,7 +10916,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegE_24               = 0x1028,
             RegE_25               = 0x102C,
             RegE_26               = 0x1030,
-
             RegE_27               = 0x2000,
             RegE_28               = 0x2004,
             RegE_29               = 0x2008,
@@ -10885,7 +10929,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegE_37               = 0x2028,
             RegE_38               = 0x202C,
             RegE_39               = 0x2030,
-
             RegE_40               = 0x3000,
             RegE_41               = 0x3004,
             RegE_42               = 0x3008,
@@ -10916,7 +10959,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegF_11               = 0x0028,
             RegF_12               = 0x002C,
             RegF_13               = 0x0030,
-
             RegF_14               = 0x1000,
             RegF_15               = 0x1004,
             RegF_16               = 0x1008,
@@ -10930,7 +10972,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegF_24               = 0x1028,
             RegF_25               = 0x102C,
             RegF_26               = 0x1030,
-
             RegF_27               = 0x2000,
             RegF_28               = 0x2004,
             RegF_29               = 0x2008,
@@ -10944,7 +10985,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegF_37               = 0x2028,
             RegF_38               = 0x202C,
             RegF_39               = 0x2030,
-
             RegF_40               = 0x3000,
             RegF_41               = 0x3004,
             RegF_42               = 0x3008,

@@ -317,6 +317,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 }
 
                 cpu.CpuWaitSignal.Set(false);
+
+                // Releasing CpuWait only queues the exit from reset for the next synced state,
+                // which is never reached while the CPUs driving virtual time are halted.
+                if(cpu.EmulationState == EmulationCPUState.InReset)
+                {
+                    cpu.IsHalted = false;
+                    cpu.Resume();
+                }
             }
         }
 

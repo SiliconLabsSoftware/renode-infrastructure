@@ -63,6 +63,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                              enabled: false, workMode: WorkMode.OneShot, eventEnabled: true, autoUpdate: true);
             rxTimer.LimitReached += RAC_RxTimerLimitReached;
 
+            rxWarmSettleTimer = new LimitTimer(machine.ClockSource, MicrosecondFrequency, this, "rxwarmsettle", initialTimerLimit, direction: Direction.Ascending,
+                                               enabled: false, workMode: WorkMode.OneShot, eventEnabled: true, autoUpdate: true);
+            rxWarmSettleTimer.LimitReached += RAC_RxWarmSettleTimerLimitReached;
+
             FrameControllerPrioritizedIRQ = new GPIO();
             FrameControllerIRQ = new GPIO();
             ModulatorAndDemodulatorIRQ = new GPIO();
@@ -625,13 +629,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
             currentDisassembleSubFrameBytes = 0;
             currentFrameByteOverTheAirTimeUs = 0;
             currentFrameElapsedAirtimeUs = 0;
+            currentFrameSender = null;
+            currentFrameTxStart = TimeInterval.Empty;
+            currentFrameChannel = 0;
+            currentFrameCodedSymbolsPerInfoBit = 0;
 
             // Reset FRC variables
             FRC_rxDonePending = false;
             FRC_rxFrameIrqClearedPending = false;
+            FRC_rxAbortInProgress = false;
 
             // Reset RAC variables
-            RAC_ongoingRxCollided = false;
+            RAC_rxFailReason = RAC_RxFailReason.None;
             RAC_previous1RadioState = RAC_RadioState.Off;
             RAC_previous2RadioState = RAC_RadioState.Off;
             RAC_previous3RadioState = RAC_RadioState.Off;
@@ -664,6 +673,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             proTimer.Enabled = false;
             rxTimer.Enabled = false;
             txTimer.Enabled = false;
+            rxWarmSettleTimer.Enabled = false;
+            SYNTH_startValid = false;
 
             // Reset the sequencer and put it back in halted state.
             sequencer.CpuWaitSignal.Set(true);
@@ -689,10 +700,16 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         public void InteferenceQueueChangedCallback()
         {
+            if(!EmulationManager.Instance.CurrentEmulation.TryGetMachineName(machine, out _))
+            {
+                return;
+            }
+
             if(RAC_currentRadioState == RAC_RadioState.RxSearch || RAC_currentRadioState == RAC_RadioState.RxFrame)
             {
                 AGC_UpdateRssi();
             }
+            CheckOngoingRx();
         }
 
         public UInt64 PacketTraceRadioTimestamp()
@@ -1077,101 +1094,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         public void ReceiveFrame(byte[] frame, IRadio sender)
         {
-            var txStartTime = InterferenceQueue.GetTxStartTime(sender);
-            if(txStartTime == TimeInterval.Empty)
-            {
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "ReceiveFrame() at {0} on channel {1} ({2}) ({3}): Dropping (TX was aborted)",
-                         GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString());
-                return;
-            }
-
-            TrySyncTime();
-            var txRxSimulatorDelayUs = (GetTime() - txStartTime).TotalMicroseconds;
-
-            this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "ReceiveFrame() at {0} on channel {1} ({2}) ({3}), TX started at {4} (diff: {5})",
-                     GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString(), txStartTime, txRxSimulatorDelayUs);
-
-            // If we are already receiving a frame, this co-channel transmission interferes with the
-            // ongoing reception. Energy-based: any co-channel signal corrupts it, regardless of whether
-            // either frame is decode-compatible. We mark the ongoing RX as collided and drop the newcomer.
-            if(RAC_internalRxState != RAC_InternalRxState.Idle)
-            {
-                // TODO: for now we always consider this a collision. In the future we will want to take into account
-                // the RSSI of both packets and determine if we could hear one of them.
-                // The ongoing RX is marked as "interfered", which can result in either a preamble not heard
-                // at all or a frame that fails CRC.
-                RAC_ongoingRxCollided = true;
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (RX already ongoing - collision)");
-                return;
-            }
-
-            // The txStartTime guard above already returned if the sender had no over-the-air entry, so a
-            // missing signature here is an internal invariant violation rather than a normal drop.
-            if(!InterferenceQueue.TryGetTxSignature(sender, out var senderSignature))
-            {
-                throw new Antmicro.Renode.Exceptions.RecoverableException(
-                    "ReceiveFrame: no TX signature found for sender although a TX start time was resolved");
-            }
-
-            // No reception is in progress. Drop frames whose PHY we cannot decode (the medium only matched
-            // carrier frequency). With no RX to corrupt there is nothing to flag as a collision; we simply
-            // cannot lock onto a PHY we are not configured for. The sync word is still checked later by the
-            // RX pipeline for decode-compatible frames.
-            if(!MODEM_GetPhySignature().IsDecodeCompatibleWith(senderSignature))
-            {
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (incompatible PHY: sender={0}, local={1})",
-                         senderSignature, MODEM_GetPhySignature());
-                return;
-            }
-
-            // Adopt the sender's coding sub-rate for the whole reception so our modelled airtime matches what
-            // the transmitter actually spent on air.
-            currentFrameCodedSymbolsPerInfoBit = senderSignature.CodedSymbolsPerInfoBit;
-
-            // Ideally we would schedule a first RX step that accounts for the txChainDelay and some portion of the preamble
-            // to still allow reception of frames for which we only heard some portion of the preamble.
-            // For simplicity, we just skip this step and check the radio state after both preamble and sync word have been received.
-
-            // We first schedule the RX timer to the point that the preamble and sych word are fully transmitted.
-            // That must also include the txChainDelay since at the transmitter we don't delay the FrameTxStart event.
-            // The RX state is set before computing the delay so the coded airtime uses the sender's sub-rate
-            // (see MODEM_GetCodedSymbolsPerInfoBit's RX override).
-            RAC_internalRxState = RAC_InternalRxState.PreambleAndSyncWord;
-            double delayUs = MODEM_GetTxChainDelayUs() + MODEM_GetPreambleOverTheAirTimeUs() + MODEM_GetSyncWordOverTheAirTimeUs();
-            MODEM_demodulatorState.Value = MODEM_DemodulatorState.FrameSearch;
-
-            currentFrame = frame;
-
-            // We set the RSSIFRAME here to make sure the sender hasn't removed the packet from the interference queue
-            // by the time the receiver has completed its RX delay.
-            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
-
-            // If another transmission is already on air on our channel as we begin this reception, the two
-            // overlap in time: mark the reception as collided from the start (energy-based interference).
-            if(InterferenceQueue.AnyOtherOnAir(sender, Channel))
-            {
-                RAC_ongoingRxCollided = true;
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "RX starting with co-channel interference already on air -> collision");
-            }
-
-            if(delayUs > txRxSimulatorDelayUs && PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs) > 0)
-            {
-                currentFrameElapsedAirtimeUs = 0;
-                rxTimer.Frequency = PROTIMER_GetPreCntOverflowFrequency();
-                rxTimer.Limit = PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs);
-                rxTimer.Enabled = true;
-                this.Log(LogLevel.Noisy, "Schedule rxTimer for PRE/SYNC: {0}us PRE={1} SYNC={2} TXCHAIN={3}",
-                         delayUs - txRxSimulatorDelayUs, MODEM_GetPreambleOverTheAirTimeUs(), MODEM_GetSyncWordOverTheAirTimeUs(), MODEM_GetTxChainDelayUs());
-            }
-            else
-            {
-                // The RX/TX simulator delay already accounted for the intended delay.
-                // We store the time we already spent RXing the actual frame and call the RX timer
-                // handler directly.
-                currentFrameElapsedAirtimeUs = txRxSimulatorDelayUs - delayUs;
-                RAC_RxTimerLimitReached();
-            }
-            FRC_SnifferReceiveFrame(frame);
+            TryReceiveFrame(frame, sender, rxStartedMidPacket: false);
         }
 
         public void PROTIMER_PrsRtcTrigger()
@@ -2572,7 +2495,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(16, 16)
                 },
                 {(long)RadioControllerRegisters.Control, new DoubleWordRegister(this)
-                    .WithFlag(0, out RAC_forceDisable, writeCallback: (_, value) => { if (value) {RAC_UpdateRadioStateMachine();} }, name: "FORCEDISABLE")
+                    .WithFlag(0, out RAC_forceDisable, writeCallback: (_, value) => { if (value) {RAC_TxEnable = false; RAC_UpdateRadioStateMachine();} }, name: "FORCEDISABLE")
                     .WithFlag(1, name: "PRSTXEN")
                     .WithFlag(2, out RAC_txAfterRx, name: "TXAFTERRX")
                     .WithFlag(3, name: "PRSMODE")
@@ -2734,7 +2657,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(16, 16)
                 },
                 {(long)RadioControllerRegisters.SequencerTimerCompareValue, new DoubleWordRegister(this)
-                    .WithValueField(0, 15, out RAC_seqTimerCompareValue, writeCallback: (_, value) => { RAC_SeqTimerLimit = (ushort)value; }, name: "STIMERCOMP")
+                    .WithValueField(0, 15, out RAC_seqTimerCompareValue, writeCallback: (_, value) => RAC_SeqTimerLimit = (ushort)value, name: "STIMERCOMP")
                     .WithReservedBits(16, 16)
                 },
                 {(long)RadioControllerRegisters.SequencerPrescaler, new DoubleWordRegister(this, 0x7)
@@ -2756,6 +2679,26 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)RadioControllerRegisters.RadioFrequencyStatus, new DoubleWordRegister(this)
                     .WithFlag(0, out RAC_paRampingDone, FieldMode.Read, name: "MODRAMPUPDONE")
                     .WithReservedBits(1, 31)
+                },
+                {(long)RadioControllerRegisters.SynthesizerEnableControl, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "VCOSTARTUP")
+                    .WithReservedBits(2, 5)
+                    .WithFlag(7, name: "VCBUFEN")
+                    .WithReservedBits(8, 1)
+                    .WithFlag(9, out RAC_synthStartRequest, writeCallback: (oldValue, newValue) =>
+                    {
+                        // Rising edge marks the start of the synth-enable sequence, ahead of the LO-counter calibration.
+                        if(newValue && !oldValue && RAC_currentRadioState == RAC_RadioState.RxWarm)
+                        {
+                            SYNTH_startTime = GetTime();
+                            SYNTH_startValid = true;
+                        }
+                    }, name: "SYNTHSTARTREQ")
+                    .WithFlag(10, name: "MMDPOWERBALANCEDISABLE")
+                    .WithReservedBits(11, 9)
+                    .WithFlag(20, name: "LPFBWSEL")
+                    .WithReservedBits(21, 11)
                 },
                 {(long)RadioControllerRegisters.PowerAmplifierEnableControl, new DoubleWordRegister(this)
                     .WithReservedBits(0, 8)
@@ -2826,7 +2769,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(7, name: "SNIFFDFRAME")
                     .WithFlag(8, out FRC_rxRawBlocked, FieldMode.Read, name: "RXRAWBLOCKED")
                     .WithFlag(9, name: "FRAMEOK")
-                    .WithFlag(10, FieldMode.Read, valueProviderCallback: _ => false, name: "RXABORTINPROGRESS")
+                    .WithFlag(10, FieldMode.Read, valueProviderCallback: _ => FRC_rxAbortInProgress, name: "RXABORTINPROGRESS")
                     .WithFlag(11, name: "TXWORD")
                     .WithFlag(12, name: "RXWORD")
                     .WithFlag(13, name: "CONVPAUSED")
@@ -3284,11 +3227,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
                 {(long)SynthesizerRegisters.Frequency, new DoubleWordRegister(this)
-                    .WithValueField(0, 28, out SYNTH_frequency, name: "FREQ")
+                    .WithValueField(0, 28, out SYNTH_frequency, writeCallback: (_, __) => TryAcquireOnAirFrames(), name: "FREQ")
                     .WithReservedBits(28, 4)
                 },
                 {(long)SynthesizerRegisters.FrequencyDivisionControl, new DoubleWordRegister(this, 0x001)
-                    .WithEnumField<DoubleWordRegister, SYNTH_LoDivFreqCtrl>(0, 9, out SYNTH_loDivFreqCtrl, name: "LODIVFREQCTRL")
+                    .WithEnumField<DoubleWordRegister, SYNTH_LoDivFreqCtrl>(0, 9, out SYNTH_loDivFreqCtrl, writeCallback: (_, __) => TryAcquireOnAirFrames(), name: "LODIVFREQCTRL")
                     .WithReservedBits(9, 23)
                 },
                 // RAIL writes the protocol's logical channel index here (e.g. 11..26 for 802.15.4).
@@ -3300,6 +3243,186 @@ namespace Antmicro.Renode.Peripherals.Wireless
             };
 
             return new DoubleWordRegisterCollection(this, registerDictionary);
+        }
+
+        private void TryAcquireOnAirFrames()
+        {
+            CheckOngoingRx();
+
+            if(RAC_currentRadioState != RAC_RadioState.RxSearch)
+            {
+                return;
+            }
+
+            foreach(var packet in InterferenceQueue.GetLivePackets())
+            {
+                if(packet.Sender == this || packet.Channel != Channel)
+                {
+                    continue;
+                }
+                TryReceiveFrame(packet.PacketContent, packet.Sender, rxStartedMidPacket: true);
+            }
+        }
+
+        private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket)
+        {
+            TimeInterval txStartTime = InterferenceQueue.GetTxStartTime(sender);
+            if(txStartTime == TimeInterval.Empty)
+            {
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}): Dropping (TX was aborted)",
+                         GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString());
+                return;
+            }
+
+            TrySyncTime();
+            var txRxSimulatorDelayUs = (GetTime() - txStartTime).TotalMicroseconds;
+
+            // If we are already receiving a frame, this co-channel transmission interferes with the
+            // ongoing reception. Energy-based: any co-channel signal corrupts it, regardless of whether
+            // either frame is decode-compatible. We mark the ongoing RX as collided and drop the newcomer.
+            if(RAC_internalRxState != RAC_InternalRxState.Idle)
+            {
+                if(sender == currentFrameSender && txStartTime == currentFrameTxStart)
+                {
+                    return;
+                }
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}), TX started at {4} (diff: {5})",
+                         GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString(), txStartTime, txRxSimulatorDelayUs);
+                // TODO: for now we always consider this a collision. In the future we will want to take into account
+                // the RSSI of both packets and determine if we could hear one of them.
+                // The ongoing RX is marked as "interfered", which can result in either a preamble not heard
+                // at all or a frame that fails CRC.
+                RAC_rxFailReason |= RAC_RxFailReason.Collision;
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (RX already ongoing - collision)");
+                return;
+            }
+
+            this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}), TX started at {4} (diff: {5})",
+                     GetTime(), LogicalChannel, MODEM_GetPhySignature(), SYNTH_GetRfFrequencyString(), txStartTime, txRxSimulatorDelayUs);
+
+            // The txStartTime guard above already returned if the sender had no over-the-air entry, so a
+            // missing signature here is an internal invariant violation rather than a normal drop.
+            if(!InterferenceQueue.TryGetTxSignature(sender, out var senderSignature))
+            {
+                throw new Antmicro.Renode.Exceptions.RecoverableException(
+                    "TryReceiveFrame: no TX signature found for sender although a TX start time was resolved");
+            }
+
+            // No reception is in progress. Drop frames whose PHY we cannot decode (the medium only matched
+            // carrier frequency). With no RX to corrupt there is nothing to flag as a collision; we simply
+            // cannot lock onto a PHY we are not configured for. The sync word is still checked later by the
+            // RX pipeline for decode-compatible frames.
+            if(!MODEM_GetPhySignature().IsDecodeCompatibleWith(senderSignature))
+            {
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping: (incompatible PHY: sender={0}, local={1})",
+                         senderSignature, MODEM_GetPhySignature());
+                return;
+            }
+
+            // Adopt the sender's coding sub-rate for the whole reception so our modelled airtime matches what
+            // the transmitter actually spent on air.
+            currentFrameCodedSymbolsPerInfoBit = senderSignature.CodedSymbolsPerInfoBit;
+
+            double txChainDelayUs = MODEM_GetTxChainDelayUs();
+            double preambleUs = MODEM_GetPreambleOverTheAirTimeUs();
+            double syncUs = MODEM_GetSyncWordOverTheAirTimeUs();
+            double delayUs = txChainDelayUs + preambleUs + syncUs;
+
+            if(rxStartedMidPacket)
+            {
+                double elapsedAfterChainUs = Math.Max(0, txRxSimulatorDelayUs - txChainDelayUs);
+                double remainingPreambleUs = Math.Max(0, preambleUs - elapsedAfterChainUs);
+                double minHeardPreambleUs = preambleUs * MODEM_MinimumHeardPreambleFraction;
+                if(remainingPreambleUs < minHeardPreambleUs)
+                {
+                    this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                             "Dropping (insufficient preamble): at {0} on channel {1} ({2}) remaining={3}us min={4}us",
+                             GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), remainingPreambleUs, minHeardPreambleUs);
+                    currentFrameCodedSymbolsPerInfoBit = 0;
+                    return;
+                }
+            }
+
+            // We first schedule the RX timer to the point that the preamble and sych word are fully transmitted.
+            // That must also include the txChainDelay since at the transmitter we don't delay the FrameTxStart event.
+            // The RX state is set before computing the delay so the coded airtime uses the sender's sub-rate
+            // (see MODEM_GetCodedSymbolsPerInfoBit's RX override).
+            RAC_internalRxState = RAC_InternalRxState.PreambleAndSyncWord;
+            MODEM_demodulatorState.Value = MODEM_DemodulatorState.FrameSearch;
+
+            currentFrame = frame;
+            currentFrameSender = sender;
+            currentFrameTxStart = txStartTime;
+            currentFrameChannel = Channel;
+
+            // We set the RSSIFRAME here to make sure the sender hasn't removed the packet from the interference queue
+            // by the time the receiver has completed its RX delay.
+            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
+
+            // If another transmission is already on air on our channel as we begin this reception, the two
+            // overlap in time: mark the reception as collided from the start (energy-based interference).
+            if(InterferenceQueue.AnyOtherOnAir(sender, Channel))
+            {
+                RAC_rxFailReason |= RAC_RxFailReason.Collision;
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "RX starting with co-channel interference already on air -> collision");
+            }
+
+            if(delayUs > txRxSimulatorDelayUs && PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs) > 0)
+            {
+                currentFrameElapsedAirtimeUs = 0;
+                rxTimer.Frequency = PROTIMER_GetPreCntOverflowFrequency();
+                rxTimer.Limit = PROTIMER_UsToPreCntOverflowTicks(delayUs - txRxSimulatorDelayUs);
+                rxTimer.Enabled = true;
+                this.Log(LogLevel.Noisy, "Schedule rxTimer for PRE/SYNC: {0}us PRE={1} SYNC={2} TXCHAIN={3}",
+                         delayUs - txRxSimulatorDelayUs, preambleUs, syncUs, txChainDelayUs);
+            }
+            else
+            {
+                // The RX/TX simulator delay already accounted for the intended delay.
+                // We store the time we already spent RXing the actual frame and call the RX timer
+                // handler directly.
+                currentFrameElapsedAirtimeUs = txRxSimulatorDelayUs - delayUs;
+                RAC_RxTimerLimitReached();
+            }
+            FRC_SnifferReceiveFrame(frame);
+        }
+
+        private void CheckOngoingRx()
+        {
+            if(RAC_internalRxState == RAC_InternalRxState.Idle)
+            {
+                return;
+            }
+
+            // There is an ongoing RX: Check if the TX was aborted.
+            if(InterferenceQueue.WasTransmissionAborted(currentFrameSender, currentFrameTxStart))
+            {
+                if(RAC_currentRadioState == RAC_RadioState.RxFrame)
+                {
+                    // The sender stopped after sync. Keep the RX going for the remaining airtime
+                    // and report an RX failure when delivery completes.
+                    this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                             "TX aborted after sync at {0} on channel {1} ({2}); RX will fail",
+                             GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString());
+                    RAC_rxFailReason |= RAC_RxFailReason.TxAborted;
+                }
+                else
+                {
+                    this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                             "Dropping (TX was aborted) at {0} on channel {1} ({2})",
+                             GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString());
+                    RAC_ClearOngoingRx();
+                }
+                return;
+            }
+
+            if(RAC_internalRxState == RAC_InternalRxState.PreambleAndSyncWord && Channel != currentFrameChannel)
+            {
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info,
+                         "Dropping (retuned away before sync) at {0} on channel {1} ({2})",
+                         GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString());
+                RAC_ClearOngoingRx();
+            }
         }
 
         // TransmitFrame() is invoked as soon as the radio state machine transitions to the TX state.
@@ -4713,10 +4836,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveTransmitFrameDescriptor);
                 // Assemble subframe. An excluded subframe is sized by WORDS alone, since FRAMELENGTH does not
-                // account for its words.
+                // account for its words. Otherwise the subframe is bounded by the remaining FRAMELENGTH budget,
+                // further clamped to (WORDS+1) unless WORDS is the unlimited sentinel.
+                var payloadBudget = crcCountsInFrameLength ? (remaining - crcLength) : remaining;
                 var length = excludeFromWordCounter
                              ? descriptor.Words
-                             : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
+                             : (descriptor.UnlimitedWords ? payloadBudget : Math.Min(payloadBudget, descriptor.Words));
                 if(!bufferController.TryReadBytes(descriptor.BufferIndex, length, out var payload))
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.Concat(payload).ToArray()));
@@ -4817,7 +4942,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             PtiFrameStart?.Invoke(SiLabs_PacketTraceFrameType.Receive);
             // NOTE the sync word makes up the first 4 bytes of the frame
-            int syncWordBytes = Math.Min((int) MODEM_SyncWordBytes, SNIFF_SYNCWORD_SERIAL_LEN);
+            int syncWordBytes = Math.Min((int) MODEM_SyncWordBytes, SniffSyncWordSerialLength);
             var syncWord = frame.Take(syncWordBytes).ToArray();
             // NOTE the rest of the frame is the actual data
             var frameData = frame.Skip(syncWordBytes).ToArray();
@@ -4827,7 +4952,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             if(FRC_ptiEmitSyncWord.Value)
             {
-                var syncWordPadded = new byte[SNIFF_SYNCWORD_SERIAL_LEN];
+                var syncWordPadded = new byte[SniffSyncWordSerialLength];
                 Array.Copy(syncWord, syncWordPadded, syncWord.Length);
                 PtiDataOut?.Invoke(syncWordPadded);
             }
@@ -4849,7 +4974,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             PtiFrameStart?.Invoke(SiLabs_PacketTraceFrameType.Transmit);
             // NOTE the sync word makes up the first 4 bytes of the frame
-            int syncWordBytes = Math.Min((int)MODEM_SyncWordBytes, SNIFF_SYNCWORD_SERIAL_LEN);
+            int syncWordBytes = Math.Min((int)MODEM_SyncWordBytes, SniffSyncWordSerialLength);
             var syncWord = frame.Take(syncWordBytes).ToArray();
             // NOTE the rest of the frame is the actual data
             var frameData = frame.Skip(syncWordBytes).ToArray();
@@ -4859,7 +4984,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             if(FRC_ptiEmitSyncWord.Value)
             {
-                var syncWordPadded = new byte[SNIFF_SYNCWORD_SERIAL_LEN];
+                var syncWordPadded = new byte[SniffSyncWordSerialLength];
                 Array.Copy(syncWord, syncWordPadded, syncWord.Length);
                 PtiDataOut?.Invoke(syncWordPadded);
             }
@@ -4924,7 +5049,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         // Called once with the whole payload range it reproduces the original one-shot behaviour; called
         // repeatedly with successive ranges it delivers the frame incrementally (BUFC, packet-capture
         // buffer and WCNT advance in lockstep), mirroring how hardware fills the buffers as words arrive.
-        private void FRC_DisassembleCurrentFrame(bool forceCrcError, uint startOffset, uint numBytes)
+        private void FRC_DisassembleCurrentFrame(uint startOffset, uint numBytes)
         {
             var dynamicFrameLength = (FRC_dynamicFrameLengthMode.Value != FRC_DynamicFrameLengthMode.Disable);
             var isFrameStart = (startOffset <= MODEM_SyncWordBytes);
@@ -4993,9 +5118,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 var excludeFromWordCounter = FRC_SubframeExcludedFromWordCounter(descriptor, FRC_ActiveReceiveFrameDescriptor);
                 // An excluded subframe is sized by WORDS alone, since FRAMELENGTH does not account for its words.
+                // Otherwise it is bounded by the remaining FRAMELENGTH budget, further clamped to (WORDS+1) unless
+                // WORDS is the unlimited sentinel, matching FRC_AssembleFrame().
+                var payloadBudget = crcCountsInFrameLength ? (remaining - crcLength) : remaining;
                 var payloadTotal = excludeFromWordCounter
                                    ? descriptor.Words
-                                   : Math.Min(crcCountsInFrameLength ? (remaining - crcLength) : remaining, descriptor.Words);
+                                   : (descriptor.UnlimitedWords ? payloadBudget : Math.Min(payloadBudget, descriptor.Words));
                 var bytesToWrite = (uint)Math.Min((long)(payloadTotal - currentDisassembleSubFrameBytes), (long)(endOffset - currentFrameOffset));
                 if(currentFrameOffset + bytesToWrite > (uint)currentFrame.Length)
                 {
@@ -5104,7 +5232,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
                 if(FRC_rxAppendStatus.Value)
                 {
-                    bufferController.WriteData(descriptor.BufferIndex, (forceCrcError) ? 0x00U : 0x80U);
+                    // For now we treat all RX failures as CRC errors
+                    bufferController.WriteData(descriptor.BufferIndex, (RAC_RxWillFail) ? 0x00U : 0x80U);
                 }
                 if(FRC_rxAppendProtimerCc0base.Value)
                 {
@@ -5178,6 +5307,16 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        private void FRC_CompleteRxAbort()
+        {
+            // RXABORTINPROGRESS clears when the abort finishes and RXABORTEDIF is set.
+            // Clear first so that flag's interrupt sees the status bit already clear.
+            // TRACKABFRAME (RENODE-354) can postpone this; that delay is not modeled.
+            FRC_rxAbortInProgress = false;
+            FRC_rxAbortedInterrupt.Value = true;
+            FRC_seqRxAbortedInterrupt.Value = true;
+        }
+
         private void FRC_RxAbortCommand()
         {
             // CMD_RXABORT takes effect when FRC is active. When RAC in RXWARM and RXSEARCH state, 
@@ -5197,11 +5336,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
             // RENODE-354
             //if (TRACKABFRAME)
             //{
-            // TODO
+            // TODO: hold RXABORTINPROGRESS until the aborted frame finishes on air
             //}
 
-            FRC_rxAbortedInterrupt.Value = true;
-            FRC_seqRxAbortedInterrupt.Value = true;
+            // Set for the abort. TRACKABFRAME (RENODE-354) is not modeled, so the abort
+            // finishes in this command and the status bit clears as RXABORTEDIF is set.
+            FRC_rxAbortInProgress = true;
+            FRC_CompleteRxAbort();
             RAC_UpdateRadioStateMachine(RAC_RadioStateMachineSignal.RxAbort);
             UpdateInterrupts();
         }
@@ -5211,19 +5352,24 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private void RAC_RxTimerLimitReached()
         {
             rxTimer.Enabled = false;
+            CheckOngoingRx();
+            if(RAC_internalRxState == RAC_InternalRxState.Idle)
+            {
+                return;
+            }
 
-            // We went through the preamble delay which was scheduled in ReceiveFrame(). 
+            // We went through the preamble delay which was scheduled in TryReceiveFrame().
             // We can now check radio state and sync word.
             if(RAC_internalRxState == RAC_InternalRxState.PreambleAndSyncWord)
             {
-                if(RAC_currentRadioState != RAC_RadioState.RxSearch)
+                if(RAC_currentRadioState != RAC_RadioState.RxSearch || Channel != currentFrameChannel)
                 {
                     RAC_ClearOngoingRx();
                     this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping (not in RXSEARCH): at {0} (channel {1}) ({2}): {3}", GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), BitConverter.ToString(currentFrame));
                     return;
                 }
 
-                if(RAC_ongoingRxCollided)
+                if(RAC_RxWillFail)
                 {
                     RAC_ClearOngoingRx();
                     this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping (PRE/SYNC COLLISION): at {0} (channel {1}) ({2}): {3}", GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), BitConverter.ToString(currentFrame));
@@ -5242,7 +5388,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 // BUFC + the FRC capture buffer in fixed-size fragments (FRC_RxFragmentLengthInBytes) spaced by
                 // their airtime, approximating the hardware delivering the frame byte-by-byte.
                 // The per-byte airtime is measured from the first payload byte: we don't include the preamble
-                // and sync word time since we already delayed for it in ReceiveFrame(). We also account for
+                // and sync word time since we already delayed for it in TryReceiveFrame(). We also account for
                 // any extra quantum slack in currentFrameElapsedAirtimeUs).
                 RAC_UpdateRadioStateMachine(RAC_RadioStateMachineSignal.FrameDetected);
                 RAC_internalRxState = RAC_InternalRxState.Frame;
@@ -5268,7 +5414,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 // subframe boundary); reaching the final fragment falls through to finish below.
                 if(((uint)currentFrame.Length - currentFrameOffset) > FRC_RxFragmentLengthInBytes)
                 {
-                    FRC_DisassembleCurrentFrame(RAC_ongoingRxCollided, currentFrameOffset, FRC_RxFragmentLengthInBytes);
+                    FRC_DisassembleCurrentFrame(currentFrameOffset, FRC_RxFragmentLengthInBytes);
                 }
                 if(RAC_TryArmRxDeliveryTimer())
                 {
@@ -5302,13 +5448,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
             PROTIMER_TriggerEvent(PROTIMER_Event.RxDone);
             PROTIMER_TriggerEvent(PROTIMER_Event.TxOrRxDone);
 
-            if(RAC_ongoingRxCollided)
+            if(RAC_RxWillFail)
             {
-                // The received frame collided with another one (that we already dropped). Here we are simulating a CRC error.
+                // The frame on air is not intact (collision or the sender aborted). Finish the reception as a CRC error.
                 FRC_frameErrorInterrupt.Value = true;
                 FRC_seqFrameErrorInterrupt.Value = true;
 
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping at {0}: RX collision", GetTime());
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Dropping at {0}: RX fail ({1})", GetTime(), RAC_rxFailReason);
 
                 if(FRC_rxBufferRestoreOnFrameError.Value & !FRC_rxAcceptCrcErrors.Value)
                 {
@@ -5319,17 +5465,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
             // When a CRC error is detected, the FRAMEERROR interrupt flag is set. Normally, frames with CRC errors are discarded. 
             // However, by setting ACCEPTCRCERRORS in FRC_RXCTRL, frames with CRC errors are still accepted and a RXDONE interrupt 
             // is generated at the end of the frame reception, in addition to the FRAMERROR interrupt. 
-            if(!RAC_ongoingRxCollided || FRC_rxAcceptCrcErrors.Value)
+            if(!RAC_RxWillFail || FRC_rxAcceptCrcErrors.Value)
             {
-                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Received at {0} on channel {1} ({2}) (RSSI={3}, collided={4}): {5}",
-                         GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), AGC_FrameRssiIntegerPart, RAC_ongoingRxCollided, BitConverter.ToString(currentFrame));
+                this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "Received at {0} on channel {1} ({2}) (RSSI={3}, crcFail={4}): {5}",
+                         GetTime(), LogicalChannel, SYNTH_GetRfFrequencyString(), AGC_FrameRssiIntegerPart, RAC_rxFailReason, BitConverter.ToString(currentFrame));
 
-                // No collision detected or ACCEPTCRCERRORS is set: disassemble the remaining bytes of the
+                // No CRC failure, or ACCEPTCRCERRORS is set: disassemble the remaining bytes of the
                 // frame and raise the RXDONE interrupt. Earlier slices were already delivered while chunking;
                 // currentFrameOffset points at the first byte not yet delivered (it equals MODEM_SyncWordBytes
                 // when chunking did not run, so the whole frame is delivered here). Reaching the end of
                 // currentFrame also appends the RX trailer, now that the RxDone PROTIMER captures above have run.
-                FRC_DisassembleCurrentFrame(RAC_ongoingRxCollided, currentFrameOffset, (uint)currentFrame.Length - currentFrameOffset);
+                FRC_DisassembleCurrentFrame(currentFrameOffset, (uint)currentFrame.Length - currentFrameOffset);
 
                 FRC_rxDoneInterrupt.Value = true;
                 FRC_seqRxDoneInterrupt.Value = true;
@@ -5378,7 +5524,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             txTimer.Enabled = false;
 
             // Normal TX completion: the whole frame went on air. Retain the queue entry briefly (stale) so a
-            // receiver whose deferred ReceiveFrame runs just after we finished can still resolve us.
+            // receiver whose deferred TryReceiveFrame runs just after we finished can still resolve us.
             RAC_ClearOngoingTx(transmissionCompleted: true);
 
             MODEM_txFrameSentInterrupt.Value = true;
@@ -5494,6 +5640,49 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RAC_internalTxState = RAC_InternalTxState.Idle;
         }
 
+        private void RAC_NoteSynthStartRequest(bool oldValue, bool newValue)
+        {
+            if(newValue && !oldValue && RAC_currentRadioState == RAC_RadioState.RxWarm)
+            {
+                SYNTH_startTime = GetTime();
+                SYNTH_startValid = true;
+            }
+        }
+
+        // The sequencer clears STATERXWARMIF when its own waits finish. The
+        // LO-counter calibration it polls between SYNTHSTARTREQ and that
+        // clear is unmodeled, so the clear comes well before the RX front
+        // end has settled and a search window armed at RXSEARCH entry can
+        // expire during the preamble. Hold the transition until the measured
+        // settle time has elapsed. Returns true when entry was deferred.
+        private bool RAC_DeferRxSearchForSynthSettle()
+        {
+            if(!SYNTH_startValid)
+            {
+                return false;
+            }
+            double elapsedUs = (GetTime() - SYNTH_startTime).TotalMicroseconds;
+            double remainingUs = MinimumRxSearchDelayAfterSynthStartUs - elapsedUs;
+            if(remainingUs <= 1.0)
+            {
+                return false;
+            }
+            rxWarmSettleTimer.Enabled = false;
+            rxWarmSettleTimer.Limit = (ulong)Math.Ceiling(remainingUs);
+            rxWarmSettleTimer.Enabled = true;
+            rxWarmSettleTimer.Value = 0;
+            return true;
+        }
+
+        private void RAC_RxWarmSettleTimerLimitReached()
+        {
+            rxWarmSettleTimer.Enabled = false;
+            if(RAC_currentRadioState == RAC_RadioState.RxWarm && !RAC_seqStateRxWarmInterrupt.Value)
+            {
+                RAC_UpdateRadioStateMachine(RAC_RadioStateMachineSignal.RxWarmIrqCleared);
+            }
+        }
+
         private void RAC_ChangeRadioState(RAC_RadioState newState)
         {
             if(newState != RAC_currentRadioState)
@@ -5510,8 +5699,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
             FRC_rxFrameIrqClearedPending = false;
             FRC_rxDonePending = false;
             rxTimer.Enabled = false;
-            RAC_ongoingRxCollided = false;
+            RAC_rxFailReason = RAC_RxFailReason.None;
             RAC_internalRxState = RAC_InternalRxState.Idle;
+            currentFrameSender = null;
+            currentFrameTxStart = TimeInterval.Empty;
+            currentFrameChannel = 0;
+            currentFrameCodedSymbolsPerInfoBit = 0;
         }
 
         // Returns true while the current radio state is a sequencer-serviced transitional state
@@ -5649,7 +5842,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     {
                         if(signal == RAC_RadioStateMachineSignal.RxWarmIrqCleared)
                         {
-                            RAC_ChangeRadioState(RAC_RadioState.RxSearch);
+                            if(!RAC_DeferRxSearchForSynthSettle())
+                            {
+                                RAC_ChangeRadioState(RAC_RadioState.RxSearch);
+                            }
                         }
                         break;
                     }
@@ -5856,6 +6052,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     // On a state transition, the STimer is always restarted from 0
                     RAC_SeqTimerRestart(0, RAC_seqTimerLimit);
 
+                    if(previousState == RAC_RadioState.RxWarm)
+                    {
+                        rxWarmSettleTimer.Enabled = false;
+                    }
+
                     switch(RAC_currentRadioState)
                     {
                     case RAC_RadioState.Off:
@@ -5863,6 +6064,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         break;
                     case RAC_RadioState.RxWarm:
                         RAC_seqStateRxWarmInterrupt.Value = true;
+                        SYNTH_startValid = false;
                         break;
                     case RAC_RadioState.RxSearch:
                         // Reset PKTBUFCOUNT when entering in RxSearch
@@ -5870,6 +6072,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         RAC_seqStateRxSearchInterrupt.Value = true;
                         MODEM_demodulatorState.Value = MODEM_DemodulatorState.PreambleSearch;
                         FRC_UpdateRawMode();
+                        TryAcquireOnAirFrames();
                         break;
                     case RAC_RadioState.RxFrame:
                         RAC_seqStateRxFrameInterrupt.Value = true;
@@ -6038,10 +6241,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             get => RAC_txEnable;
             set
             {
-                /*
-                value |= ProtimerTxEnable;
-                value &= !radioStateMachineForceDisable.Value;
-                */
+                // FORCEDISABLE is a level input to the TXEN clear, so TXEN cannot be set while it is asserted.
+                value &= !RAC_forceDisable.Value;
                 var risingEdge = value && !RAC_txEnable;
                 RAC_txEnable = value;
 
@@ -6249,7 +6450,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private sbyte AGC_RssiIntegerPartAdjusted => (sbyte)(AGC_RssiIntegerPart + AGC_RssiWrapCompensationOffsetDbm);
 
-        private sbyte AGC_RssiIntegerPart { get; set; }
+        private sbyte AGC_RssiIntegerPart
+        {
+            get
+            {
+                return AGC_rssiIntegerPart;
+            }
+
+            set
+            {
+                AGC_rssiIntegerPart = value;
+            }
+        }
 
         private byte AGC_RssiFractionalPart
         {
@@ -6340,11 +6552,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
-        // Last value software wrote to the PROTIMER RANDOM register. While FIXEDBACKOFF is set this is
-        // frozen (writes are ignored) to mirror hardware.
-        private uint PROTIMER_fixedBackoffRandomValue = 1;
-
         private byte[] currentFrame;
+        private IRadio currentFrameSender;
+        private TimeInterval currentFrameTxStart = TimeInterval.Empty;
+        private int currentFrameChannel;
         private uint currentFrameOffset = 0;
         private double currentFrameByteOverTheAirTimeUs = 0;
         private double currentFrameElapsedAirtimeUs = 0;
@@ -6525,6 +6736,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField AGC_rssiDoneInterruptEnable;
         private IFlagRegisterField AGC_ccaInterruptEnable;
         private IFlagRegisterField AGC_seqRssiHighInterrupt;
+        private sbyte AGC_rssiIntegerPart;
         private bool AGC_rssiStartCommandFromProtimer = false;
         private bool AGC_rssiStartCommandOngoing = false;
         private bool AGC_rssiFirstRead = true;
@@ -6593,6 +6805,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField FRC_activeTransmitFrameDescriptor;
         private bool FRC_rxFrameIrqClearedPending = false;
         private bool FRC_rxDonePending = false;
+        private bool FRC_rxAbortInProgress = false;
         private IValueRegisterField FRC_initialDecodedFrameLength;
         private IValueRegisterField FRC_wordCounter;
         private IValueRegisterField FRC_frameLength;
@@ -6674,7 +6887,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private RAC_RadioState RAC_previous3RadioState = RAC_RadioState.Off;
         private RAC_RadioState RAC_previous1RadioState = RAC_RadioState.Off;
         private RAC_RadioState RAC_currentRadioState = RAC_RadioState.Off;
-        private bool RAC_ongoingRxCollided = false;
+        private RAC_RxFailReason RAC_rxFailReason = RAC_RxFailReason.None;
+
+        private bool RAC_RxWillFail => RAC_rxFailReason != RAC_RxFailReason.None;
         private RAC_InternalRxState RAC_internalRxState = RAC_InternalRxState.Idle;
         private RAC_InternalTxState RAC_internalTxState = RAC_InternalTxState.Idle;
         private IFlagRegisterField FRC_ptiEmitSyncWord;
@@ -6697,11 +6912,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IValueRegisterField RAC_mainCoreSeqInterrupts;
         private bool RAC_paOutputLevelRamping = false;
         private IFlagRegisterField RAC_paRampingDone;
+        private IFlagRegisterField RAC_synthStartRequest;
         private bool RAC_em1pAckPending;
         private IFlagRegisterField RAC_txAfterRx;
         private IValueRegisterField RAC_mainCoreSeqInterruptsEnable;
         private IValueRegisterField RAC_softwareIrq;
 
+        private bool SYNTH_startValid;
+        private TimeInterval SYNTH_startTime;
         private IValueRegisterField SYNTH_frequency;
         private IEnumRegisterField<SYNTH_LoDivFreqCtrl> SYNTH_loDivFreqCtrl;
         private IValueRegisterField SYNTH_channelSpacing;
@@ -6710,6 +6928,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly MappedMemory ram;
         private readonly CortexM sequencer;
         private static readonly PseudorandomNumberGenerator random = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
+        // Last value software wrote to the PROTIMER RANDOM register. While FIXEDBACKOFF is set this is
+        // frozen (writes are ignored) to mirror hardware.
+        private uint PROTIMER_fixedBackoffRandomValue = 1;
         private readonly SiLabs_BUFC_4 bufferController;
         private readonly LimitTimer seqTimer;
         private readonly LimitTimer proTimer;
@@ -6717,6 +6938,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly LimitTimer rssiUpdateTimer;
         private readonly LimitTimer txTimer;
         private readonly LimitTimer rxTimer;
+        private readonly LimitTimer rxWarmSettleTimer;
         private readonly DoubleWordRegisterCollection automaticGainControlRegistersCollection;
         private readonly DoubleWordRegisterCollection cyclicRedundancyCheckRegistersCollection;
         private readonly DoubleWordRegisterCollection frameControllerRegistersCollection;
@@ -6736,7 +6958,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly IValueRegisterField[] HOSTMAILBOX_messagePointer = new IValueRegisterField[MailboxMessageNumber];
         private readonly PROTIMER_TimeoutCounter[] PROTIMER_timeoutCounter;
         private readonly PROTIMER_CaptureCompareChannel[] PROTIMER_captureCompareChannel;
-        private readonly byte[] FRC_packetBufferCapture;
+        private readonly byte[] FRC_packetBufferCapture;        
         private readonly FRC_FrameDescriptor[] FRC_frameDescriptor;
         private readonly IFlagRegisterField[] FRC_wordCounterCompareInterrupt = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
         private readonly IFlagRegisterField[] FRC_wordCounterCompareInterruptEnable = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
@@ -6749,7 +6971,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private const uint MailboxMessageNumber = 4;
         private const ulong MicrosecondFrequency = 1000000UL;
         private const ulong HalfMicrosecondFrequency = 2000000UL;
-        const int SNIFF_SYNCWORD_SERIAL_LEN = 4;
+        private const double MinimumRxSearchDelayAfterSynthStartUs = 108.0;
+        private const int SniffSyncWordSerialLength = 4;
         private const uint FRC_NumberOfFrameDescriptors = 4;
         // FCD0/FCD1 form the transmit descriptor pair, FCD2/FCD3 the receive pair.
         private const int FRC_FirstTransmitFrameDescriptor = 0;
@@ -6772,6 +6995,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private const uint PROTIMER_NumberOfCaptureCompareChannelPrsEvents = 5;
         // LE Coded PHY preamble is a fixed 80us (sent at the 1 Msym/s base rate, independent of S=2/S=8).
         private const double MODEM_BleCodedPhyPreambleOverTheAirTimeUs = 80.0;
+        private const double MODEM_MinimumHeardPreambleFraction = 0.5;
         private const uint MODEM_BlePhyRxChainDelayNanoS = 50000;
         private const uint MODEM_BlePhyRxDoneDelayNanoS = 11250;
         private const uint MODEM_BlePhyTxChainDelayNanoS = 750;
@@ -7043,9 +7267,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             // Hardware semantics: WORDS is the number of words consumed by the subframe minus one
             // (an 8-bit field on this part). The FRC sequencer clamps each subframe to (WORDS+1) and
-            // keeps iterating until WCNT reaches FRAMELENGTH, so the unlimited setting used by RAIL on
-            // the data subframe degenerates into "remaining frame words" via the Math.Min() in the
-            // assemble/disassemble loops.
+            // keeps iterating until WCNT reaches FRAMELENGTH. This value is only meaningful when
+            // UnlimitedWords is false: 0xFF is a sentinel, not a 256-word subframe, so the
+            // assemble/disassemble loops must check UnlimitedWords before clamping to it.
             public uint Words => (uint)(WordsField.Value + 1);
 
             // WORDS=0xFF selects an unlimited subframe: it runs to the end of the frame and the subframe
@@ -7224,6 +7448,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
             StateChange                 = 0x1,
             CompareEvent                = 0x2,
             StateChangeAndCompareEvent  = 0x3,
+        }
+
+        [Flags]
+        private enum RAC_RxFailReason
+        {
+            None = 0,
+            Collision = 1 << 0,
+            TxAborted = 1 << 1,
         }
 
         private enum RAC_InternalRxState
@@ -7425,6 +7657,27 @@ namespace Antmicro.Renode.Peripherals.Wireless
             Period        = 0x2,
             Command       = 0x3,
             FameDetection = 0x4,
+        }
+
+        private enum SYNTH_LoDivFreqCtrl
+        {
+            LoDiv1  = 0x01,
+            LoDiv2  = 0x02,
+            LoDiv3  = 0x03,
+            LoDiv4  = 0x04,
+            LoDiv5  = 0x05,
+            LoDiv7  = 0x07,
+            LoDiv6  = 0x13,
+            LoDiv8  = 0x14,
+            LoDiv10 = 0x15,
+            LoDiv14 = 0x17,
+            LoDiv9  = 0x1B,
+            LoDiv12 = 0x1C,
+            LoDiv15 = 0x1D,
+            LoDiv16 = 0x24,
+            LoDiv20 = 0x25,
+            LoDiv18 = 0x9B,
+            LoDiv24 = 0x9C,
         }
 
         [RegistersDescription("frc", "frc_ns")]
@@ -9734,26 +9987,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RadioFrequencyLock1_Tgl                                         = 0x37FC,
         }
 
-        private enum SYNTH_LoDivFreqCtrl
-        {
-            LoDiv1  = 0x01,
-            LoDiv2  = 0x02,
-            LoDiv3  = 0x03,
-            LoDiv4  = 0x04,
-            LoDiv5  = 0x05,
-            LoDiv7  = 0x07,
-            LoDiv6  = 0x13,
-            LoDiv8  = 0x14,
-            LoDiv10 = 0x15,
-            LoDiv14 = 0x17,
-            LoDiv9  = 0x1B,
-            LoDiv12 = 0x1C,
-            LoDiv15 = 0x1D,
-            LoDiv16 = 0x24,
-            LoDiv20 = 0x25,
-            LoDiv18 = 0x9B,
-            LoDiv24 = 0x9C,
-        }
 
         [RegistersDescription("synth", "synth_ns")]
         private enum SynthesizerRegisters : long

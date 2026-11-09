@@ -751,6 +751,12 @@ namespace Antmicro.Renode.Peripherals.DMA
                 if(Done)
                 {
                     pullTimer.Enabled = false;
+                    
+                    // The channel drops out of CHSTATUS when the final descriptor completes without LINK.
+                    if(!descriptor.Link)
+                    {
+                        enabled = false;
+                    }
                 }
             }
 
