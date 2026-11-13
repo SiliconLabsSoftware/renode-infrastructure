@@ -6,7 +6,10 @@
 //
 
 using System;
-using System.Numerics;
+
+using Antmicro.Renode.Utilities;
+
+#nullable enable
 
 namespace Antmicro.Renode.Peripherals.ARM_Ethos;
 
@@ -42,6 +45,20 @@ public static class ARM_EthosCommon
         }
     }
 
+    // Truncate to the requested width and interpret the result as signed.
+    public static long SignExtendTruncated(long value, int bitCount)
+    {
+        if(bitCount <= 0 || bitCount > 64)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bitCount));
+        }
+        if(bitCount == 64)
+        {
+            return value;
+        }
+        return unchecked((long)BitHelper.SignExtend(BitHelper.SignTruncate(value, bitCount), bitCount));
+    }
+
     // U85 TRM rounded_shift_right
     public static long RoundedShiftRight(long acc, int shift, RoundingMode mode, int doubleRoundShift = 0)
     {
@@ -59,8 +76,8 @@ public static class ARM_EthosCommon
             return acc;
         }
 
-        var rounding = BigInteger.One << (shift - 1);
-        var doubleRounding = shift > (31 - doubleRoundShift) ? BigInteger.One << (30 - doubleRoundShift) : BigInteger.Zero;
+        var rounding = Int128.One << (shift - 1);
+        var doubleRounding = shift > (31 - doubleRoundShift) ? Int128.One << (30 - doubleRoundShift) : Int128.Zero;
         switch(mode)
         {
         case RoundingMode.DoubleSymmetric:
@@ -70,10 +87,10 @@ public static class ARM_EthosCommon
             rounding += doubleRounding;
             break;
         case RoundingMode.TruncateToZero:
-            rounding = acc >= 0 ? BigInteger.Zero : (BigInteger.One << shift) - 1;
+            rounding = acc >= 0 ? Int128.Zero : (Int128.One << shift) - 1;
             break;
         case RoundingMode.TruncateToLower:
-            rounding = BigInteger.Zero;
+            rounding = Int128.Zero;
             break;
         case RoundingMode.Natural:
             break;
@@ -86,7 +103,7 @@ public static class ARM_EthosCommon
         default:
             throw new ArgumentOutOfRangeException(nameof(mode));
         }
-        return (long)(((BigInteger)acc + rounding) >> shift);
+        return (long)(((Int128)acc + rounding) >> shift);
     }
 
     // Decode the activation type of an xFM precision register.

@@ -63,7 +63,7 @@ public partial class ARM_EthosU55
     {
         // Accumulator values wrap at the width selected by NPU_SET_ACC_FORMAT
         // (TRM 4.4, 0x124, and U85 TRM accumulate()).
-        return unchecked((long)BitHelper.SignExtend(BitHelper.SignTruncate(accumulator + value, accumulatorBits), accumulatorBits));
+        return SignExtendTruncated(accumulator + value, accumulatorBits);
     }
 
     private static (long Minimum, long Maximum) GetActivationRange(int byteLength, bool signed)
@@ -397,7 +397,44 @@ public partial class ARM_EthosU55
         return true;
     }
 
-    // U85 TRM read_ifm/read_ifm2: read an IFM element already including zero point subtraction.
+    // U85 TRM read_ifm/read_ifm2: read an IFM element including zero point subtraction.
+    private long[] DecodeInputForReuseIfBeneficial(FeatureMapTiles input, double estimatedReads)
+    {
+        var elements = checked(input.Width * input.Height * input.Depth);
+        if(elements <= 0 || elements > MaximumFeatureMapBytes / sizeof(long) || estimatedReads <= elements)
+        {
+            return null;
+        }
+
+        // OPTIMIZATION: Decode each input value once instead of decoding it again for every window or output channel.
+        // Store values in row/column/channel order so later reads do not need to calculate tile addresses.
+        var values = new long[(int)elements];
+        const int channelBlockSize = 16;
+        var elementBytes = GetElementByteLength(input.Map);
+        var signed = IsSigned(input.Map);
+        var zeroPoint = GetZeroPoint(input.Map);
+        for(var row = 0; row < input.Height; row++)
+        {
+            for(var column = 0; column < input.Width; column++)
+            {
+                // OPTIMIZATION: Channels within each 16-lane brick are contiguous in both NHWC and NHCWB16. Resolve tiles/addresses once per block.
+                // Keep tails within their brick and precision/zero-point setup outside the loop.
+                var valueIndex = (int)((row * input.Width + column) * input.Depth);
+                for(var channel = 0; channel < input.Depth; channel += channelBlockSize)
+                {
+                    var count = (int)Math.Min(channelBlockSize, input.Depth - channel);
+                    var offset = GetFeatureMapByteOffset(input, row, column, channel, out var tile);
+                    var bytes = input.Buffers[tile];
+                    for(var lane = 0; lane < count; lane++)
+                    {
+                        values[valueIndex + channel + lane] = ReadValue(bytes, (int)(offset + lane * elementBytes), elementBytes, signed) - zeroPoint;
+                    }
+                }
+            }
+        }
+        return values;
+    }
+
     private long GetFeatureMapValue(FeatureMapTiles tiles, long row, long column, long channel)
     {
         var offset = GetFeatureMapByteOffset(tiles, row, column, channel, out var tile);
@@ -441,6 +478,10 @@ public partial class ARM_EthosU55
     private bool WriteFeatureMap(FeatureMapTiles tiles)
     {
         var elementBytes = GetElementByteLength(tiles.Map);
+        if(TryWriteContiguousFeatureMap(tiles, elementBytes))
+        {
+            return true;
+        }
         var channelsPerWrite = IsNHCWB16Layout(tiles.Map) ? 16 : tiles.Depth;
         for(var row = 0; row < tiles.Height; row++)
         {
@@ -456,6 +497,47 @@ public partial class ARM_EthosU55
                 }
             }
         }
+        return true;
+    }
+
+    private bool TryWriteContiguousFeatureMap(FeatureMapTiles tiles, int elementBytes)
+    {
+        if(tiles.Buffers[0] == null || tiles.Buffers[1] != null || tiles.Buffers[2] != null || tiles.Buffers[3] != null || tiles.BufferOffsets[0] != 0)
+        {
+            return false;
+        }
+
+        var pixelBytes = tiles.Depth * elementBytes;
+        var rowBytes = tiles.Width * pixelBytes;
+        var buffer = tiles.Buffers[0];
+        if(buffer.LongLength != tiles.Height * rowBytes)
+        {
+            return false;
+        }
+
+        var (strideX, strideY, strideC) = GetTensorStrides(tiles.Map);
+        if(IsNHCWB16Layout(tiles.Map))
+        {
+            // A partial final brick introduces padding.
+            if(tiles.Depth % 16 != 0 || (tiles.Depth > 16 && strideC != tiles.Width * 16 * elementBytes))
+            {
+                return false;
+            }
+        }
+        else if(tiles.Width > 1 && strideX != pixelBytes) // Next pixel must start immediately after the previous one.
+        {
+            return false;
+        }
+
+        // Next row must start immediately after the previous row.
+        if(tiles.Height > 1 && strideY != rowBytes)
+        {
+            return false;
+        }
+
+        // OPTIMIZATION: Dense RAM outputs already use physical layout; flush once instead of once per pixel/brick.
+        this.DebugLog("Writing contiguous {0} feature map: {1} bytes", tiles.Map, buffer.Length);
+        sysbus.WriteBytes(buffer, tiles.Addresses[0]);
         return true;
     }
 
@@ -1212,6 +1294,10 @@ public partial class ARM_EthosU55
             kernelWidth, kernelHeight, kernelStrideX, kernelStrideY, kernelXDilation, kernelYDilation,
             outputWidth, outputHeight, outputDepth, topPad, leftPad, bottomPad, rightPad, mode);
 
+        var inputValues = mode != PoolMode.ReduceSum && upscale == IfmUpscaleMode.None && inputDepth == outputDepth
+            ? DecodeInputForReuseIfBeneficial(input, (double)outputHeight * outputWidth * outputDepth * kernelHeight * kernelWidth)
+            : null;
+
         for(var oY = 0; oY < outputHeight; oY++)
         {
             for(var oX = 0; oX < outputWidth; oX++)
@@ -1227,7 +1313,7 @@ public partial class ARM_EthosU55
                         for(var iC = 0; iC < inputDepth; iC++)
                         {
                             var value = GetFeatureMapValue(input, oY, oX, iC);
-                            accumulator = Accumulate(accumulator, value, accumulatorBits);
+                            accumulator = unchecked(accumulator + value);
                         }
                     }
                     else
@@ -1248,17 +1334,25 @@ public partial class ARM_EthosU55
                                 }
                                 validCount++;
 
-                                var value = GetUpscaledFeatureMapValue(input, iY, iX, iC, upscale);
+                                var value = inputValues != null
+                                    ? inputValues[(iY * inputWidth + iX) * inputDepth + iC]
+                                    : GetUpscaledFeatureMapValue(input, iY, iX, iC, upscale);
                                 if(mode == PoolMode.Max)
                                 {
                                     accumulator = Math.Max(accumulator, value);
                                 }
                                 else
                                 {
-                                    accumulator = Accumulate(accumulator, value, accumulatorBits);
+                                    accumulator = unchecked(accumulator + value);
                                 }
                             }
                         }
+                    }
+
+                    // OPTIMIZATION: Wrap once after summing, before rescaling.
+                    if(mode != PoolMode.Max)
+                    {
+                        accumulator = Accumulate(0, accumulator, accumulatorBits);
                     }
 
                     if(!WriteAccumulator(outputBuffer, oY, oX, oD, accumulator, rescaleMode, activation, validCount: validCount))
@@ -1272,7 +1366,7 @@ public partial class ARM_EthosU55
         return WriteFeatureMap(outputBuffer);
     }
 
-    private bool ExecuteConv()
+    private bool ExecuteConv(bool isDepthwise)
     {
         var kernelHeight = commandRegisters.KernelHeightM1 + 1;
         var kernelWidth = commandRegisters.KernelWidthM1 + 1;
@@ -1286,8 +1380,10 @@ public partial class ARM_EthosU55
         var kernelYDilation = BitHelper.GetValue(commandRegisters.KernelStride, 4, 1) + 1;
         var kernelXDilation = BitHelper.GetValue(commandRegisters.KernelStride, 3, 1) + 1;
 
-        // Vela is able to compile much larger padding than 127/128, while documentation for U55 mentions padding should be below 31/32 for convolution
-        // TODO: Test how these higher paddings act on hardware
+        // Vela is able to compile much larger padding than 127/128 (top/left padding is within 0-127 and bottom/right padding is within 0-128),
+        // while U55 documentation specifies padding to be below 31/32.
+        // Testing on hardware showed that U55 is able to process padding above 31/32 and it seems it can process them to around 127/255.
+        // Actual value still needs to be tested.
         var padY = BitHelper.GetValue(commandRegisters.IfmPadTop, 0, 7);
         var padX = BitHelper.GetValue(commandRegisters.IfmPadLeft, 0, 7);
         var padBottom = BitHelper.GetValue(commandRegisters.IfmPadBottom, 0, 8);
@@ -1298,7 +1394,7 @@ public partial class ARM_EthosU55
 
         var inputHeight = commandRegisters.OfmHeightM1 * kernelStrideY + kernelHeight - padHeight;
         var inputWidth = commandRegisters.OfmWidthM1 * kernelStrideX + kernelWidth - padWidth;
-        var inputDepth = commandRegisters.IfmDepthM1 + 1;
+        var inputDepth = isDepthwise ? outputDepth : commandRegisters.IfmDepthM1 + 1;
 
         var (ifmSigned, ifmByteLength) = DecodeActivationType(commandRegisters.IfmPrecision, isOfm: false);
         var (ofmSigned, ofmByteLength) = DecodeActivationType(commandRegisters.OfmPrecision, isOfm: true);
@@ -1360,13 +1456,8 @@ public partial class ARM_EthosU55
             return false;
         }
 
-        if(!TryUpdateWeights())
+        if(!TryUpdateWeights(isDepthwise))
         {
-            return false;
-        }
-        if(weights.Length < kernelHeight / kernelYDilation * kernelWidth / kernelXDilation * inputDepth * outputDepth)
-        {
-            this.ErrorLog("Not enough weights; decoded: {0}; required: {1}", weights.Length, kernelHeight / kernelYDilation * kernelWidth / kernelXDilation * inputDepth * outputDepth);
             return false;
         }
 
@@ -1385,11 +1476,28 @@ public partial class ARM_EthosU55
             kernelXDilation, kernelYDilation,
             outputWidth, outputHeight, outputDepth);
 
-        for(var oX = 0; oX < outputWidth; oX++)
+        var kernelRows = (kernelHeight + kernelYDilation - 1) / kernelYDilation;
+        var kernelColumns = (kernelWidth + kernelXDilation - 1) / kernelXDilation;
+        var weightInputDepth = isDepthwise ? 1 : inputDepth;
+        var weightsPerRow = kernelColumns * weightInputDepth;
+        var weightsPerOutputChannel = kernelRows * weightsPerRow;
+
+        // OPTIMIZATION: Decode reused inputs once for non-upscaled convolution.
+        long[] inputValues = null;
+        if(upscale == IfmUpscaleMode.None)
         {
+            var inputChannelsPerKernelPosition = isDepthwise ? 1 : inputDepth;
+            var outputElements = (double)outputHeight * outputWidth * outputDepth;
+            var estimatedReads = outputElements * kernelRows * kernelColumns * inputChannelsPerKernelPosition;
+            inputValues = DecodeInputForReuseIfBeneficial(input, estimatedReads);
+        }
+
+        for(var oC = 0; oC < outputDepth; oC++)
+        {
+            var channelWeights = weights.AsSpan(oC * weightsPerOutputChannel, weightsPerOutputChannel);
             for(var oY = 0; oY < outputHeight; oY++)
             {
-                for(var oC = 0; oC < outputDepth; oC++)
+                for(var oX = 0; oX < outputWidth; oX++)
                 {
                     long accumulator = 0; // U85 TODO: Implement different ways of initializing accumulator
                     for(var kY = 0; kY * kernelYDilation < kernelHeight; kY++)
@@ -1403,16 +1511,57 @@ public partial class ARM_EthosU55
                             {
                                 continue;
                             }
-
-                            for(var iC = 0; iC < inputDepth; iC++)
+                            var inputBase = inputValues != null ? (iY * inputWidth + iX) * inputDepth : 0;
+                            var weightOffset = kY * weightsPerRow + kX * weightInputDepth;
+                            // U85 TODO: Implement support for IFM2 as input
+                            if(isDepthwise)
                             {
-                                // U85 TODO: Implement support for IFM2 as input
-                                var inputValueV = GetUpscaledFeatureMapValue(input, iY, iX, iC, upscale);
-                                var inputValueW = weights[oC, kY, kX, iC];
-                                accumulator = Accumulate(accumulator, inputValueV * inputValueW, accumulatorBits);
+                                var inputValueV = inputValues != null ? inputValues[inputBase + oC] : GetUpscaledFeatureMapValue(input, iY, iX, oC, upscale);
+                                var inputValueW = channelWeights[weightOffset];
+                                accumulator = unchecked(accumulator + inputValueV * inputValueW);
+                            }
+                            else
+                            {
+                                // OPTIMIZATION: Use equal-length spans for linear channel access.
+                                var weightBlock = channelWeights.Slice(weightOffset, inputDepth);
+                                if(inputValues != null)
+                                {
+                                    var inputBlock = inputValues.AsSpan(inputBase, inputDepth);
+
+                                    // OPTIMIZATION: 4 independent sums reduce loop overhead and the dependency chain.
+                                    long sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;
+                                    var iC = 0;
+                                    for(; iC <= inputBlock.Length - 4; iC += 4)
+                                    {
+                                        sum0 = unchecked(sum0 + inputBlock[iC] * weightBlock[iC]);
+                                        sum1 = unchecked(sum1 + inputBlock[iC + 1] * weightBlock[iC + 1]);
+                                        sum2 = unchecked(sum2 + inputBlock[iC + 2] * weightBlock[iC + 2]);
+                                        sum3 = unchecked(sum3 + inputBlock[iC + 3] * weightBlock[iC + 3]);
+                                    }
+                                    accumulator = unchecked(accumulator + sum0 + sum1 + sum2 + sum3);
+
+                                    // Accumulate remaining values.
+                                    for(; iC < inputBlock.Length; iC++)
+                                    {
+                                        accumulator = unchecked(accumulator + inputBlock[iC] * weightBlock[iC]);
+                                    }
+                                }
+                                else
+                                {
+                                    for(var iC = 0; iC < weightBlock.Length; iC++)
+                                    {
+                                        var inputValue = GetUpscaledFeatureMapValue(input, iY, iX, iC, upscale);
+                                        accumulator = unchecked(accumulator + inputValue * weightBlock[iC]);
+                                    }
+                                }
                             }
                         }
                     }
+
+                    // OPTIMIZATION: Wrap once after summing instead of after every multiply-add.
+                    // This preserves the same low 32/40 bits, even if the long sum overflows.
+                    // Wrap before bias and scaling, which need the signed result.
+                    accumulator = Accumulate(0, accumulator, accumulatorBits);
 
                     if(!WriteAccumulator(outputBuffer, oY, oX, oC, accumulator, RescaleMode.Normal, activation))
                     {

@@ -132,6 +132,16 @@ namespace Antmicro.Renode.Peripherals.Wireless
             fswMailboxRegistersCollection = BuildFswMailboxRegistersCollection();
 
             InterferenceQueue.InterferenceQueueChanged += InteferenceQueueChangedCallback;
+
+            if(sequencer != null)
+            {
+                sequencer.AddHookAtWfiStateChange(isInWfi =>
+                {
+                    RAC_sequencerInWfi = isInWfi;
+                    RAC_UpdateEm1pRequest();
+                    RAC_UpdateQChannel();
+                });
+            }
         }
 
         [ConnectionRegion("frc_s")]
@@ -742,7 +752,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             rxTimer.Enabled = false;
 
             sequencer.IsHalted = true;
-            sequencer.Reset();
+            RAC_sequencerInWfi = false;
+            RAC_sequencerPoweredDown = false;
 
             RAC_UpdateRadioStateMachine(Enumeration_AC.EnumerationACValue1);
 
@@ -758,6 +769,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             rfMailboxRegistersCollection.Reset();
             fswMailboxRegistersCollection.Reset();
 
+            RAC_UpdateEm1pRequest();
             UpdateInterrupts();
         }
 
@@ -3028,7 +3040,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(16, 3)
                     .WithFlag(19, out field_307, FieldMode.Read, name: "REG_I_4_FIELD_2")
                     .WithReservedBits(20, 2)
-                    .WithFlag(22, out field_363, FieldMode.Read, name: "REG_I_4_FIELD_3")
+                    .WithFlag(22, FieldMode.Read, valueProviderCallback: _ => RAC_sequencerInWfi, name: "REG_I_4_FIELD_3")
                     .WithFlag(23, out field_362, FieldMode.Read, name: "REG_I_4_FIELD_4")
                     .WithEnumField<DoubleWordRegister, Enumeration_AB>(24, 4, FieldMode.Read, valueProviderCallback: _ => RAC_currentRadioState, name: "REG_I_4_FIELD_5")
                     .WithFlag(28, out field_361, FieldMode.Read, name: "REG_I_4_FIELD_6")
@@ -3074,9 +3086,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         {
                             if (value && sequencer.IsHalted)
                             {
-                                sequencer.PC = sequencerConfig.BootAddress;
-                                sequencer.IsHalted = false;
-                                sequencer.Resume();
+                                RAC_StartSequencer();
                             }
                         }, name: "REG_I_6_FIELD_22")
                     .WithFlag(27, name: "REG_I_6_FIELD_23")
@@ -3115,21 +3125,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithChangeCallback((_, __) => RAC_UpdateRadioStateMachine())
                 },
                 {(long)Registers_I.RegI_35, new DoubleWordRegister(this)
-                    .WithFlag(0, FieldMode.Set, writeCallback: (_, value) => { RAC_em1pAckPending = true; }, name: "REG_I_35_FIELD_1")
-                    .WithFlag(1, name: "REG_I_35_FIELD_2")
+                    .WithFlag(0, out field_415, name: "REG_I_35_FIELD_1")
+                    .WithFlag(1, out field_414, name: "REG_I_35_FIELD_2")
                     .WithReservedBits(2, 2)
-                    .WithFlag(4, name: "REG_I_35_FIELD_3")
-                    .WithFlag(5, name: "REG_I_35_FIELD_4")
+                    .WithFlag(4, out field_413, name: "REG_I_35_FIELD_3")
+                    .WithFlag(5, out field_412, name: "REG_I_35_FIELD_4")
                     .WithReservedBits(6, 10)
-                    .WithFlag(16, name: "REG_I_35_FIELD_5")
-                    .WithFlag(17, FieldMode.Read, valueProviderCallback: _ =>
-                        {
-                            var retValue = RAC_em1pAckPending;
-                            RAC_em1pAckPending = false;
-                            return retValue;
-                        }, name: "REG_I_35_FIELD_6")
-                    .WithFlag(18, name: "REG_I_35_FIELD_7")
+                    .WithFlag(16, FieldMode.Read, valueProviderCallback: _ => RAC_Em1pRequest, name: "REG_I_35_FIELD_5")
+                    .WithFlag(17, FieldMode.Read, valueProviderCallback: _ => RAC_Em1pRequest, name: "REG_I_35_FIELD_6")
+                    .WithFlag(18, FieldMode.Read, valueProviderCallback: _ => RAC_Em1pHardwareRequest, name: "REG_I_35_FIELD_7")
                     .WithReservedBits(19, 13)
+                    .WithChangeCallback((_, __) => RAC_UpdateEm1pRequest())
                 },
                 {(long)Registers_I.RegI_8, new DoubleWordRegister(this)
                     .WithFlag(0, out field_312, name: "REG_I_8_FIELD_1")
@@ -5865,9 +5871,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     }
                     case Enumeration_AB.EnumerationABValue6:
                     {
-                        if(!field_348.Value
-                            && (signal == Enumeration_AC.EnumerationACValue16
-                                || signal == Enumeration_AC.EnumerationACValue7))
+                        if(signal == Enumeration_AC.EnumerationACValue16
+                            || signal == Enumeration_AC.EnumerationACValue7)
                         {
                             RAC_ClearOngoingTx();
                             RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue7);
@@ -6153,6 +6158,63 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {
                     RAC_TxEnable = false;
                 }
+                RAC_UpdateEm1pRequest();
+            }
+        }
+
+        private void RAC_UpdateEm1pRequest()
+        {
+            Emu?.SetEm1pRequest(this, RAC_Em1pRequest);
+            Emu?.SetEm1pHostClockRequest(this, RAC_Em1pHostClockRequest);
+        }
+
+        private bool RAC_Em1pHardwareRequest => (sequencer != null && !sequencer.IsHalted && !RAC_sequencerInWfi)
+                                                || RAC_currentRadioState != Enumeration_AB.EnumerationABValue0;
+
+        private bool RAC_Em1pRequest => (field_415.Value && !field_414.Value)
+                                        || RAC_Em1pHardwareRequest;
+
+        private bool RAC_Em1pHostClockRequest => field_413.Value && !field_412.Value;
+
+        private void RAC_UpdateQChannel()
+        {
+            Emu?.SetQChannelBusy(this, RAC_QChannelBusy);
+        }
+
+        private bool RAC_QChannelBusy => sequencer != null && !sequencer.IsHalted && !RAC_sequencerInWfi;
+
+        private void RAC_StartSequencer()
+        {
+            if(RAC_sequencerPoweredDown)
+            {
+                sequencer.Reset();
+            }
+            RAC_sequencerPoweredDown = false;
+            sequencer.PC = sequencerConfig.BootAddress;
+            sequencer.IsHalted = false;
+            sequencer.Resume();
+            RAC_UpdateEm1pRequest();
+            RAC_UpdateQChannel();
+        }
+
+        private void RAC_PowerDownSequencer()
+        {
+            if(sequencer == null || sequencer.IsHalted)
+            {
+                return;
+            }
+            sequencer.IsHalted = true;
+            RAC_sequencerInWfi = false;
+            RAC_sequencerPoweredDown = true;
+            RAC_UpdateEm1pRequest();
+            RAC_UpdateQChannel();
+        }
+
+        private void RAC_PowerUpSequencer()
+        {
+            if(RAC_sequencerPoweredDown)
+            {
+                RAC_StartSequencer();
             }
         }
 
@@ -6697,6 +6759,20 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        private ISiLabs_Emu Emu
+        {
+            get
+            {
+                if(emu == null)
+                {
+                    emu = machine.GetPeripheralsOfType<ISiLabs_Emu>().FirstOrDefault();
+                    emu?.AddEnterDeepSleepHook(RAC_PowerDownSequencer);
+                    emu?.AddExitDeepSleepHook(RAC_PowerUpSequencer);
+                }
+                return emu;
+            }
+        }
+
         private IFlagRegisterField field_191;
         private IFlagRegisterField field_181;
         private IFlagRegisterField field_204;
@@ -7048,7 +7124,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField field_311;
         private IValueRegisterField field_364;
         private IFlagRegisterField field_329;
-        private bool RAC_em1pAckPending;
+        private bool RAC_sequencerInWfi;
+        private bool RAC_sequencerPoweredDown;
+        private IFlagRegisterField field_415;
+        private IFlagRegisterField field_414;
+        private IFlagRegisterField field_413;
+        private IFlagRegisterField field_412;
         private IFlagRegisterField field_305;
         private IFlagRegisterField field_306;
         private IFlagRegisterField field_366;
@@ -7056,7 +7137,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IEnumRegisterField<Enumeration_AB> field_314;
         private IFlagRegisterField field_361;
         private IFlagRegisterField field_362;
-        private IFlagRegisterField field_363;
         private IFlagRegisterField field_307;
         private IValueRegisterField field_365;
         private IEnumRegisterField<Enumeration_AB> field_371;
@@ -7099,6 +7179,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private uint currentDisassembleSubFrameStartWord = 0;
         private uint currentDisassembleSubFrameBytes = 0;
         private ISiLabs_CMU cmu;
+        private ISiLabs_Emu emu;
 
         private readonly IValueRegisterField[] field_375 = new IValueRegisterField[RFMAILBOX_MessageNumber];
         private readonly IFlagRegisterField[] field_373 = new IFlagRegisterField[RFMAILBOX_MessageNumber];

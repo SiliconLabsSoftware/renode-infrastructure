@@ -5,12 +5,15 @@
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
+using System;
 using System.Collections.Generic;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Peripherals.DMA;
+
+#nullable enable
 
 namespace Antmicro.Renode.Peripherals.ARM_Ethos;
 
@@ -27,6 +30,7 @@ public partial class ARM_EthosU85 : BasicDoubleWordPeripheral, IKnownSize
         this.macsPerCycle = macsPerCycle;
         IRQ = new GPIO();
         dmaEngine = new DmaEngine(machine.GetSystemBus(this));
+        lookupTable = new byte[2048]; // U85 TRM 2.6.2
 
         DefineRegisters();
         Reset();
@@ -36,6 +40,7 @@ public partial class ARM_EthosU85 : BasicDoubleWordPeripheral, IKnownSize
     {
         base.Reset();
         commandRegisters = new CommandRegisterState();
+        Array.Fill<byte>(lookupTable, 0);
         // All registers and internal RAMs are cleared on reset (U85 TRM 2.2, 2.3.5).
         UpdateInterrupts();
         resumeAfterStop = false;
@@ -104,4 +109,5 @@ public partial class ARM_EthosU85 : BasicDoubleWordPeripheral, IKnownSize
 
     private readonly U85Config configs;
     private readonly DmaEngine dmaEngine;
+    private readonly byte[] lookupTable;
 }

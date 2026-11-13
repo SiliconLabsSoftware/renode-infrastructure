@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
@@ -106,6 +107,7 @@ namespace Antmicro.Renode.Peripherals.UART
 
             registersCollection.Reset();
             UpdateInterrupts();
+            UpdateEm1pRequest();
             ScheduleDeferredAction(DeferredAction.ResetTxSignals);
         }
 
@@ -242,6 +244,8 @@ namespace Antmicro.Renode.Peripherals.UART
                 rxBufferFullInterrupt.Value = true;
                 UpdateInterrupts();
             }
+            // The bus clock has to run before the LDMA sees the request below.
+            UpdateEm1pRequest();
             BufferState = nextBufferState;
         }
 
@@ -251,6 +255,7 @@ namespace Antmicro.Renode.Peripherals.UART
             receiveDataValidFlag.Value = false;
             BufferState = BufferState.Empty;
             UpdateInterrupts();
+            UpdateEm1pRequest();
         }
 
         protected override bool IsReceiveEnabled => receiverEnableFlag.Value;
@@ -274,6 +279,7 @@ namespace Antmicro.Renode.Peripherals.UART
             if((deferredActionsMask & (uint)DeferredAction.ResetTxSignals) > 0)
             {
                 TxFifoLevel.Set(true);
+                UpdateEm1pRequest();
             }
 
             deferredActionsMask = 0;
@@ -304,7 +310,46 @@ namespace Antmicro.Renode.Peripherals.UART
         private byte ReadBuffer()
         {
             byte character;
-            return TryGetCharacter(out character) ? character : (byte)0;
+            var result = TryGetCharacter(out character) ? character : (byte)0;
+            UpdateEm1pRequest();
+            return result;
+        }
+
+        // EUART0 is the EM2 capable UART. It asks for EM1P while a DMA request is pending and its
+        // DMA wake-up enable is set: the receive FIFO holds RXFIW + 1 frames, or the transmit
+        // side wants data.
+        private bool Em1pRequestActive => (rxDmaWakeUp.Value && Count >= (int)rxWatermark.Value + 1)
+            || (txDmaWakeUp.Value && TxFifoLevel.IsSet);
+
+        private void UpdateEm1pRequest()
+        {
+            machine.ClockSource.ExecuteInLock(delegate
+            {
+                var request = Em1pRequestActive;
+                if(request == em1pRequested)
+                {
+                    return;
+                }
+
+                var emu = machine.GetPeripheralsOfType<ISiLabs_Emu>().FirstOrDefault();
+                if(emu == null)
+                {
+                    return;
+                }
+
+                em1pRequested = request;
+                this.Log(LogLevel.Noisy, "EM1P request {0}", request ? "asserted" : "deasserted");
+                if(request)
+                {
+                    emu.SetEm1pHostClockRequest(this, true);
+                    emu.SetEm1pRequest(this, true);
+                }
+                else
+                {
+                    emu.SetEm1pRequest(this, false);
+                    emu.SetEm1pHostClockRequest(this, false);
+                }
+            });
         }
 
         private void HandleTxBufferData(byte data)
@@ -512,8 +557,8 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithFlag(2, name: "CTSEN")
                     .WithFlag(3, name: "RTSINV")
                     .WithReservedBits(4, 5)
-                    .WithFlag(9, name: "TXDMAWU")
-                    .WithFlag(10, name: "RXDMAWU")
+                    .WithFlag(9, out txDmaWakeUp, name: "TXDMAWU")
+                    .WithFlag(10, out rxDmaWakeUp, name: "RXDMAWU")
                     .WithFlag(11, name: "SFUBRX")
                     .WithReservedBits(12, 3)
                     .WithFlag(15, name: "RXPRSEN")
@@ -523,6 +568,7 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithReservedBits(21, 1)
                     .WithValueField(22, 2, name: "RTSRXFW")
                     .WithReservedBits(24, 8)
+                    .WithChangeCallback((_, __) => UpdateEm1pRequest())
                 },
                 {(long)Registers.FrameCfg, new DoubleWordRegister(this, 0x2)
                     .WithValueField(0, 2, name: "DATABITS")
@@ -678,6 +724,9 @@ namespace Antmicro.Renode.Peripherals.UART
         private IEnumRegisterField<OversamplingMode> oversamplingField;
         private IFlagRegisterField rxOverflowInterruptEnable;
         private IValueRegisterField rxWatermark;
+        private IFlagRegisterField rxDmaWakeUp;
+        private IFlagRegisterField txDmaWakeUp;
+        private bool em1pRequested;
         private IFlagRegisterField rxUnderflowInterruptEnable;
         private ISiLabs_CMU cmu;
         private readonly LimitTimer deferTimer;

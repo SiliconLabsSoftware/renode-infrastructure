@@ -142,6 +142,22 @@ namespace Antmicro.Renode.Peripherals.Wireless
             hostMailboxRegistersCollection = BuildHostMailboxRegistersCollection();
             radioMailboxRegistersCollection = BuildRadioMailboxRegistersCollection();
 
+            sequencer.AddHookAtWfiStateChange(isInWfi =>
+            {
+                RAC_sequencerInWfi = isInWfi;
+                RAC_UpdateEm1pRequest();
+            });
+            sequencer.CpuWaitSignal.AddStateChangedHook(_ => RAC_UpdateEm1pRequest());
+            // The EM2 exit that restarts this reset can run on the host CPU. The core is reset once
+            // the machine is paused, which is the thread that just finished RunFor.
+            machine.StateChanged += (_, args) =>
+            {
+                if(args.CurrentState == MachineStateChangedEventArgs.State.Paused)
+                {
+                    RAC_ApplySequencerPowerUp();
+                }
+            };
+
             InterferenceQueue.InterferenceQueueChanged += InteferenceQueueChangedCallback;
         }
 
@@ -674,6 +690,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             // Reset the sequencer and put it back in halted state.
             sequencer.CpuWaitSignal.Set(true);
             sequencer.Reset();
+            RAC_sequencerInWfi = false;
+            RAC_sequencerPoweredDown = false;
 
             // TODO: clean up interference queue?
 
@@ -690,6 +708,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             hostMailboxRegistersCollection.Reset();
             radioMailboxRegistersCollection.Reset();
 
+            RAC_UpdateEm1pRequest();
             UpdateInterrupts();
         }
 
@@ -2450,18 +2469,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(17, 7)
                     .WithFlag(24, name: "SEQRESET")
                     .WithFlag(25, out RAC_exitShutdownDisable, FieldMode.Read, name: "EXITSHUTDOWNDIS")
-                    .WithFlag(26, FieldMode.Set, writeCallback: (_, value) =>
-                        {
-                            if(value && sequencer.CpuWaitSignal.IsSet)
-                            {
-                                sequencer.VectorTableOffset = SequencerMemoryBaseAddress;
-                                sequencer.SP = machine.SystemBus.ReadDoubleWord(0x0, sequencer);
-                                sequencer.PC = machine.SystemBus.ReadDoubleWord(0x4, sequencer);
-                                RAC_SeqTimerStart();
-                                sequencer.CpuWaitSignal.Set(false);
-                                this.Log(LogLevel.Noisy, "Sequencer resumed, isHalted={0} VTOR={1:X} SP={2:X} PC={3:X} CPUWAIT={4}.", sequencer.IsHalted, sequencer.VectorTableOffset, sequencer.SP, sequencer.PC, sequencer.CpuWaitSignal.IsSet);
-                            }
-                        }, name: "CPUWAITDIS")
+                    .WithFlag(26, FieldMode.Set, writeCallback: (_, value) => { if(value) { RAC_ReleaseSequencer(); } }, name: "CPUWAITDIS")
                     .WithFlag(27, name: "SEQCLKDIS")
                     .WithFlag(28, name: "RXOFDIS")
                     .WithReservedBits(29, 3)
@@ -2497,21 +2505,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithChangeCallback((_, __) => RAC_UpdateRadioStateMachine())
                 },
                 {(long)RadioControllerRegisters.Em1pControlAndStatus, new DoubleWordRegister(this)
-                    .WithFlag(0, FieldMode.Set, writeCallback: (_, value) => { RAC_em1pAckPending = true; }, name: "RADIOEM1PMODE")
-                    .WithFlag(1, name: "RADIOEM1PMODE")
+                    .WithFlag(0, out RAC_em1pRadioSwControl, name: "RADIOEM1PMODE")
+                    .WithFlag(1, out RAC_em1pRadioDisableSwRequest, name: "RADIOEM1PDISSWREQ")
                     .WithReservedBits(2, 2)
-                    .WithFlag(4, name: "MCUEM1PMODE")
-                    .WithFlag(5, name: "MCUEM1PDISSWREQ")
+                    .WithFlag(4, out RAC_em1pMcuSwControl, name: "MCUEM1PMODE")
+                    .WithFlag(5, out RAC_em1pMcuDisableSwRequest, name: "MCUEM1PDISSWREQ")
                     .WithReservedBits(6, 10)
-                    .WithFlag(16, name: "RADIOEM1PREQ")
-                    .WithFlag(17, FieldMode.Read, valueProviderCallback: _ =>
-                        {
-                            var retValue = RAC_em1pAckPending;
-                            RAC_em1pAckPending = false;
-                            return retValue;
-                        }, name: "RADIOEM1PACK")
-                    .WithFlag(18, name: "RADIOEM1PHWREQ")
+                    .WithFlag(16, FieldMode.Read, valueProviderCallback: _ => RAC_Em1pRequest, name: "RADIOEM1PREQ")
+                    .WithFlag(17, FieldMode.Read, valueProviderCallback: _ => RAC_Em1pRequest, name: "RADIOEM1PACK")
+                    .WithFlag(18, FieldMode.Read, valueProviderCallback: _ => RAC_Em1pHardwareRequest, name: "RADIOEM1PHWREQ")
                     .WithReservedBits(19, 13)
+                    .WithChangeCallback((_, __) => RAC_UpdateEm1pRequest())
                 },
                 {(long)RadioControllerRegisters.InterruptFlags, new DoubleWordRegister(this)
                     .WithFlag(0, out RAC_radioStateChangeInterrupt, name: "STATECHANGEIF")
@@ -5996,7 +6000,81 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 RAC_previous2RadioState = RAC_previous1RadioState;
                 RAC_previous1RadioState = RAC_currentRadioState;
                 RAC_currentRadioState = newState;
+                RAC_UpdateEm1pRequest();
             }
+        }
+
+        private void RAC_UpdateEm1pRequest()
+        {
+            Emu?.SetEm1pRequest(this, RAC_Em1pRequest);
+            Emu?.SetEm1pHostClockRequest(this, RAC_Em1pHostClockRequest);
+        }
+
+        // The sequencer requests EM1P in hardware unless it is in WFI with the radio state machine idle.
+        private bool RAC_Em1pHardwareRequest => (!sequencer.CpuWaitSignal.IsSet && !RAC_sequencerInWfi)
+                                                || RAC_currentRadioState != RAC_RadioState.Off;
+
+        private bool RAC_Em1pRequest => (RAC_em1pRadioSwControl.Value && !RAC_em1pRadioDisableSwRequest.Value)
+                                        || RAC_Em1pHardwareRequest;
+
+        // MCUEM1PMODE in software control with the disable bit clear forces the host clock domain on
+        // in EM1P. Hardware requestors are not modeled, so hardware control leaves those clocks gated.
+        private bool RAC_Em1pHostClockRequest => RAC_em1pMcuSwControl.Value && !RAC_em1pMcuDisableSwRequest.Value;
+
+        // CPUWAITDIS releases the core at the vector table in sequencer RAM. The same path restarts
+        // it after EM2, once software sets the bit again.
+        private void RAC_ReleaseSequencer()
+        {
+            if(!sequencer.CpuWaitSignal.IsSet)
+            {
+                return;
+            }
+            sequencer.VectorTableOffset = SequencerMemoryBaseAddress;
+            sequencer.SP = machine.SystemBus.ReadDoubleWord(0x0, sequencer);
+            sequencer.PC = machine.SystemBus.ReadDoubleWord(0x4, sequencer);
+            RAC_SeqTimerStart();
+            sequencer.CpuWaitSignal.Set(false);
+            this.Log(LogLevel.Noisy, "Sequencer resumed, isHalted={0} VTOR={1:X} SP={2:X} PC={3:X} CPUWAIT={4}.", sequencer.IsHalted, sequencer.VectorTableOffset, sequencer.SP, sequencer.PC, sequencer.CpuWaitSignal.IsSet);
+        }
+
+        // EM2 retains PD1 but resets its non-retained flops, and the radio is inactive. The core
+        // stays in CPUWAIT afterwards. Neither hook may touch the core: the enter hook runs on the
+        // sequencer thread, and the exit hook runs on the host thread, and pausing a core from
+        // either one stalls virtual time. The reset is applied once the machine is paused.
+        private void RAC_PowerDownSequencer()
+        {
+            if(sequencer.CpuWaitSignal.IsSet || RAC_sequencerPoweredDown)
+            {
+                return;
+            }
+            RAC_sequencerPoweredDown = true;
+        }
+
+        private void RAC_PowerUpSequencer()
+        {
+            if(!RAC_sequencerPoweredDown)
+            {
+                return;
+            }
+            RAC_sequencerResetPending = true;
+            if(machine.IsPaused)
+            {
+                RAC_ApplySequencerPowerUp();
+            }
+        }
+
+        private void RAC_ApplySequencerPowerUp()
+        {
+            if(!RAC_sequencerPoweredDown || !RAC_sequencerResetPending)
+            {
+                return;
+            }
+            sequencer.CpuWaitSignal.Set(true);
+            sequencer.Reset();
+            RAC_sequencerInWfi = false;
+            RAC_sequencerPoweredDown = false;
+            RAC_sequencerResetPending = false;
+            RAC_UpdateEm1pRequest();
         }
 
         // SYNTH-tuned RF center frequency in Hz, quantized to the nearest 10 kHz
@@ -6442,6 +6520,23 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private uint CRC_CrcWidth => (uint)CRC_crcWidthMode.Value + 1;
 
+        private ISiLabs_Emu Emu
+        {
+            get
+            {
+                if(emu == null)
+                {
+                    emu = machine.GetPeripheralsOfType<ISiLabs_Emu>().FirstOrDefault();
+                    emu?.RegisterRadioSequencerCpu(sequencer);
+                    // The vector table in sequencer RAM is retained, but the core stays in CPUWAIT
+                    // until software sets CPUWAITDIS again.
+                    emu?.AddEnterDeepSleepHook(RAC_PowerDownSequencer);
+                    emu?.AddExitDeepSleepHook(RAC_PowerUpSequencer);
+                }
+                return emu;
+            }
+        }
+
         private IFlagRegisterField PROTIMER_listenBeforeTalkSuccessInterrupt;
         private IFlagRegisterField PROTIMER_listenBeforeTalkFailureInterrupt;
         private IFlagRegisterField PROTIMER_listenBeforeTalkRetryInterrupt;
@@ -6780,14 +6875,20 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private bool RAC_paOutputLevelRamping = false;
         private IFlagRegisterField RAC_paRampingDone;
         private IFlagRegisterField RAC_synthStartRequest;
-        private bool RAC_em1pAckPending;
+        private bool RAC_sequencerInWfi;
+        private bool RAC_sequencerPoweredDown;
+        private bool RAC_sequencerResetPending;
+        private IFlagRegisterField RAC_em1pRadioSwControl;
+        private IFlagRegisterField RAC_em1pRadioDisableSwRequest;
+        private IFlagRegisterField RAC_em1pMcuSwControl;
+        private IFlagRegisterField RAC_em1pMcuDisableSwRequest;
         private IFlagRegisterField RAC_txAfterRx;
         private IFlagRegisterField RAC_exitShutdownDisable;
         private IFlagRegisterField RAC_forceDisable;
         private IFlagRegisterField RAC_prsForceTx;
         private IValueRegisterField RAC_mainCoreSeqInterrupts;
         private IValueRegisterField RAC_softwareIrq;
-
+        
         private bool SYNTH_startValid;
         private TimeInterval SYNTH_startTime;
         private IValueRegisterField SYNTH_frequency;
@@ -6808,6 +6909,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         // subframe excluded from the word counter would otherwise never appear to make progress.
         private uint currentDisassembleSubFrameBytes = 0;
         private ISiLabs_CMU cmu;
+        private ISiLabs_Emu emu;
 
         private readonly IFlagRegisterField[] RFMAILBOX_messageInterruptEnable = new IFlagRegisterField[MailboxMessageNumber];
         private readonly IFlagRegisterField[] RFMAILBOX_messageInterrupt = new IFlagRegisterField[MailboxMessageNumber];

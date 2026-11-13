@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2025 Antmicro
+// Copyright (c) 2010-2026 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -14,6 +14,7 @@ using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.CPU;
+using Antmicro.Renode.UserInterface;
 using Antmicro.Renode.Utilities;
 
 namespace Antmicro.Renode.Peripherals.IRQControllers
@@ -21,10 +22,12 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
     public class VeeR_EL2_PIC : BasicDoubleWordPeripheral, IIRQController, IKnownSize, IBytePeripheral, IWordPeripheral
     {
         // interruptSourcesCount: RV_PIC_TOTAL_INT
-        public VeeR_EL2_PIC(IMachine machine, VeeR_EL2 cpu, uint interruptSourcesCount = InterruptSourcesMax, bool notAllGatewaysAreConfigurable = false)
+        public VeeR_EL2_PIC(IMachine machine, VeeR_EL2 cpu, uint interruptSourcesCount = InterruptSourcesMax, bool notAllGatewaysAreConfigurable = false, bool fastInterruptRedirect = false)
                 : base(machine)
         {
             this.cpu = cpu;
+            // FastInterruptRedirectEnabled works only with IRQ@11
+            this.FastInterruptRedirectEnabled = fastInterruptRedirect;
             cpu.RegisterPIC(this);
 
             if(interruptSourcesCount < InterruptSourcesMin || interruptSourcesCount > InterruptSourcesMax)
@@ -46,6 +49,40 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
                         + "use '{1}' to add gateway registers if any interrupt source should have them",
                         nameof(notAllGatewaysAreConfigurable), nameof(AddGatewayRegistersForInterruptSources)
                 );
+            }
+        }
+
+        [HideInMonitor]
+        public void CaptureHighestPrioritySourceAndItsLevel()
+        {
+            lock(interruptSources)
+            {
+                var enabledPendingSources = interruptSources.Where(source => source.IsEnabled && source.IsPending);
+                if(!enabledPendingSources.Any())
+                {
+                    // Setting claimid to 0 is based on the "Support for Vectored External Interrupts" chapter in the docs:
+                    // "It is possible in some corner cases that the captured claim ID read from the meihap register is 0 (i.e., no
+                    // interrupt request is pending). To keep the interrupt latency at a minimum, the external interrupt handler above
+                    // should not check for this condition. Instead, the pointer stored at the base address of the external interrupt
+                    // vector table (i.e., pointer 0) must point to a ‘no-interrupt’ handler, as shown in Fig. 8.5 above. That handler
+                    // can be as simple as executing a return from interrupt (i.e., mret) instruction."
+                    CapturedHighestPrioritySourceId = NoInterruptSourceId;
+                    return;
+                }
+
+                // Regardless of the order, out of sources with the same priority level the one with a smaller id wins.
+                // Therefore levels are taken directly for reversed order, for which level 0 has priority over level 15,
+                // but negated for standard priority order.
+                var modifier = PriorityOrderReversed ? 1 : -1;
+
+                // `First` can be safely used as this code is unreachable with empty `enabledPendingSources` and the collection is locked.
+                var highestPrioritySource = enabledPendingSources.OrderBy(source => (source.PriorityLevel * 1000 * modifier) + source.Id).First();
+
+                capturedHighestPriorityLevel.Value = highestPrioritySource.PriorityLevel;
+                CapturedHighestPrioritySourceId = highestPrioritySource.Id;
+
+                this.NoisyLog("Captured external interrupt source with the highest priority level ({0}), source ID: {1}",
+                        highestPrioritySource.PriorityLevel, highestPrioritySource.Id);
             }
         }
 
@@ -207,6 +244,8 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
 
         public uint VectorTableBaseAddress => (uint)vectorTableBaseAddressField.Value;
 
+        public readonly bool FastInterruptRedirectEnabled;
+
         public const uint PICAccessErrorSecondaryCause = 0x6;
 
         protected void DefineCSRs()
@@ -215,38 +254,44 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
                 .WithReservedBits(4, 28)
                 .WithValueField(0, 4, out capturedHighestPriorityLevel, name: "clidpri")
             ;
+            RegisterCSR(CustomCSR.ExternalInterruptClaimIDPriorityLevel, claimIDPriorityLevel);
 
             // "The `meicpct` register has WAR0 (Write Any value, Read 0) behavior. Writing ‘0’ is recommended."
-            var claimIDPriorityLevelCaptureTrigger = new DoubleWordRegister(this)
-                .WithValueField(0, 32, valueProviderCallback: _ => 0)
-                .WithWriteCallback((_, __) => CaptureHighestPrioritySourceAndItsLevel())
-            ;
+            if(!FastInterruptRedirectEnabled)
+            {
+                var claimIDPriorityLevelCaptureTrigger = new DoubleWordRegister(this)
+                    .WithValueField(0, 32, valueProviderCallback: _ => 0)
+                    .WithWriteCallback((_, __) => CaptureHighestPrioritySourceAndItsLevel())
+                ;
+                RegisterCSR(CustomCSR.ExternalInterruptClaimIDPriorityLevelCaptureTrigger, claimIDPriorityLevelCaptureTrigger);
+            }
 
             var currentPriorityLevel = new DoubleWordRegister(this)
                 .WithReservedBits(4, 28)
                 // Just a storage for interrupt handling routines.
                 .WithValueField(0, 4, out currentPriorityLevelField, name: "currpri")
             ;
+            RegisterCSR(CustomCSR.ExternalInterruptCurrentPriorityLevel, currentPriorityLevel);
 
             var handlerAddressPointerRegister = new DoubleWordRegister(this)
                 .WithValueField(10, 22, FieldMode.Read, valueProviderCallback: _ => VectorTableBaseAddress)
                 .WithValueField(2, 8, FieldMode.Read, name: "claimid", valueProviderCallback: _ => CapturedHighestPrioritySourceId)
                 .WithReservedBits(0, 2)
             ;
+            RegisterCSR(CustomCSR.ExternalInterruptHandlerAddressPointer, handlerAddressPointerRegister);
 
             var priorityThresholdRegister = new DoubleWordRegister(this)
                 .WithReservedBits(4, 28)
                 .WithValueField(0, 4, out priorityThresholdField, name: "prithresh")
                 .WithChangeCallback((_, __) => UpdateIRQs())
             ;
+            RegisterCSR(CustomCSR.ExternalInterruptPriorityThreshold, priorityThresholdRegister);
 
             var vectorTableRegister = new DoubleWordRegister(this)
                 .WithValueField(10, 22, out vectorTableBaseAddressField)
                 .WithReservedBits(0, 10)
             ;
-
-            RegisterCSRs(claimIDPriorityLevel, claimIDPriorityLevelCaptureTrigger, currentPriorityLevel, handlerAddressPointerRegister,
-                priorityThresholdRegister, vectorTableRegister);
+            RegisterCSR(CustomCSR.ExternalInterruptVectorTable, vectorTableRegister);
         }
 
         // "non-word sized/aligned loads cause a load access fault exception"
@@ -261,18 +306,6 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
         {
             this.WarningLog("Attempted {0} write to 0x{1:X} (value: 0x{2:X}) isn't supported, raising access fault", width, offset, value);
             cpu.RaiseExceptionWithSecondaryCause((uint)BaseRiscV.ExceptionCodes.StoreAccessFault, PICAccessErrorSecondaryCause);
-        }
-
-        protected virtual void RegisterCSRs(DoubleWordRegister claimIDPriorityLevel, DoubleWordRegister claimIDPriorityLevelCaptureTrigger,
-                DoubleWordRegister currentPriorityLevel, DoubleWordRegister handlerAddressPointerRegister,
-                DoubleWordRegister priorityThresholdRegister, DoubleWordRegister vectorTableRegister)
-        {
-            RegisterCSR(CustomCSR.ExternalInterruptClaimIDPriorityLevel, claimIDPriorityLevel);
-            RegisterCSR(CustomCSR.ExternalInterruptClaimIDPriorityLevelCaptureTrigger, claimIDPriorityLevelCaptureTrigger);
-            RegisterCSR(CustomCSR.ExternalInterruptCurrentPriorityLevel, currentPriorityLevel);
-            RegisterCSR(CustomCSR.ExternalInterruptHandlerAddressPointer, handlerAddressPointerRegister);
-            RegisterCSR(CustomCSR.ExternalInterruptPriorityThreshold, priorityThresholdRegister);
-            RegisterCSR(CustomCSR.ExternalInterruptVectorTable, vectorTableRegister);
         }
 
         protected void RegisterCSR<T>(T csr, DoubleWordRegister register)
@@ -292,39 +325,6 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
         protected const uint InterruptSourcesMax = 255u;
         protected const uint InterruptSourcesMin = 2u;
         protected const uint NoInterruptSourceId = 0u;
-
-        private void CaptureHighestPrioritySourceAndItsLevel()
-        {
-            lock(interruptSources)
-            {
-                var enabledPendingSources = interruptSources.Where(source => source.IsEnabled && source.IsPending);
-                if(!enabledPendingSources.Any())
-                {
-                    // Setting claimid to 0 is based on the "Support for Vectored External Interrupts" chapter in the docs:
-                    // "It is possible in some corner cases that the captured claim ID read from the meihap register is 0 (i.e., no
-                    // interrupt request is pending). To keep the interrupt latency at a minimum, the external interrupt handler above
-                    // should not check for this condition. Instead, the pointer stored at the base address of the external interrupt
-                    // vector table (i.e., pointer 0) must point to a ‘no-interrupt’ handler, as shown in Fig. 8.5 above. That handler
-                    // can be as simple as executing a return from interrupt (i.e., mret) instruction."
-                    CapturedHighestPrioritySourceId = NoInterruptSourceId;
-                    return;
-                }
-
-                // Regardless of the order, out of sources with the same priority level the one with a smaller id wins.
-                // Therefore levels are taken directly for reversed order, for which level 0 has priority over level 15,
-                // but negated for standard priority order.
-                var modifier = PriorityOrderReversed ? 1 : -1;
-
-                // `First` can be safely used as this code is unreachable with empty `enabledPendingSources` and the collection is locked.
-                var highestPrioritySource = enabledPendingSources.OrderBy(source => (source.PriorityLevel * 1000 * modifier) + source.Id).First();
-
-                capturedHighestPriorityLevel.Value = highestPrioritySource.PriorityLevel;
-                CapturedHighestPrioritySourceId = highestPrioritySource.Id;
-
-                this.NoisyLog("Captured external interrupt source with the highest priority level ({0}), source ID: {1}",
-                        highestPrioritySource.PriorityLevel, highestPrioritySource.Id);
-            }
-        }
 
         private void DefineMemoryMappedRegisters(uint sourcesCount, bool defineAllGatewayRegisters)
         {
