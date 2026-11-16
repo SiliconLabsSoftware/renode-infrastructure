@@ -6,6 +6,8 @@
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
+using System.Collections.Generic;
+
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
@@ -25,6 +27,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         public byte ReadByte(long offset)
         {
+            // A programmed token byte takes precedence over the built-in defaults.
+            if(programmedBytes.TryGetValue(offset, out var programmed))
+            {
+                return programmed;
+            }
+
             if(offset >= (long)ManufacturerToken.mfgCustomEui64 && offset < (long)ManufacturerToken.mfgCustomEui64 + (long)ManufacturerTokenLength.mfgCustomEui64Length)
             {
                 return Eui64(offset);
@@ -56,9 +64,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return (uint)((ReadWord(offset) << 16) | ReadWord(offset + 2));
         }
 
+        // Programs a manufacturing token byte. The page is flash, so the value is kept across Reset.
         public void WriteByte(long offset, byte value)
         {
-            this.Log(LogLevel.Error, "Writing manufacturer token space");
+            this.Log(LogLevel.Debug, "Programming manufacturer token byte at offset 0x{0:X}: 0x{1:X2}", offset, value);
+            programmedBytes[offset] = value;
         }
 
         // Todo: verify endianness
@@ -160,6 +170,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
 
         private readonly Machine machine;
+        private readonly Dictionary<long, byte> programmedBytes = new Dictionary<long, byte>();
         private static readonly sbyte DefaultCcaThreshold = -75;
 
         private static readonly byte[] siliconLabsEui64OUI = {0xCC, 0xCC, 0xCC};
