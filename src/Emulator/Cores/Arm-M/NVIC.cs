@@ -1728,6 +1728,15 @@ namespace Antmicro.Renode.Peripherals.IRQControllers
                     name: "FORCED")
                 .WithTaggedFlag("DEBUGEVT", 31);
 
+            // Debug events are not modeled, so nothing sets a bit here: the register reads as zero
+            // and accepts the write-one-to-clear a fault handler performs.
+            Registers.DebugFaultStatus.Define(RegisterCollection)
+                .WithValueField(0, 32, FieldMode.Read | FieldMode.WriteOneToClear, name: "DFSR");
+
+            // The contents are IMPLEMENTATION DEFINED; the register is plain storage.
+            Registers.AuxiliaryFaultStatus.Define(RegisterCollection)
+                .WithValueField(0, 32, name: "AFSR");
+
             // Cache is not simulated so the following registers are unused,
             // but registered due to performance reasons.
             Registers.DCacheCleanByMVAToPoCAddress.Define(RegisterCollection)
