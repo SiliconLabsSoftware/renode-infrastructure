@@ -7,6 +7,7 @@
 //
 
 using System;
+using System.Collections.Generic;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
@@ -16,9 +17,22 @@ using Antmicro.Renode.Peripherals.Wireless;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
-    // Allows for the viewing of register contents when debugging
+    // Besides the event producers it subscribes to (SYSRTC, HFXO, PROTIMER), the PRS carries
+    // level signals a platform wires into it as GPIO inputs, such as a TIMER compare output.
+    // Where a level goes is decided by the firmware's registers: a channel forwards it only
+    // while its ASYNC_CH_CTRL selects that source and signal, and the PCNT output follows it
+    // only while CONSUMER_PCNT0_S0IN names that channel. A pad is left to the GPIO model,
+    // which checks its own PRS route.
+    //
+    // Input connections (see InputSignal):
+    //     0            TIMER1 CC0
+    // Output connections:
+    //     0            PCNT0 S0 input
+    //     1 + channel  that async channel's level, for a GPIO pad (channel 5 -> connection 6)
+    //
+    // The attribute allows for the viewing of register contents when debugging
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord)]
-    public partial class SiLabs_PRS_3
+    public partial class SiLabs_PRS_3 : IGPIOReceiver, INumberedGPIOOutput
     {
         public SiLabs_PRS_3(Machine machine, SiLabs_HFXO_3 hfxo, SiLabs_SYSRTC_1 sysrtc, SiLabs_xG24_LPW lpw) : this(machine)
         {
@@ -27,8 +41,43 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             this.lpw = lpw;
         }
 
+        // The number is the producer's signal, not a channel: which channel carries it is the
+        // firmware's choice, read from ASYNC_CH_CTRL.
+        public void OnGPIO(int number, bool value)
+        {
+            if(!Enum.IsDefined(typeof(InputSignal), number))
+            {
+                this.Log(LogLevel.Warning, "Signal {0} is not modeled as a PRS producer", number);
+                return;
+            }
+            var signal = (InputSignal)number;
+
+            for(var channel = 0; channel < NumberOfAsyncChannels; ++channel)
+            {
+                if(!ChannelCarries(channel, signal))
+                {
+                    continue;
+                }
+                Connections[FirstChannelConnection + channel].Set(value);
+
+                if((int)consumer_pcnt0_s0in_prssel_field.Value == channel)
+                {
+                    Connections[PcntConnection].Set(value);
+                }
+            }
+        }
+
+        public IReadOnlyDictionary<int, IGPIO> Connections { get; private set; }
+
         partial void SiLabs_PRS_3_Constructor()
         {
+            var connections = new Dictionary<int, IGPIO>();
+            for(var i = 0; i < FirstChannelConnection + NumberOfAsyncChannels; ++i)
+            {
+                connections[i] = new GPIO();
+            }
+            Connections = connections;
+
             // Handles the consumption of an async signal by calling the OnAsyncSignalReceived function
             // with the index corresponding to the channel.
             asyncSignalHandlers = new Action[]
@@ -143,6 +192,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     this.Log(LogLevel.Error, "Unhandled PROTIMERL SIGSEL {0} on channel {1}", sigsel, index);
                 }
             }
+            else if(sourcesel == AsyncProducerSourceSelect.Timer1 && sigsel == (uint)TimerSignalSelect.Cc0)
+            {
+                // A level producer: it reaches the channel through OnGPIO, which reads this
+                // register, so there is no event to subscribe to.
+                this.Log(LogLevel.Debug, "Channel {0} carries TIMER1 CC0", index);
+                machine.ClockSource.ExecuteInLock(delegate
+                {
+                    UnsubscribeFromAllEvents(index);
+                });
+            }
             else
             {
                 this.Log(LogLevel.Error, "Unhandled PRS ASYNC CH CTRL SOURCESEL {0} on channel {1}", sourcesel, index);
@@ -158,6 +217,21 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 {
                     OnAsyncSignalReceived(i);
                 }
+            }
+        }
+
+        // Whether this channel's ASYNC_CH_CTRL selects this producer.
+        private bool ChannelCarries(int channel, InputSignal signal)
+        {
+            var sourcesel = (AsyncProducerSourceSelect)async_ch_ctrl_sourcesel_field[channel].Value;
+            var sigsel = (uint)async_ch_ctrl_sigsel_field[channel].Value;
+
+            switch(signal)
+            {
+            case InputSignal.Timer1Cc0:
+                return sourcesel == AsyncProducerSourceSelect.Timer1 && sigsel == (uint)TimerSignalSelect.Cc0;
+            default:
+                return false;
             }
         }
 
@@ -244,9 +318,17 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         private const int NumberOfAsyncChannels = 16;
         private const int NumberOfProtimerChannels = 5;
+        private const int PcntConnection = 0;
+        private const int FirstChannelConnection = 1;
         private const uint SignalSelectMask = 0x7;
         private const int SourceSelectOffset = 8;
         private const uint SourceSelectMask = 0x7F;
+
+        // Level producers a platform can wire in. The value is the GPIO input number.
+        private enum InputSignal
+        {
+            Timer1Cc0 = 0,
+        }
 
         // From efr32mg24_prs_signals.h in gsdk
         private enum AsyncProducerSourceSelect
@@ -307,6 +389,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             Group0Compare1 = 1,
             Group1Compare0 = 2,
             Group1Compare1 = 3,
+        }
+
+        private enum TimerSignalSelect
+        {
+            Uf = 0,
+            Of = 1,
+            Cc0 = 2,
+            Cc1 = 3,
+            Cc2 = 4,
         }
 
         private enum HfxoLSignalSelect
