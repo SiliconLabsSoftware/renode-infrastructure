@@ -6,9 +6,13 @@
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 
 using Antmicro.Renode.Core;
+using Antmicro.Renode.Core.Structure;
+using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.Miscellaneous.SiLabs;
@@ -18,10 +22,13 @@ namespace Antmicro.Renode.Peripherals.Timers
 {
     // Allows for the viewing of register contents when debugging
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord)]
-    public partial class SiLabs_TIMER_1
+    public partial class SiLabs_TIMER_1 : INumberedGPIOOutput, IRegisterablePeripheral<IGPIOReceiver, NumberRegistrationPoint<int>>, IGPIOReceiver
     {
-        public SiLabs_TIMER_1(Machine machine, int width) : this(machine)
+        // `frequency` is the clock feeding the prescaler, in Hz. 0 derives it from the CMU.
+        public SiLabs_TIMER_1(Machine machine, int width, uint frequency = 0) : this(machine)
         {
+            fixedFrequency = frequency;
+
             if(width < 1 || width > 32)
             {
                 this.Log(LogLevel.Error, "Timer width {0} is outside 1..32, using 16", width);
@@ -46,6 +53,79 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
 
             IRQ = new GPIO();
+
+            // STATUS.OCBVn is generated as three individually named flags.
+            ocbValidBits = new[] { status_ocbv0_bit, status_ocbv1_bit, status_ocbv2_bit };
+
+            // Numbered outputs 0..2 are the compare outputs and output 3 is the overflow/underflow
+            // DMA request. IRQ stays the only GPIO property, so a bare `-> nvic@N` in a platform
+            // file keeps resolving to it.
+            var outputs = new Dictionary<int, IGPIO>();
+            outputLevels = new bool[NumberOfChannels];
+            captureFifos = new Queue<uint>[NumberOfChannels];
+            captureInputLevel = new bool[NumberOfChannels];
+            for(var i = 0; i < NumberOfChannels; i++)
+            {
+                outputs[i] = new GPIO();
+                captureFifos[i] = new Queue<uint>();
+            }
+            overflowRequest = new GPIO();
+            outputs[OverflowRequestOutput] = overflowRequest;
+            Connections = new ReadOnlyDictionary<int, IGPIO>(outputs);
+        }
+
+        // Lets a platform file attach an IGPIOReceiver, such as a PWMTester, to a compare output:
+        // `pwm_red: PWMTester @ timer3 0` together with `timer3: { 0 -> pwm_red@0 }`.
+        public void Register(IGPIOReceiver peripheral, NumberRegistrationPoint<int> registrationPoint)
+        {
+            machine.RegisterAsAChildOf(this, peripheral, registrationPoint);
+        }
+
+        public void Unregister(IGPIOReceiver peripheral)
+        {
+            machine.UnregisterAsAChildOf(this, peripheral);
+        }
+
+        // Input capture. Input `number` is the CC channel's input signal; a platform file wires a
+        // source to `timerN@k`. The GPIO pin route registers are not consulted.
+        // On the selected edge (CC_CTRL.ICEDGE) the count is pushed to the two-deep ICF FIFO and
+        // IF.CCk is raised. ICOF always holds the newest capture; IF.ICFOFk is raised when a
+        // capture finds the FIFO full.
+        public void OnGPIO(int number, bool value)
+        {
+            if(number < 0 || number >= NumberOfChannels)
+            {
+                this.Log(LogLevel.Warning, "Capture input {0} does not exist (CC0-CC{1})", number, NumberOfChannels - 1);
+                return;
+            }
+
+            var previous = captureInputLevel[number];
+            captureInputLevel[number] = value;
+            if(previous == value || !timerIsRunning || cc_cfg_mode_field[number].Value != CC_CFG_MODE.INPUTCAPTURE)
+            {
+                return;
+            }
+
+            switch(cc_ctrl_icedge_field[number].Value)
+            {
+                case CC_CTRL_ICEDGE.RISING:
+                    if(!value)
+                    {
+                        return;
+                    }
+                    break;
+                case CC_CTRL_ICEDGE.FALLING:
+                    if(value)
+                    {
+                        return;
+                    }
+                    break;
+                case CC_CTRL_ICEDGE.BOTH:
+                    break;
+                default:
+                    return;
+            }
+            Capture(number);
         }
 
         partial void TIMER_Reset()
@@ -58,6 +138,13 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
 
             registers.Reset();
+            foreach(var fifo in captureFifos)
+            {
+                fifo.Clear();
+            }
+            Captures = 0;
+            overflowRequest.Unset();
+            DriveOutputsIdle();
             UpdateInterrupts();
         }
 
@@ -91,6 +178,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             {
                 channel.Reset();
             }
+            DriveOutputsIdle();
             if_of_bit.Value = false;
             if_uf_bit.Value = false;
             if_cc0_bit.Value = false;
@@ -107,6 +195,36 @@ namespace Antmicro.Renode.Peripherals.Timers
         partial void Cc_Cfg_Mode_Write(ulong index, CC_CFG_MODE a, CC_CFG_MODE b)
         {
             RestartTimer(false);
+            // A channel switched to PWM while the counter runs takes its level for the current
+            // count right away instead of waiting for the next period.
+            if(timerIsRunning && b == CC_CFG_MODE.PWM && CountingUp)
+            {
+                DriveOutput((int)index, PwmLevel((int)index, TimerCounter));
+            }
+        }
+
+        partial void Cc_Ctrl_Outinv_Write(ulong index, bool a, bool b)
+        {
+            // The pin follows the new polarity immediately.
+            DriveOutput((int)index, outputLevels[(int)index]);
+        }
+
+        partial void Cc_Ocb_Ocb_Write(ulong index, ulong a, ulong b)
+        {
+            // OCB is the buffered compare value: it is loaded into OC at the next update event,
+            // and STATUS.OCBVn reads 1 while a value is waiting.
+            ocbValidBits[(int)index].Value = true;
+            if(!timerIsRunning)
+            {
+                this.Log(LogLevel.Debug, "CC{0}_OCB written to 0x{1:X} while the timer is stopped; "
+                         + "it loads into CC{0}_OC at the first update event after CMD.START", index, b);
+            }
+        }
+
+        partial void Topb_Topb_Write(ulong a, ulong b)
+        {
+            // TOPB is the buffered period: it is loaded into TOP at the next update event.
+            status_topbv_bit.Value = true;
         }
 
         partial void Status_Running_ValueProvider(bool a)
@@ -190,7 +308,106 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
         }
 
+        // The clock feeding the prescaler follows this CMU's EM01GRPACLK selection, and every
+        // later change of it, when set. It takes precedence over the constructor's `frequency`.
+        public SiLabs_CMU_3 Cmu
+        {
+            get
+            {
+                return clockTreeCmu;
+            }
+
+            set
+            {
+                if(clockTreeCmu != null)
+                {
+                    clockTreeCmu.ClockTreeChanged -= OnClockTreeChanged;
+                }
+                clockTreeCmu = value;
+                if(clockTreeCmu != null)
+                {
+                    clockTreeCmu.ClockTreeChanged += OnClockTreeChanged;
+                }
+                OnClockTreeChanged();
+            }
+        }
+
+        // The clock feeding the prescaler, in Hz: EM01GRPACLK of `Cmu` when that is set, else the
+        // constructor's `frequency` when nonzero, else the HFXO frequency of the machine's CMU.
+        // 0 means the clock is disabled or unknown.
+        public uint SourceFrequency
+        {
+            get
+            {
+                if(clockTreeCmu != null)
+                {
+                    return (uint)clockTreeCmu.Em01GrpaClkFrequency;
+                }
+                if(fixedFrequency != 0)
+                {
+                    return fixedFrequency;
+                }
+                return cmu == null ? 0 : (uint)cmu.HfxoFrequency;
+            }
+        }
+
+        // Captures taken since reset, across channels.
+        public ulong Captures { get; private set; }
+
+        public IReadOnlyDictionary<int, IGPIO> Connections { get; private set; }
+
         public GPIO IRQ { get; private set; }
+
+        private void OnClockTreeChanged()
+        {
+            if(timerIsRunning)
+            {
+                RestartTimer(false);
+            }
+        }
+
+        private void Capture(int index)
+        {
+            var count = TimerCounter;
+            if(captureFifos[index].Count >= CaptureFifoDepth)
+            {
+                SetCaptureOverflowFlag(index);
+            }
+            else
+            {
+                captureFifos[index].Enqueue(count);
+            }
+            cc_icof_icof_field[index].Value = count;
+            Captures++;
+            SetCompareFlag((uint)index);
+        }
+
+        // CCn_ICF read: pops the oldest capture. An empty FIFO reads as the newest capture.
+        private uint ReadCaptureFifo(int index)
+        {
+            if(captureFifos[index].Count == 0)
+            {
+                this.Log(LogLevel.Debug, "CC{0}_ICF read with an empty capture FIFO", index);
+                return (uint)cc_icof_icof_field[index].Value;
+            }
+            return captureFifos[index].Dequeue();
+        }
+
+        private void SetCaptureOverflowFlag(int index)
+        {
+            switch(index)
+            {
+                case 0:
+                    if_icfof0_bit.Value = true;
+                    break;
+                case 1:
+                    if_icfof1_bit.Value = true;
+                    break;
+                case 2:
+                    if_icfof2_bit.Value = true;
+                    break;
+            }
+        }
 
         private void UpdateInterrupts()
         {
@@ -200,7 +417,10 @@ namespace Antmicro.Renode.Peripherals.Timers
                           || (ien_uf_bit.Value && if_uf_bit.Value)
                           || (ien_cc0_bit.Value && if_cc0_bit.Value)
                           || (ien_cc1_bit.Value && if_cc1_bit.Value)
-                          || (ien_cc2_bit.Value && if_cc2_bit.Value);
+                          || (ien_cc2_bit.Value && if_cc2_bit.Value)
+                          || (ien_icfof0_bit.Value && if_icfof0_bit.Value)
+                          || (ien_icfof1_bit.Value && if_icfof1_bit.Value)
+                          || (ien_icfof2_bit.Value && if_icfof2_bit.Value);
                 IRQ.Set(irq);
             });
         }
@@ -213,9 +433,28 @@ namespace Antmicro.Renode.Peripherals.Timers
                 return;
             }
 
+            var wasRunning = timerIsRunning;
             timerIsRunning = true;
             EnsureHostAllClockHooks();
             RestartTimer(true);
+            if(!timerIsRunning)
+            {
+                return;
+            }
+
+            // A run starts from the CC_CFG.COIST level; an up-counting PWM channel then starts
+            // its first period.
+            for(var i = 0; i < NumberOfChannels; i++)
+            {
+                if(cc_cfg_mode_field[i].Value == CC_CFG_MODE.PWM && CountingUp)
+                {
+                    DriveOutput(i, PwmLevel(i, 0));
+                }
+                else if(!wasRunning)
+                {
+                    DriveOutput(i, IdleOutputLevel(i));
+                }
+            }
         }
 
         private void StopCommand()
@@ -226,6 +465,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             {
                 channel.Reset();
             }
+            DriveOutputsIdle();
         }
 
         private void OnTimerLimitReached()
@@ -240,6 +480,13 @@ namespace Antmicro.Renode.Peripherals.Timers
                 if_uf_bit.Value = true;
             }
 
+            // One DMA request per update event. The LDMA acts on the rising edge.
+            overflowRequest.Set(true);
+            overflowRequest.Set(false);
+
+            // The buffered registers are latched before the interrupt is raised, so a handler
+            // reads the values the new period runs with.
+            TransferBufferedRegisters();
             UpdateInterrupts();
 
             if(cfg_osmen_bit.Value)
@@ -252,7 +499,135 @@ namespace Antmicro.Renode.Peripherals.Timers
                 return;
             }
 
+            for(var i = 0; i < NumberOfChannels; i++)
+            {
+                BeginOutputPeriod(i);
+            }
             RestartTimer(true);
+        }
+
+        // The update event copies each pending buffered register into its active register and
+        // clears the valid flag, so a period or duty written mid-period takes effect at a period
+        // boundary.
+        private void TransferBufferedRegisters()
+        {
+            if(status_topbv_bit.Value)
+            {
+                this.Log(LogLevel.Noisy, "Update event: TOPB 0x{0:X} -> TOP", topb_topb_field.Value);
+                top_top_field.Value = topb_topb_field.Value;
+                status_topbv_bit.Value = false;
+            }
+
+            for(var i = 0; i < NumberOfChannels; i++)
+            {
+                if(!ocbValidBits[i].Value)
+                {
+                    continue;
+                }
+                this.Log(LogLevel.Noisy, "Update event: CC{0}_OCB 0x{1:X} -> CC{0}_OC", i, cc_ocb_ocb_field[i].Value);
+                cc_oc_oc_field[i].Value = cc_ocb_ocb_field[i].Value;
+                ocbValidBits[i].Value = false;
+            }
+        }
+
+        // Compare outputs.
+        //
+        // PWM mode, counting up: the output is asserted when the counter wraps to 0 and deasserted
+        // at the compare match, so it is high for OC counts of each period. OC == 0 never asserts
+        // (0%) and OC >= TOP never deasserts (100%); neither produces an edge. The single-count
+        // low pulse that OC == TOP would give is not driven. PWM mode counting down raises the
+        // compare flags only.
+        //
+        // Output-compare mode: CMOA acts at the compare match, COFOA at overflow, CUFOA at
+        // underflow. A compare value equal to TOP matches on the last count of the period, so
+        // CMOA = TOGGLE with OC == TOP toggles once per period.
+        //
+        // The level tracked here is the compare output before CC_CTRL.OUTINV; the pin sees it
+        // inverted when OUTINV is set. A channel in OFF or input-capture mode keeps its level.
+        // The dead-time insertion unit and PRS output control are not modelled.
+        private void BeginOutputPeriod(int index)
+        {
+            switch(cc_cfg_mode_field[index].Value)
+            {
+                case CC_CFG_MODE.PWM:
+                    if(CountingUp)
+                    {
+                        DriveOutput(index, PwmLevel(index, 0));
+                    }
+                    break;
+                case CC_CFG_MODE.OUTPUTCOMPARE:
+                    ApplyOutputAction(index, CountingUp ? (OutputAction)cc_ctrl_cofoa_field[index].Value
+                                                        : (OutputAction)cc_ctrl_cufoa_field[index].Value);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        private void OnCompareMatch(uint index)
+        {
+            SetCompareFlag(index);
+
+            var channel = (int)index;
+            switch(cc_cfg_mode_field[channel].Value)
+            {
+                case CC_CFG_MODE.PWM:
+                    if(CountingUp && cc_oc_oc_field[channel].Value < TopValue())
+                    {
+                        DriveOutput(channel, false);
+                    }
+                    break;
+                case CC_CFG_MODE.OUTPUTCOMPARE:
+                    ApplyOutputAction(channel, (OutputAction)cc_ctrl_cmoa_field[channel].Value);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // The PWM output level of an up-counting channel when the counter is at `counter`.
+        private bool PwmLevel(int index, ulong counter)
+        {
+            ulong compare = cc_oc_oc_field[index].Value;
+            return compare != 0 && (counter < compare || compare >= TopValue());
+        }
+
+        private void ApplyOutputAction(int index, OutputAction action)
+        {
+            switch(action)
+            {
+                case OutputAction.Toggle:
+                    DriveOutput(index, !outputLevels[index]);
+                    break;
+                case OutputAction.Clear:
+                    DriveOutput(index, false);
+                    break;
+                case OutputAction.Set:
+                    DriveOutput(index, true);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        private void DriveOutput(int index, bool level)
+        {
+            outputLevels[index] = level;
+            Connections[index].Set(level ^ cc_ctrl_outinv_bit[index].Value);
+        }
+
+        // CC_CFG.COIST is the compare output's level while the counter is not running.
+        private bool IdleOutputLevel(int index)
+        {
+            return cc_cfg_coist_bit[index].Value;
+        }
+
+        private void DriveOutputsIdle()
+        {
+            for(var i = 0; i < NumberOfChannels; i++)
+            {
+                DriveOutput(i, IdleOutputLevel(i));
+            }
         }
 
         private void RestartTimer(bool restartFromInitial)
@@ -287,6 +662,12 @@ namespace Antmicro.Renode.Peripherals.Timers
 
             ulong top = TopValue();
             uint currentValue = restartFromInitial ? (CountingUp ? 0 : (uint)top) : TimerCounter;
+            if(currentValue > top)
+            {
+                // TOP was lowered below the count. The period restarts from its initial value.
+                this.Log(LogLevel.Debug, "CNT 0x{0:X} is past TOP 0x{1:X}; restarting the period", currentValue, top);
+                currentValue = CountingUp ? 0 : (uint)top;
+            }
 
             timer.Enabled = false;
             timer.Frequency = CounterFrequency();
@@ -348,14 +729,21 @@ namespace Antmicro.Renode.Peripherals.Timers
         // TIMERn_CFG.PRESC: the selected clock is divided by PRESC + 1.
         private ulong CounterFrequency()
         {
-            if(cmu == null)
+            ulong source = SourceFrequency;
+            if(source == 0)
             {
+                if(clockTreeCmu != null)
+                {
+                    // EM01GRPACLK is disabled. A LimitTimer cannot run at 0 Hz, so the counter
+                    // all but stands still.
+                    return 1;
+                }
                 this.Log(LogLevel.Error, "Timer has no CMU; using 1 Hz");
                 return 1;
             }
 
             ulong divisor = (ulong)cfg_presc_field.Value + 1;
-            ulong frequency = cmu.HfxoFrequency / divisor;
+            ulong frequency = source / divisor;
             if(frequency == 0)
             {
                 this.Log(LogLevel.Error, "Prescaled timer clock is 0 Hz; using 1 Hz");
@@ -439,8 +827,27 @@ namespace Antmicro.Renode.Peripherals.Timers
         private bool hostAllClockHooksReady;
         private bool hostAllClocksGated;
         private uint frozenCounter;
+        // The generated `cmu` answers the default clock lookup; this one is the opt-in clock tree source.
+        private SiLabs_CMU_3 clockTreeCmu;
+        private GPIO overflowRequest;
+        private bool[] outputLevels;
+        private IFlagRegisterField[] ocbValidBits;
+        private Queue<uint>[] captureFifos;
+        private bool[] captureInputLevel;
+        private readonly uint fixedFrequency;
         private readonly ulong counterCeiling = 1UL << 16;
         private const int NumberOfChannels = 3;
+        private const int OverflowRequestOutput = NumberOfChannels;
+        private const int CaptureFifoDepth = 2;
+
+        // CMOA, COFOA and CUFOA are separately generated enums with identical encodings.
+        private enum OutputAction
+        {
+            None = 0,
+            Toggle = 1,
+            Clear = 2,
+            Set = 3,
+        }
 
         private class CompareChannel
         {
@@ -488,6 +895,11 @@ namespace Antmicro.Renode.Peripherals.Timers
                 ulong compare = parent.cc_oc_oc_field[(int)index].Value;
                 if(compare > top)
                 {
+                    if(mode == CC_CFG_MODE.PWM)
+                    {
+                        // A PWM compare value above TOP is the 100% duty setting.
+                        return;
+                    }
                     parent.Log(LogLevel.Error, "CC{0}: OC 0x{1:X} is greater than TOP 0x{2:X}, compare will not match", index, compare, top);
                     return;
                 }
@@ -520,7 +932,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             private void OnCompare()
             {
                 timer.Enabled = false;
-                parent.SetCompareFlag(index);
+                parent.OnCompareMatch(index);
             }
 
             private bool compareRunning;
