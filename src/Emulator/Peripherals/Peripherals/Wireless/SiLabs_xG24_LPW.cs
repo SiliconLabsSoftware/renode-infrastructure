@@ -13,6 +13,7 @@ using System.Linq;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
+using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.Bus.Wrappers;
@@ -25,10 +26,36 @@ using Antmicro.Renode.Utilities;
 
 namespace Antmicro.Renode.Peripherals.Wireless
 {
-    public class SiLabs_xG24_LPW : IBusPeripheral, IRadio, ISiLabs_PacketTraceSniffer
+    public partial class SiLabs_xG24_LPW : IBusPeripheral, IRadio, ISiLabs_PacketTraceSniffer
     {
-        public SiLabs_xG24_LPW(Machine machine, MappedMemory ram, CortexM sequencer, SiLabs_BUFC_4 bufferController, SiLabs_SYSRTC_1 sysrtc = null, bool pa0DbmSupport = false, bool pa10DbmSupport = false, bool pa20DbmSupport = false)
+        // sequencer may be left out on a part with no Cortex-M sequencer core (EFR32xG21, whose
+        // sequencer runs a proprietary 16-bit instruction set and has no CPUWAITDIS). Every access
+        // to the core is skipped then, and autonomousSequencer should be set so the radio state
+        // machine still advances.
+        //
+        // autonomousSequencer: the radio state machine leaves a state only once the sequencer has
+        // cleared that state's STATE*IF flag. With this set the model clears its own state flags
+        // two microseconds after raising them, which is what a well-behaved sequencer image does.
+        //
+        // registerLayout: "xg24" or "xg21". EFR32xG21 lays out the BUFC, MODEM and RAC register
+        // blocks differently while carrying the same registers. "xg21" translates every bus offset
+        // into those blocks through the tables in SiLabs_xG24_LPW.xG21Layout.cs before the ordinary
+        // decode and gives xG21-only registers plain storage. Accesses the model makes by enum are
+        // not translated.
+        public SiLabs_xG24_LPW(Machine machine, MappedMemory ram, SiLabs_BUFC_4 bufferController, CortexM sequencer = null, SiLabs_SYSRTC_1 sysrtc = null, bool pa0DbmSupport = false, bool pa10DbmSupport = false, bool pa20DbmSupport = false, bool autonomousSequencer = false, string registerLayout = "xg24")
         {
+            switch(registerLayout)
+            {
+            case "xg24":
+                xG21Layout = false;
+                break;
+            case "xg21":
+                xG21Layout = true;
+                break;
+            default:
+                throw new ConstructionException($"registerLayout must be \"xg24\" or \"xg21\", not \"{registerLayout}\"");
+            }
+            this.autonomousSequencer = autonomousSequencer;
             this.machine = machine;
             this.ram = ram;
             this.sequencer = sequencer;
@@ -67,6 +94,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
                                                enabled: false, workMode: WorkMode.OneShot, eventEnabled: true, autoUpdate: true);
             rxWarmSettleTimer.LimitReached += RAC_RxWarmSettleTimerLimitReached;
 
+            // The limit of two microseconds puts the acknowledgement outside the call that raised
+            // the state flag.
+            seqAutoAckTimer = new LimitTimer(machine.ClockSource, MicrosecondFrequency, this, "seqautoacktimer", 2, direction: Direction.Ascending,
+                                             enabled: false, workMode: WorkMode.OneShot, eventEnabled: true, autoUpdate: true);
+            seqAutoAckTimer.LimitReached += RAC_AutonomousSequencerAcknowledge;
+
             FrameControllerPrioritizedIRQ = new GPIO();
             FrameControllerIRQ = new GPIO();
             ModulatorAndDemodulatorIRQ = new GPIO();
@@ -101,7 +134,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             SeqSoftware0IRQ = new GPIO();
             SeqSoftware1IRQ = new GPIO();
 
-            sequencer.CpuWaitSignal.Set(true);
+            sequencer?.CpuWaitSignal.Set(true);
 
             // Protocol Timer stuff
             PROTIMER_timeoutCounter = new PROTIMER_TimeoutCounter[PROTIMER_NumberOfTimeoutCounters];
@@ -148,12 +181,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
             hostMailboxRegistersCollection = BuildHostMailboxRegistersCollection();
             radioMailboxRegistersCollection = BuildRadioMailboxRegistersCollection();
 
-            sequencer.AddHookAtWfiStateChange(isInWfi =>
+            if(sequencer != null)
             {
-                RAC_sequencerInWfi = isInWfi;
-                RAC_UpdateEm1pRequest();
-            });
-            sequencer.CpuWaitSignal.AddStateChangedHook(_ => RAC_UpdateEm1pRequest());
+                sequencer.AddHookAtWfiStateChange(isInWfi =>
+                {
+                    RAC_sequencerInWfi = isInWfi;
+                    RAC_UpdateEm1pRequest();
+                });
+                sequencer.CpuWaitSignal.AddStateChangedHook(_ => RAC_UpdateEm1pRequest());
+            }
             // The EM2 exit that restarts this reset can run on the host CPU. The core is reset once
             // the machine is paused, which is the thread that just finished RunFor.
             machine.StateChanged += (_, args) =>
@@ -690,11 +726,16 @@ namespace Antmicro.Renode.Peripherals.Wireless
             rxTimer.Enabled = false;
             txTimer.Enabled = false;
             rxWarmSettleTimer.Enabled = false;
+            seqAutoAckTimer.Enabled = false;
             SYNTH_startValid = false;
+            ResetXG21Storage();
 
             // Reset the sequencer and put it back in halted state.
-            sequencer.CpuWaitSignal.Set(true);
-            sequencer.Reset();
+            if(sequencer != null)
+            {
+                sequencer.CpuWaitSignal.Set(true);
+                sequencer.Reset();
+            }
             RAC_sequencerInWfi = false;
             RAC_sequencerPoweredDown = false;
 
@@ -1485,6 +1526,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     this.Log(LogLevel.Noisy, "TOGGLE Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}, TOGGLE_value=0x{3:X}, old_value=0x{4:X}, new_value=0x{5:X}", Enum.Format(typeof(T), internal_offset, "G"), offset, internal_offset, value, old_value, internal_value);
                 }
 
+                if(xG21Layout && TranslateXG21<T>(ref internal_offset, out var xG21Storage) && xG21Storage != null)
+                {
+                    xG21Storage[internal_offset] = internal_value;
+                    this.Log(LogLevel.Debug, "{0}: Write to {1} xG21-only register at offset 0x{2:X}, value 0x{3:X}",
+                            this.GetTime(), regionName, internal_offset, internal_value);
+                    return;
+                }
+
                 this.Log(LogLevel.Debug, "{0}: Write to {1} at offset 0x{2:X} ({3}), value 0x{4:X}",
                         this.GetTime(), regionName, internal_offset, Enum.Format(typeof(T), internal_offset, "G"), internal_value);
 
@@ -1529,6 +1578,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {
                     this.Log(LogLevel.Noisy, "TOGGLE Operation on {0}, offset=0x{1:X}, internal_offset=0x{2:X}", Enum.Format(typeof(T), internal_offset, "G"), offset, internal_offset);
                 }
+            }
+
+            if(xG21Layout && TranslateXG21<T>(ref internal_offset, out var xG21Storage) && xG21Storage != null)
+            {
+                return xG21Storage.TryGetValue(internal_offset, out var xG21Stored) ? xG21Stored : 0u;
             }
 
             if(!registersCollection.TryRead(internal_offset, out result))
@@ -5706,7 +5760,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         }
 
         // The sequencer requests EM1P in hardware unless it is in WFI with the radio state machine idle.
-        private bool RAC_Em1pHardwareRequest => (!sequencer.CpuWaitSignal.IsSet && !RAC_sequencerInWfi)
+        private bool RAC_Em1pHardwareRequest => (sequencer != null && !sequencer.CpuWaitSignal.IsSet && !RAC_sequencerInWfi)
                                                 || RAC_currentRadioState != RAC_RadioState.Off;
 
         private bool RAC_Em1pRequest => (RAC_em1pRadioSwControl.Value && !RAC_em1pRadioDisableSwRequest.Value)
@@ -5721,7 +5775,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         // it after EM2, once software sets the bit again.
         private void RAC_ReleaseSequencer()
         {
-            if(!sequencer.CpuWaitSignal.IsSet)
+            if(sequencer == null || !sequencer.CpuWaitSignal.IsSet)
             {
                 return;
             }
@@ -5739,7 +5793,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         // either one stalls virtual time. The reset is applied once the machine is paused.
         private void RAC_PowerDownSequencer()
         {
-            if(sequencer.CpuWaitSignal.IsSet || RAC_sequencerPoweredDown)
+            if(sequencer == null || sequencer.CpuWaitSignal.IsSet || RAC_sequencerPoweredDown)
             {
                 return;
             }
@@ -6202,6 +6256,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         MODEM_demodulatorState.Value = MODEM_DemodulatorState.Off;
                     }
 
+                    if(autonomousSequencer)
+                    {
+                        seqAutoAckTimer.Value = 0;
+                        seqAutoAckTimer.Enabled = true;
+                    }
+
                     AGC_UpdateRssiState();
 
                     // If we just entered RxSearch state, we should restart RSSI sampling.
@@ -6220,6 +6280,47 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 UpdateInterrupts();
             });
+        }
+
+        // Stands in for the sequencer image's state interrupt handlers. Assigning a flag's Value
+        // does not run its change callback, so the signal the callback would send on a bus write
+        // is sent here after the clear. A transition caused by that signal raises the next state
+        // flag and restarts the timer, so a chain of states is acknowledged one step at a time.
+        private void RAC_AutonomousSequencerAcknowledge()
+        {
+            seqAutoAckTimer.Enabled = false;
+
+            var pending = new (IFlagRegisterField flag, RAC_RadioStateMachineSignal signal)[]
+            {
+                (RAC_seqStateOffInterrupt, RAC_RadioStateMachineSignal.None),
+                (RAC_seqStateRxWarmInterrupt, RAC_RadioStateMachineSignal.RxWarmIrqCleared),
+                (RAC_seqStateRxSearchInterrupt, RAC_RadioStateMachineSignal.RxSearchIrqCleared),
+                (RAC_seqStateRxFrameInterrupt, RAC_RadioStateMachineSignal.RxFrameIrqCleared),
+                (RAC_seqStateRxPoweringDownInterrupt, RAC_RadioStateMachineSignal.RxPowerDownIrqCleared),
+                (RAC_seqStateRx2RxInterrupt, RAC_RadioStateMachineSignal.Rx2RxIrqCleared),
+                (RAC_seqStateRxOverflowInterrupt, RAC_RadioStateMachineSignal.None),
+                (RAC_seqStateRx2TxInterrupt, RAC_RadioStateMachineSignal.Rx2TxIrqCleared),
+                (RAC_seqStateTxWarmInterrupt, RAC_RadioStateMachineSignal.TxWarmIrqCleared),
+                (RAC_seqStateTxInterrupt, RAC_RadioStateMachineSignal.TxIrqCleared),
+                (RAC_seqStateTxPoweringDownInterrupt, RAC_RadioStateMachineSignal.TxPowerDownIrqCleared),
+                (RAC_seqStateTx2RxInterrupt, RAC_RadioStateMachineSignal.Tx2RxIrqCleared),
+                (RAC_seqStateTx2TxInterrupt, RAC_RadioStateMachineSignal.Tx2TxIrqCleared),
+                (RAC_seqStateShutDownInterrupt, RAC_RadioStateMachineSignal.ShutdownIrqCleared),
+            };
+            foreach(var (flag, signal) in pending)
+            {
+                if(!flag.Value)
+                {
+                    continue;
+                }
+                this.Log(LogLevel.Debug, "{0}: autonomous sequencer acknowledging state IRQ (state {1})", GetTime(), RAC_currentRadioState);
+                flag.Value = false;
+                if(signal != RAC_RadioStateMachineSignal.None)
+                {
+                    RAC_UpdateRadioStateMachine(signal);
+                }
+            }
+            UpdateInterrupts();
         }
 
         private void RAC_ClearOngoingTxOrRx()
@@ -6638,7 +6739,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 if(emu == null)
                 {
                     emu = machine.GetPeripheralsOfType<ISiLabs_Emu>().FirstOrDefault();
-                    emu?.RegisterRadioSequencerCpu(sequencer);
+                    if(sequencer != null)
+                    {
+                        emu?.RegisterRadioSequencerCpu(sequencer);
+                    }
                     // The vector table in sequencer RAM is retained, but the core stays in CPUWAIT
                     // until software sets CPUWAITDIS again.
                     emu?.AddEnterDeepSleepHook(RAC_PowerDownSequencer);
@@ -7042,6 +7146,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly LimitTimer txTimer;
         private readonly LimitTimer rxTimer;
         private readonly LimitTimer rxWarmSettleTimer;
+        private readonly LimitTimer seqAutoAckTimer;
+        private readonly bool autonomousSequencer;
         private readonly DoubleWordRegisterCollection automaticGainControlRegistersCollection;
         private readonly DoubleWordRegisterCollection cyclicRedundancyCheckRegistersCollection;
         private readonly DoubleWordRegisterCollection frameControllerRegistersCollection;
