@@ -32,6 +32,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             pageEraseTimer.LimitReached += PageEraseTimerHandleLimitReached;
 
             IRQ = new GPIO();
+            WriteDataRequest = new GPIO();
         }
 
         public override void Reset()
@@ -39,9 +40,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             base.Reset();
 
             pageEraseTimer.Enabled = false;
+            UpdateWriteDataRequest();
         }
 
         public GPIO IRQ { get; }
+
+        // LDMA write-data request (LDMAXBAR SOURCESEL=MSC, SIGSEL=MSCWDATA). emlib's
+        // MSC_WriteWordDma() points an LDMA channel at WDATA and waits for LDMA CHDONE, so the
+        // transfer needs this line to trigger it. It is a level: high while the flash controller
+        // can accept data, so that a single trigger drains the whole descriptor.
+        public GPIO WriteDataRequest { get; }
 
         // Although typically Renode uses tags for unimplemented fields, to minimize the amount of logs we switch to plain fields.
         // Todo: verify which can be switched to silent tags
@@ -62,7 +70,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     .WithReservedBits(13, 19)
                 },
                 {(long)Registers.WriteControl, new DoubleWordRegister(this)
-                    .WithFlag(0, out writeAndEraseEnable, name: "WREN")
+                    .WithFlag(0, out writeAndEraseEnable, writeCallback: (_, __) => UpdateWriteDataRequest(), name: "WREN")
                     .WithFlag(1, out abortPageEraseOnInterrupt, name: "IRQERASEABORT")
                     .WithReservedBits(2, 1)
                     .WithFlag(3, out lowPowerErase, name: "LPWRITE")
@@ -132,7 +140,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     .WithReservedBits(5, 27)
                 },
                 {(long)Registers.LockConfig, new DoubleWordRegister(this)
-                    .WithValueField(0, 16, FieldMode.Write, writeCallback: (_, value) => { locked.Value = (value != UnlockCode); }, name: "LOCKKEY")
+                    .WithValueField(0, 16, FieldMode.Write, writeCallback: (_, value) => { locked.Value = (value != UnlockCode); UpdateWriteDataRequest(); }, name: "LOCKKEY")
                     .WithReservedBits(16, 16)
                 },
                 {(long)Registers.PageLock0, new DoubleWordRegister(this)
@@ -162,6 +170,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         protected override Type RegistersType => typeof(Registers);
 
+        private void UpdateWriteDataRequest()
+        {
+            WriteDataRequest.Set(writeDataReady.Value && writeAndEraseEnable.Value
+                                 && !invalidAddress.Value && !locked.Value);
+        }
+
         private void PageEraseTimerHandleLimitReached()
         {
             pageEraseTimer.Enabled = false;
@@ -182,6 +196,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             });
 
             UpdateInterrupts();
+            UpdateWriteDataRequest();
             //cpu.IsHalted = false;
         }
 
@@ -224,6 +239,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     writeDoneInterrupt.Value = true;
                 });
                 UpdateInterrupts();
+                UpdateWriteDataRequest();
             }
         }
 
@@ -271,6 +287,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             {
                 pageEraseOrWriteAddress = value;
                 invalidAddress.Value = (value < flashBase || value >= (flashBase + flashSize));
+                UpdateWriteDataRequest();
             }
         }
 
