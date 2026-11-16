@@ -26,6 +26,46 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             oscillatorForce = false;
 
             registers.Reset();
+            (cmu as SiLabs_CMU_3)?.NotifyClockTreeChanged();
+        }
+
+        // The oscillator's output frequency in hertz, from CAL.FREQRANGE: the band table that
+        // emlib's CMU_HFRCODPLLBandSet() and the Gecko bootloader's util_getClockFreq() share
+        // (index -> MHz). The reset value is FREQRANGE 8 = 19 MHz. A band the table has no entry
+        // for reads 19 MHz, as the bootloader's own lookup does. The DPLL is not folded in.
+        public uint Frequency
+        {
+            get
+            {
+                var range = (int)cal_freqrange_field.Value;
+                var megahertz = range < BandMegahertz.Length ? BandMegahertz[range] : 0u;
+                if(megahertz == 0)
+                {
+                    megahertz = 19;
+                }
+                var hertz = megahertz * 1000000u;
+                if(megahertz == 4)
+                {
+                    hertz >>= (int)cal_clkdiv_field.Value;
+                }
+                return hertz;
+            }
+        }
+
+        partial void Cal_Freqrange_Write(ulong a, ulong b)
+        {
+            if(a != b)
+            {
+                (cmu as SiLabs_CMU_3)?.NotifyClockTreeChanged();
+            }
+        }
+
+        partial void Cal_Clkdiv_Write(CAL_CLKDIV a, CAL_CLKDIV b)
+        {
+            if(a != b)
+            {
+                (cmu as SiLabs_CMU_3)?.NotifyClockTreeChanged();
+            }
         }
 
         partial void Ctrl_Forceen_Write(bool a, bool b)
@@ -88,5 +128,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         private bool oscillatorOnDemand = false;
         private bool oscillatorForce = false;
         private readonly uint localInstance = 0;
+
+        private static readonly uint[] BandMegahertz = { 4, 0, 0, 7, 0, 0, 13, 16, 19, 0, 26, 32, 38, 48, 56, 64, 80 };
     }
 }

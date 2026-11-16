@@ -34,6 +34,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             sysclkctrl_clksel_field.Value = SYSCLKCTRL_CLKSEL.FSRCO;
             status_calrdy_bit.Value = true;
             status_lock_bit.Value = STATUS_LOCK.UNLOCKED;
+            NotifyClockTreeChanged();
+        }
+
+        // Tells the peripherals that count at a CMU clock branch that its rate may have changed.
+        public void NotifyClockTreeChanged()
+        {
+            ClockTreeChanged?.Invoke();
         }
 
         public bool OscHfrcoRequested(uint instance)
@@ -140,6 +147,57 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         public ulong HfxoFrequency { get; }
 
+        // The HFRCO whose band feeds the HFRCODPLL selections. Found on the machine unless the
+        // .repl names one.
+        public SiLabs_HFRCO_2 Hfrco
+        {
+            get
+            {
+                if(Object.ReferenceEquals(hfrco, null))
+                {
+                    foreach(var peripheral in machine.GetPeripheralsOfType<SiLabs_HFRCO_2>())
+                    {
+                        hfrco = peripheral;
+                        break;
+                    }
+                }
+                return hfrco;
+            }
+
+            set
+            {
+                hfrco = value;
+            }
+        }
+
+        // EM01GRPACLK in hertz: the branch that clocks TIMER0-4 (and the IADC and others when
+        // they select it). 0 means the branch is disabled. A timer model takes a fixed frequency
+        // from the .repl, which is wrong for a branch that a bootloader and an application
+        // program differently; a timer wired to this CMU counts at this rate instead. HFXO is the
+        // board's crystal, FSRCO is the fixed 20 MHz RC, and HFRCOEM23 is not modeled beyond its
+        // 19 MHz reset band.
+        public uint Em01GrpaClkFrequency
+        {
+            get
+            {
+                switch(em01grpaclkctrl_clksel_field.Value)
+                {
+                case EM01GRPACLKCTRL_CLKSEL.HFXO:
+                case EM01GRPACLKCTRL_CLKSEL.HFXORT:
+                    return (uint)HfxoFrequency;
+                case EM01GRPACLKCTRL_CLKSEL.HFRCODPLL:
+                case EM01GRPACLKCTRL_CLKSEL.HFRCODPLLRT:
+                    return Hfrco?.Frequency ?? HfrcoResetFrequency;
+                case EM01GRPACLKCTRL_CLKSEL.FSRCO:
+                    return FsrcoFrequency;
+                case EM01GRPACLKCTRL_CLKSEL.HFRCOEM23:
+                    return HfrcoResetFrequency;
+                default:
+                    return 0;
+                }
+            }
+        }
+
         // Temporary implementation to check if a peripheral is enabled as those peripherals are not used
         public bool Burtc0Enabled { get; set; } = true;
 
@@ -172,6 +230,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         public bool Wdog0Enabled { get; set; } = true;
 
         public bool Wdog1Enabled { get; set; } = true;
+
+        public event Action ClockTreeChanged;
 
         public bool OscLfrcoRequested
         {
@@ -383,6 +443,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
+        partial void Em01grpaclkctrl_Clksel_Write(EM01GRPACLKCTRL_CLKSEL a, EM01GRPACLKCTRL_CLKSEL b)
+        {
+            if(a != b)
+            {
+                NotifyClockTreeChanged();
+            }
+        }
+
         partial void Calcnt_Calcnt_ValueProvider(ulong a)
         {
             // A dictionnary to get get the Upsel frequency based on the selected clock source.
@@ -559,6 +627,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         private ISiLabs_DPLL dpll0;
         // Reference to hfxo to be able to call events it defines
         private ISiLabs_HFXO hfxo;
+        // Reference to hfrco to read the band it is tuned to
+        private SiLabs_HFRCO_2 hfrco;
+
+        private const uint HfrcoResetFrequency = 19000000;
+        private const uint FsrcoFrequency = 20000000;
 
         // See constant definitions in src/Infrastructure/src/Emulator/Cores/tlib/arch/arm/cpu.h
         private const uint EXCP_PREFETCH_ABORT = 3;
