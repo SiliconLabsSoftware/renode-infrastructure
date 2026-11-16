@@ -477,6 +477,15 @@ namespace Antmicro.Renode.Peripherals.UART
             transferCompleteFlag.Value = false;
             if(operationModeField.Value == OperationMode.Synchronous)
             {
+                if(spiSlaveDevice is IDeferredSPIPeripheral deferred)
+                {
+                    // The slave answers later (for example from another machine): the received
+                    // byte, and with it RXDATAV and TXC, arrive when the slave completes the
+                    // frame. STATUS.TXC stays clear meanwhile, as it does while a frame is on
+                    // the wire.
+                    deferred.TransmitDeferred(data, CompleteSynchronousFrame);
+                    return;
+                }
                 byte result;
                 if(spiSlaveDevice != null)
                 {
@@ -501,7 +510,7 @@ namespace Antmicro.Renode.Peripherals.UART
 
         // A synchronous (SPI master) frame completes like an asynchronous one: the received byte
         // is buffered and TXC and TXBL are raised, so a driver that advances on the TX interrupt
-        // sees every frame finish.
+        // sees every frame finish. An IDeferredSPIPeripheral calls this when its answer arrives.
         private void CompleteSynchronousFrame(byte result)
         {
             WriteChar(result);
