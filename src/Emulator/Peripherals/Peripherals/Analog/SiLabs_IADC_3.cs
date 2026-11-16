@@ -76,7 +76,7 @@ namespace Antmicro.Renode.Peripherals.Analog
     // other voltage source on a channel instead (ADCChannelSource, Potentiometer, ...), and that
     // source then follows its own reset rules.
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord)]
-    public class SiLabs_IADC_3 : BasicDoubleWordPeripheral, IKnownSize, IADC
+    public class SiLabs_IADC_3 : BasicDoubleWordPeripheral, IKnownSize, IADC, ISineInputADC
     {
         // supplyMillivolts backs REFSEL=VDDX; externalReferenceMillivolts backs REFSEL=VREF.
         // Neither is derivable from any register - the reference selection is on-chip, the
