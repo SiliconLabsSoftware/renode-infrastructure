@@ -559,6 +559,13 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                                 valueProviderCallback: (i, _) =>
                                 {
                                     var pin = pinOffset + i;
+                                    // DIN is the pad level. For a pin the port itself drives, that is
+                                    // its own output: GPIO_PinInGet() on a push-pull output returns
+                                    // what was written.
+                                    if(IsOutput(pinMode[pin].Value))
+                                    {
+                                        return Connections[pin].IsSet;
+                                    }
                                     return State[pin];
                                 },
                                 name: "DIN")

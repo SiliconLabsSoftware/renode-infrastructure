@@ -6,7 +6,9 @@
 // Full license text is available in 'licenses/MIT.txt'.
 //
 
+using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
@@ -18,8 +20,18 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
 {
     public class SiLabs_GPIO_3 : BaseGPIOPort, IDoubleWordPeripheral, IKnownSize
     {
-        public SiLabs_GPIO_3(Machine machine) : base(machine, NumberOfPins * NumberOfPorts)
+        // `timerRoutes`: model the EFR32MG24 TIMERn DBUS route registers (ROUTEEN/CCkROUTE at
+        // 0x0680 + 0x20*n) and drive routed pads from TIMER compare outputs. The register layout
+        // is MG24's: MG26 has TIMERROUTE[10] and different preceding arrays, so 0x0680 is not
+        // TIMER0_ROUTEEN there. Pass `timerRoutes: false` for such parts; the TIMER route
+        // registers are then absent and no TIMER compare output reaches a pad.
+        // `timerRouteBase`: where the TIMER route block starts. 0x0680 on MG24; EFM32PG23 puts
+        // GPIO_TIMERROUTE at 0x06F8 because its EUSART/I2C/LESENSE route arrays ahead of it are
+        // laid out differently. Same block layout, different start.
+        public SiLabs_GPIO_3(Machine machine, bool timerRoutes = true, long timerRouteBase = 0x0680) : base(machine, NumberOfPins * NumberOfPorts)
         {
+            this.timerRoutes = timerRoutes;
+            this.timerRouteBase = timerRouteBase;
             OddIRQ = new GPIO();
             EvenIRQ = new GPIO();
 
@@ -31,17 +43,30 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         {
             bool internalSignal = ((number & 0x1000) > 0);
 
-            // Override the GPIO number if this is an internal signal.
             if(internalSignal)
             {
                 var signalSource = (SignalSource)(number & 0xFF);
-                var signalType = (SignalType)((number & 0xF00) >> 8);
+                var signalIndex = (number & 0xF00) >> 8;
 
-                number = GetPinNumberFromInternalSignal(signalSource, signalType);
+                // TIMER compare outputs and PRS channels go the other way from the serial
+                // signals: the peripheral drives a pad rather than a pin feeding a peripheral.
+                if(IsTimerSource(signalSource))
+                {
+                    OnTimerCompareOutput(signalSource, signalIndex, value);
+                    return;
+                }
+
+                if(signalSource == SignalSource.PRS0)
+                {
+                    OnPrsChannelOutput(signalIndex, value);
+                    return;
+                }
+
+                number = GetPinNumberFromInternalSignal(signalSource, (SignalType)signalIndex);
 
                 if(number < 0)
                 {
-                    this.Log(LogLevel.Info, "Route not enabled for internal signal (source={0} signal={1})", signalSource, signalType);
+                    this.Log(LogLevel.Info, "Route not enabled for internal signal (source={0} signal={1})", signalSource, (SignalType)signalIndex);
                     return;
                 }
             }
@@ -62,6 +87,145 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
 
                 base.OnGPIO(number, value);
                 UpdateInterrupts();
+            }
+        }
+
+        // A PRS async channel's level. Firmware can turn this route on and off during operation
+        // (set ASYNCHnPEN to put a carrier on the pad, clear it to hold the pad at a level it
+        // writes to DOUT itself), so the gating is read at every edge.
+        private void OnPrsChannelOutput(int channel, bool level)
+        {
+            if(channel >= NumberOfPrsChannels)
+            {
+                this.Log(LogLevel.Warning, "PRS channel {0} is out of range", channel);
+                return;
+            }
+            lock(internalLock)
+            {
+                prsChannelLevel[channel] = level;
+                if(!prsRouteEnabled[channel].Value)
+                {
+                    // Not routed: the pad belongs to DOUT.
+                    return;
+                }
+                var pin = GetPinNumber((Port)prsRoutePort[channel].Value, (uint)prsRoutePin[channel].Value);
+                if(!IsOutput(pinMode[pin].Value))
+                {
+                    return;
+                }
+                State[pin] = level;
+                Connections[pin].Set(level);
+            }
+        }
+
+        // A TIMERn CCk compare edge. The level is always remembered, routed or not, so that
+        // enabling the route (or making the pin an output) later can put the current level on
+        // the pad: a channel parked at 0% or 100% produces no further edges to wait for.
+        // Modeled subset of the DBUS: the routed pad follows the compare output when
+        // ROUTEEN.CCkPEN is set and the pin mode is an output; DIN follows the pad; DOUT keeps
+        // the value the CPU wrote but stops reaching the pad while a route owns it. Not
+        // modeled: CDTI, alternate-function drive strength, DINDIS.
+        private void OnTimerCompareOutput(SignalSource source, int cc, bool level)
+        {
+            var timer = (int)source - (int)SignalSource.TIMER0;
+            if(cc >= NumberOfTimerCompareChannels)
+            {
+                if(!timerCcWarned[timer, cc])
+                {
+                    timerCcWarned[timer, cc] = true;
+                    this.Log(LogLevel.Warning, "Signal index {0} for {1} is not a compare channel (0..{2}); ignored", cc, source, NumberOfTimerCompareChannels - 1);
+                }
+                return;
+            }
+
+            var pin = -1;
+            lock(internalLock)
+            {
+                timerCcLevel[timer, cc] = level;
+                if(!timerRoutes || !timerRouteEnableCc[timer, cc].Value)
+                {
+                    return;
+                }
+                pin = GetPinNumber(timerCcRoutePort[timer, cc].Value, (uint)timerCcRoutePin[timer, cc].Value);
+                if(!IsOutput(pinMode[pin].Value))
+                {
+                    // Routed, but the firmware has not made the pin an output: silicon shows
+                    // nothing on the pad either. Say so once per pin, not once per PWM edge.
+                    if(!padModeWarned[pin])
+                    {
+                        padModeWarned[pin] = true;
+                        this.Log(LogLevel.Warning, "TIMER compare output routed to GPIO pin #{0}, but the pin mode is not an output; the pad is not driven", pin);
+                    }
+                    return;
+                }
+                State[pin] = level;
+                if(IsEnabledExternalInterruptPin(pin))
+                {
+                    UpdateInterrupts();
+                }
+            }
+            // Outside the lock: this runs every receiver on the pad (LEDs, testers) synchronously.
+            Connections[pin].Set(level);
+        }
+
+        // Recompute which pads a TIMER route owns and put the right level on every pad: the
+        // owning channel's last compare level where a route is enabled on an output pin, the
+        // CPU's DOUT bit on an output pin no route owns, and on a pin that is not an output its
+        // pull, as nobody drives that pad. Called under internalLock from the ROUTEEN, CCkROUTE
+        // and MODEL/MODEH write paths, so enabling a route or changing a pin mode takes effect
+        // immediately rather than at the next compare edge.
+        //
+        // A pin switched from output to input releases its pad: firmware that tri-states a gate
+        // drive expects the level to fall back to the pull. INPUTPULL / INPUTPULLFILTER pull up
+        // when DOUT is 1 (DOUT selects the pull direction); every other non-output mode reads low.
+        private void RefreshPads()
+        {
+            var owner = new int[NumberOfPorts * NumberOfPins];
+            for(var i = 0; i < owner.Length; i++)
+            {
+                owner[i] = -1;
+            }
+            if(timerRoutes)
+            {
+                for(var timer = 0; timer < NumberOfTimers; ++timer)
+                {
+                    for(var cc = 0; cc < NumberOfTimerCompareChannels; ++cc)
+                    {
+                        if(timerRouteEnableCc[timer, cc].Value)
+                        {
+                            var pin = GetPinNumber(timerCcRoutePort[timer, cc].Value, (uint)timerCcRoutePin[timer, cc].Value);
+                            if(pin >= 0 && pin < owner.Length)
+                            {
+                                owner[pin] = timer * NumberOfTimerCompareChannels + cc;
+                            }
+                        }
+                    }
+                }
+            }
+            for(var pin = 0; pin < owner.Length; pin++)
+            {
+                var claimed = owner[pin] >= 0;
+                padClaimedByTimer[pin] = claimed;
+                var mode = pinMode[pin].Value;
+                if(!IsOutput(mode))
+                {
+                    var pulledUp = (mode == PinMode.InputPull || mode == PinMode.InputPullFilter) && doutState[pin];
+                    if(Connections[pin].IsSet != pulledUp)
+                    {
+                        Connections[pin].Set(pulledUp);
+                    }
+                    continue;
+                }
+                if(claimed)
+                {
+                    var level = timerCcLevel[owner[pin] / NumberOfTimerCompareChannels, owner[pin] % NumberOfTimerCompareChannels];
+                    State[pin] = level;
+                    Connections[pin].Set(level);
+                }
+                else
+                {
+                    Connections[pin].Set(doutState[pin]);
+                }
             }
         }
 
@@ -158,6 +322,20 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
             var pinSelect = (uint)externalInterruptPinSelect[externalInterruptIndex].Value;
 
             return GetPinNumber(port, (pinGroup * 4) + pinSelect);
+        }
+
+        // True when an enabled external interrupt has selected this pin, so that a pad toggling at
+        // PWM rate only pays for interrupt evaluation when it can raise one.
+        private bool IsEnabledExternalInterruptPin(int pin)
+        {
+            for(var i = 0; i < NumberOfExternalInterrupts; ++i)
+            {
+                if(externalInterruptEnable[i].Value && GetExternalInterruptPin(i) == pin)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private bool TrySyncTime()
@@ -527,7 +705,127 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                 BuildPortRegisters(registerDictionary, i);
             }
 
+            if(timerRoutes)
+            {
+                // On a part whose TIMER route block starts elsewhere (EFM32PG23: 0x06F8) the block
+                // overlaps registers this class declares at MG24's offsets, such as USART0_ROUTEEN
+                // at 0x0720. Those offsets do not apply to that part (PG23's USART routes are at
+                // 0x0798), so the whole relocated block is cleared before the timer routes go in.
+                if(timerRouteBase != (long)Registers.TIMER0_RouteEnable)
+                {
+                    var blockEnd = timerRouteBase + TimerRouteStride * NumberOfTimers;
+                    foreach(var key in registerDictionary.Keys.Where(k => k >= timerRouteBase && k < blockEnd).ToList())
+                    {
+                        registerDictionary.Remove(key);
+                    }
+                }
+                for(var i = 0; i < NumberOfTimers; ++i)
+                {
+                    BuildTimerRouteRegisters(registerDictionary, i);
+                }
+            }
+
+            BuildPrsRouteRegisters(registerDictionary);
+
             return new DoubleWordRegisterCollection(this, registerDictionary);
+        }
+
+        // PRS0_ROUTEEN / ASYNCHnROUTE. The enable bits gate each async channel onto the pad its
+        // ASYNCHnROUTE names.
+        private void BuildPrsRouteRegisters(Dictionary<long, DoubleWordRegister> regs)
+        {
+            var routeEnable = new DoubleWordRegister(this);
+            for(var channel = 0; channel < NumberOfPrsChannels; ++channel)
+            {
+                routeEnable.WithFlag(channel, out prsRouteEnabled[channel], name: $"ASYNCH{channel}PEN");
+            }
+            routeEnable
+                .WithReservedBits(NumberOfPrsChannels, 32 - NumberOfPrsChannels)
+                .WithWriteCallback((_, __) => RefreshPrsPads());
+            regs.Add((long)Registers.PRS0_RouteEnable, routeEnable);
+
+            for(var channel = 0; channel < NumberOfPrsChannels; ++channel)
+            {
+                regs.Add((long)Registers.PRS0_ASYNCH0_Route + 4 * channel, new DoubleWordRegister(this)
+                    .WithEnumField<DoubleWordRegister, Port>(0, 2, out prsRoutePort[channel], name: "PORT")
+                    .WithReservedBits(2, 14)
+                    .WithValueField(16, 4, out prsRoutePin[channel], name: "PIN")
+                    .WithReservedBits(20, 12)
+                    .WithWriteCallback((_, __) => RefreshPrsPads()));
+            }
+        }
+
+        // Re-apply every routed channel's level, so enabling a route puts the channel's current
+        // level on the pad instead of waiting for the next edge.
+        private void RefreshPrsPads()
+        {
+            lock(internalLock)
+            {
+                for(var channel = 0; channel < NumberOfPrsChannels; ++channel)
+                {
+                    if(!prsRouteEnabled[channel].Value)
+                    {
+                        continue;
+                    }
+                    var pin = GetPinNumber((Port)prsRoutePort[channel].Value, (uint)prsRoutePin[channel].Value);
+                    if(!IsOutput(pinMode[pin].Value))
+                    {
+                        continue;
+                    }
+                    State[pin] = prsChannelLevel[channel];
+                    Connections[pin].Set(prsChannelLevel[channel]);
+                }
+            }
+        }
+
+        // TIMERn_ROUTEEN / CCkROUTE, one block of TimerRouteStride bytes per timer starting at
+        // timerRouteBase (GPIO_TIMERROUTE_TypeDef: ROUTEEN, CC0ROUTE, CC1ROUTE, CC2ROUTE,
+        // CDTI0..2ROUTE, reserved). Only the CC halves are modeled; the CDTI (dead-time
+        // insertion) routes are stored without effect.
+        private void BuildTimerRouteRegisters(Dictionary<long, DoubleWordRegister> regs, int timer)
+        {
+            var baseOffset = timerRouteBase + TimerRouteStride * timer;
+
+            var routeEnable = new DoubleWordRegister(this);
+            for(var cc = 0; cc < NumberOfTimerCompareChannels; ++cc)
+            {
+                routeEnable.WithFlag(cc, out timerRouteEnableCc[timer, cc], name: $"CC{cc}PEN");
+            }
+            // Bits 3-5 are the CDTI enables (named CCC0PEN..CCC2PEN in the header). Stored, no
+            // behavior: dead-time insertion outputs are not modeled.
+            routeEnable
+                .WithFlag(3, name: "CCC0PEN")
+                .WithFlag(4, name: "CCC1PEN")
+                .WithFlag(5, name: "CCC2PEN")
+                .WithReservedBits(6, 26)
+                .WithWriteCallback((_, __) => RefreshPads());
+            regs.Add(baseOffset, routeEnable);
+
+            for(var cc = 0; cc < NumberOfTimerCompareChannels; ++cc)
+            {
+                regs.Add(baseOffset + 4 * (cc + 1), new DoubleWordRegister(this)
+                    .WithEnumField<DoubleWordRegister, Port>(0, 2, out timerCcRoutePort[timer, cc], name: "PORT")
+                    .WithReservedBits(2, 14)
+                    .WithValueField(16, 4, out timerCcRoutePin[timer, cc], name: "PIN")
+                    .WithReservedBits(20, 12)
+                    .WithWriteCallback((_, __) => RefreshPads()));
+            }
+
+            // CDTIkROUTE: stored so firmware that programs them is not answered with a warning
+            // per write; the dead-time outputs themselves are not modeled.
+            for(var cdti = 0; cdti < 3; ++cdti)
+            {
+                regs.Add(baseOffset + 0x10 + 4 * cdti, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "PORT")
+                    .WithReservedBits(2, 14)
+                    .WithValueField(16, 4, name: "PIN")
+                    .WithReservedBits(20, 12));
+            }
+        }
+
+        private static bool IsTimerSource(SignalSource source)
+        {
+            return source >= SignalSource.TIMER0 && source <= SignalSource.TIMER4;
         }
 
         private void BuildPortRegisters(Dictionary<long, DoubleWordRegister> regs, int portNumber)
@@ -555,6 +853,7 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                      .WithEnumField<DoubleWordRegister, PinMode>(20, 4, out pinMode[pinOffset + 5], name: "MODE5")
                      .WithEnumField<DoubleWordRegister, PinMode>(24, 4, out pinMode[pinOffset + 6], name: "MODE6")
                      .WithEnumField<DoubleWordRegister, PinMode>(28, 4, out pinMode[pinOffset + 7], name: "MODE7")
+                     .WithWriteCallback((_, __) => RefreshPads())
                     );
             regs.Add((long)Registers.PortAModeHigh + regOffset, new DoubleWordRegister(this)
                      .WithEnumField<DoubleWordRegister, PinMode>(0, 4, out pinMode[pinOffset + 8], name: "MODE8")
@@ -565,13 +864,19 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                      .WithEnumField<DoubleWordRegister, PinMode>(20, 4, out pinMode[pinOffset + 13], name: "MODE13")
                      .WithEnumField<DoubleWordRegister, PinMode>(24, 4, out pinMode[pinOffset + 14], name: "MODE14")
                      .WithEnumField<DoubleWordRegister, PinMode>(28, 4, out pinMode[pinOffset + 15], name: "MODE15")
+                     .WithWriteCallback((_, __) => RefreshPads())
                     );
             regs.Add((long)Registers.PortADataOut + regOffset, new DoubleWordRegister(this)
                      .WithFlags(0, 16,
                                 writeCallback: (i, _, value) =>
                                 {
                                     var pin = pinOffset + i;
-                                    if(IsOutput(pinMode[pin].Value))
+                                    // DOUT is a register: it keeps what the CPU wrote (and reads
+                                    // it back) whether or not it currently reaches the pad. It
+                                    // reaches the pad when the pin is an output that no TIMER
+                                    // route owns.
+                                    doutState[pin] = value;
+                                    if(IsOutput(pinMode[pin].Value) && !padClaimedByTimer[pin])
                                     {
                                         Connections[pin].Set(value);
                                     }
@@ -579,7 +884,7 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                                 valueProviderCallback: (i, _) =>
                                 {
                                     var pin = pinOffset + i;
-                                    return Connections[pin].IsSet;
+                                    return doutState[pin];
                                 },
                                 name: "DOUT")
                      .WithReservedBits(16, 16)
@@ -589,6 +894,13 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                                 valueProviderCallback: (i, _) =>
                                 {
                                     var pin = pinOffset + i;
+                                    // DIN is the pad level. For a pin the port itself drives, that is
+                                    // its own output: GPIO_PinInGet() on a push-pull output returns
+                                    // what was written.
+                                    if(IsOutput(pinMode[pin].Value))
+                                    {
+                                        return Connections[pin].IsSet;
+                                    }
                                     return State[pin];
                                 },
                                 name: "DIN")
@@ -600,6 +912,12 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         {
             registersCollection.Reset();
             configurationLocked = false;
+            Array.Clear(padModeWarned, 0, padModeWarned.Length);
+            Array.Clear(timerCcWarned, 0, timerCcWarned.Length);
+            Array.Clear(timerCcLevel, 0, timerCcLevel.Length);
+            Array.Clear(prsChannelLevel, 0, prsChannelLevel.Length);
+            Array.Clear(padClaimedByTimer, 0, padClaimedByTimer.Length);
+            Array.Clear(doutState, 0, doutState.Length);
             EvenIRQ.Unset();
             OddIRQ.Unset();
             for(var i = 0; i < NumberOfExternalInterrupts; i++)
@@ -708,6 +1026,22 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         private IEnumRegisterField<Port> EUSART1_TxRoutePort;
         private IValueRegisterField EUSART1_TxRoutePin;
         private bool configurationLocked;
+        // TIMER and PRS pad routing (see OnTimerCompareOutput, OnPrsChannelOutput and RefreshPads).
+        private readonly bool timerRoutes;
+        private readonly long timerRouteBase;
+        private readonly IFlagRegisterField[,] timerRouteEnableCc = new IFlagRegisterField[NumberOfTimers, NumberOfTimerCompareChannels];
+        private readonly IEnumRegisterField<Port>[,] timerCcRoutePort = new IEnumRegisterField<Port>[NumberOfTimers, NumberOfTimerCompareChannels];
+        private readonly IValueRegisterField[,] timerCcRoutePin = new IValueRegisterField[NumberOfTimers, NumberOfTimerCompareChannels];
+        private readonly bool[,] timerCcLevel = new bool[NumberOfTimers, NumberOfTimerCompareChannels];
+        private readonly bool[,] timerCcWarned = new bool[NumberOfTimers, 16];
+        private readonly IFlagRegisterField[] prsRouteEnabled = new IFlagRegisterField[NumberOfPrsChannels];
+        private readonly IEnumRegisterField<Port>[] prsRoutePort = new IEnumRegisterField<Port>[NumberOfPrsChannels];
+        private readonly IValueRegisterField[] prsRoutePin = new IValueRegisterField[NumberOfPrsChannels];
+        private readonly bool[] prsChannelLevel = new bool[NumberOfPrsChannels];
+        // The level the CPU last wrote to each DOUT bit, whether or not it reaches the pad.
+        private readonly bool[] doutState = new bool[NumberOfPorts * NumberOfPins];
+        private readonly bool[] padClaimedByTimer = new bool[NumberOfPorts * NumberOfPins];
+        private readonly bool[] padModeWarned = new bool[NumberOfPorts * NumberOfPins];
         private readonly bool[] previousState = new bool[NumberOfExternalInterrupts];
         private readonly uint[] interruptTrigger = new uint[NumberOfExternalInterrupts];
         private readonly IFlagRegisterField[] externalInterruptEnable = new IFlagRegisterField[NumberOfExternalInterrupts];
@@ -723,6 +1057,10 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         private const int NumberOfPorts = 4;
         private const int NumberOfPins = 16;
         private const int NumberOfExternalInterrupts = 16;
+        private const int NumberOfTimers = 5;
+        private const int NumberOfTimerCompareChannels = 3;
+        private const int NumberOfPrsChannels = 16;
+        private const long TimerRouteStride = 0x20;
         private const int UnlockCode = 0xA534;
         private const int PortOffset = 0x30;
 
@@ -767,8 +1105,24 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
             USART0   = 1,
             EUSART0  = 2,
             EUSART1  = 3,
+            // TIMER compare outputs. A .repl connects a timer's CC output to
+            // `gpioPort@(0x1000 | (cc << 8) | source)`, e.g. TIMER3 CC0 -> gpioPort@0x1007,
+            // TIMER2 CC1 -> gpioPort@0x1106. The GPIO then drives whichever pad TIMERn_CCkROUTE
+            // names, once ROUTEEN.CCkPEN is set and the pin mode is an output. See
+            // OnTimerCompareOutput for the modeled subset.
+            TIMER0   = 4,
+            TIMER1   = 5,
+            TIMER2   = 6,
+            TIMER3   = 7,
+            TIMER4   = 8,
+            // A PRS async channel driving a pad. A .repl connects the PRS's per-channel output to
+            // `gpioPort@(0x1000 | (channel << 8) | PRS0)`, e.g. channel 5 -> gpioPort@0x1509. The
+            // pad moves only while PRS0_ROUTEEN.ASYNCHnPEN is set and ASYNCHnROUTE names it.
+            PRS0     = 9,
         }
 
+        // For a TIMER source the index byte is the compare channel (0..2) and for PRS0 it is the
+        // channel number; neither is a member of this enum.
         private enum SignalType
         {
             // If SignalSource is USART0
