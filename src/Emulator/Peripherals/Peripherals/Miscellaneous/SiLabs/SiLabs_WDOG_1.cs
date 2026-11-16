@@ -26,9 +26,20 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                                    enabled: false, workMode: WorkMode.OneShot,
                                    eventEnabled: true, autoUpdate: true);
             timer.LimitReached += OnTimerLimitReached;
+            ResetOnTimeout = true;
         }
 
         public GPIO IRQ { get; }
+
+        // Number of software clears accepted while the watchdog was enabled.
+        public ulong Feeds { get; private set; }
+
+        // Number of times the counter reached the full timeout.
+        public ulong Timeouts { get; private set; }
+
+        // When false, a timeout still sets IF.TOUT and counts in Timeouts but does not reset
+        // the machine, so the state the firmware starved in stays available for inspection.
+        public bool ResetOnTimeout { get; set; }
 
         partial void WDOG_Reset()
         {
@@ -102,6 +113,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
 
             this.DebugLog("WDOG{0} cleared by SW", instance);
+            Feeds++;
             ScheduleNextEvent();
         }
 
@@ -168,6 +180,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             else
             {
                 this.DebugLog("WDOG{0} timeout reached", instance);
+                Timeouts++;
                 if_tout_bit.Value = true;
                 UpdateInterrupts();
 
@@ -175,6 +188,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
                 if(cfg_wdogrstdis_bit.Value == CFG_WDOGRSTDIS.EN)
                 {
+                    if(!ResetOnTimeout)
+                    {
+                        this.Log(LogLevel.Warning, "WDOG{0} timeout expired: ResetOnTimeout is false so no reset is issued", instance);
+                        return;
+                    }
                     this.Log(LogLevel.Warning, "WDOG{0} timeout expired: requesting machine reset", instance);
                     machine.RequestReset();
                 }
