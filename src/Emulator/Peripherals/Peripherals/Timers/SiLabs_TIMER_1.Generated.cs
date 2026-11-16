@@ -1283,7 +1283,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             .WithValueField(0, 32, out cc_icf_icf_field[0], FieldMode.Read,
                     valueProviderCallback: (_) => {
                         Cc_Icf_Icf_ValueProvider(0, _);
-                        return ReadRFIFO();
+                        return ReadCaptureFifo(0);
                     },
                     
                     readCallback: (_, __) => Cc_Icf_Icf_Read(0,_, __),
@@ -1504,7 +1504,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             .WithValueField(0, 32, out cc_icf_icf_field[1], FieldMode.Read,
                     valueProviderCallback: (_) => {
                         Cc_Icf_Icf_ValueProvider(1, _);
-                        return ReadRFIFO();
+                        return ReadCaptureFifo(1);
                     },
                     
                     readCallback: (_, __) => Cc_Icf_Icf_Read(1,_, __),
@@ -1725,7 +1725,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             .WithValueField(0, 32, out cc_icf_icf_field[2], FieldMode.Read,
                     valueProviderCallback: (_) => {
                         Cc_Icf_Icf_ValueProvider(2, _);
-                        return ReadRFIFO();
+                        return ReadCaptureFifo(2);
                     },
                     
                     readCallback: (_, __) => Cc_Icf_Icf_Read(2,_, __),
