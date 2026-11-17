@@ -89,6 +89,17 @@ namespace Antmicro.Renode.Time
             this.Trace("Resumed");
         }
 
+        /// <summary>
+        /// Name of the owner of this time source (e.g. the machine), used to name the dispatcher thread.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="Antmicro.Renode.Core.PseudorandomNumberGenerator"/> keeps one generator per thread name,
+        /// so dispatcher threads of different slaves must have unique names that are stable across runs:
+        /// otherwise concurrently running dispatchers share one non-thread-safe generator.
+        /// It must be set before the dispatcher starts, i.e. before this slave is attached to a master.
+        /// </remarks>
+        public string OwnerName { get; set; }
+
         /// <see cref="ITimeSource.Domain">
         /// <remarks>
         /// If this slave is not attached to any master time source, the domain is null.
@@ -259,7 +270,8 @@ namespace Antmicro.Renode.Time
                 }
 
                 isStarted = true;
-                dispatcherThread = new Thread(Dispatch) { IsBackground = true, Name = "SlaveTimeSource Dispatcher Thread" };
+                var threadName = OwnerName == null ? "SlaveTimeSource Dispatcher Thread" : $"SlaveTimeSource Dispatcher Thread ({OwnerName})";
+                dispatcherThread = new Thread(Dispatch) { IsBackground = true, Name = threadName };
                 dispatcherThread.Start();
             }
         }

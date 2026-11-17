@@ -239,6 +239,10 @@ namespace Antmicro.Renode.Core
 
                 if(machine.LocalTimeSource is ITimeSink machineTimeSink)
                 {
+                    if(machineTimeSink is SlaveTimeSource slaveTimeSource)
+                    {
+                        slaveTimeSource.OwnerName = name;
+                    }
                     MasterTimeSource.RegisterSink(machineTimeSink);
                 }
                 else

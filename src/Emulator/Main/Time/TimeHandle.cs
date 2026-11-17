@@ -384,8 +384,23 @@ namespace Antmicro.Renode.Time
                 DebugHelper.Assert(sinkSideInProgress, "Reporting a used time, but it seems that no grant has recently been requested.");
                 sinkSideInProgress = false;
 
-                intervalToReport = intervalGranted - timeLeft;
-                intervalGranted = timeLeft;
+                // `timeLeft` is what is left of everything the sink was handed, which is
+                // `intervalGranted + reportedTimeResiduum` (see RequestTimeInterval). The residuum was
+                // already reported to the source in an earlier round, so only the part of this grant
+                // that was consumed is reported now. A sink that consumed less than the residuum
+                // leaves `timeLeft` above `intervalGranted`: it has consumed none of this grant, and
+                // the unconsumed part of the residuum is carried as residuum again so that the sink
+                // still gets `timeLeft` when unblocked without that part being reported twice.
+                if(timeLeft > intervalGranted)
+                {
+                    intervalToReport = TimeInterval.Empty;
+                    slaveTimeResiduum = timeLeft - intervalGranted;
+                }
+                else
+                {
+                    intervalToReport = intervalGranted - timeLeft;
+                    intervalGranted = timeLeft;
+                }
                 isBlocking = true;
 
                 reportPending = true;

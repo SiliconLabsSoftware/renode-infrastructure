@@ -62,6 +62,30 @@ namespace UnitTests
         }
 
         [Test]
+        public void ShouldNotReportResiduumTwiceWhenBreakingBeforeConsumingIt()
+        {
+            GrantOnSource();
+            RequestOnSink().ShouldFinish();
+            ContinueOnSink(TimeInterval.FromTicks(100));
+            WaitOnSource().ShouldFinish(Tuple.Create(true, false, interval));
+
+            GrantOnSource();
+            RequestOnSink().ShouldFinish(Tuple.Create(true, TimeInterval.FromTicks(1100)));
+            // break without consuming anything, e.g. a paused SlaveTimeSource reporting back all it was handed
+            BreakOnSink(TimeInterval.FromTicks(1100));
+            WaitOnSource().ShouldFinish(Tuple.Create(false, false, TimeInterval.Empty));
+
+            var r = RequestOnSink().ShouldBlock();
+            UnblockOnSource().ShouldFinish();
+            r.ShouldFinish(Tuple.Create(true, TimeInterval.FromTicks(1100)));
+            ContinueOnSink();
+            WaitOnSource().ShouldFinish(Tuple.Create(true, true, interval));
+            Finish();
+
+            Assert.AreEqual(TimeInterval.FromTicks(2000), handle.TotalElapsedTime);
+        }
+
+        [Test]
         public void WaitShouldNotBlockIfThereWasNoRequest()
         {
             GrantOnSource();
