@@ -148,15 +148,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 RAC_UpdateEm1pRequest();
             });
             sequencer.CpuWaitSignal.AddStateChangedHook(_ => RAC_UpdateEm1pRequest());
-            // The EM2 exit that restarts this reset can run on the host CPU. The core is reset once
-            // the machine is paused, which is the thread that just finished RunFor.
-            machine.StateChanged += (_, args) =>
-            {
-                if(args.CurrentState == MachineStateChangedEventArgs.State.Paused)
-                {
-                    RAC_ApplySequencerPowerUp();
-                }
-            };
 
             InterferenceQueue.InterferenceQueueChanged += InteferenceQueueChangedCallback;
         }
@@ -691,7 +682,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             sequencer.CpuWaitSignal.Set(true);
             sequencer.Reset();
             RAC_sequencerInWfi = false;
-            RAC_sequencerPoweredDown = false;
+            RAC_sequencerResetPending = false;
 
             // TODO: clean up interference queue?
 
@@ -1084,18 +1075,30 @@ namespace Antmicro.Renode.Peripherals.Wireless
             });
         }
 
-        public void InteferenceQueueChangedCallback()
+        public void InteferenceQueueChangedCallback(TimeInterval changeTime)
         {
             if(!EmulationManager.Instance.CurrentEmulation.TryGetMachineName(machine, out _))
             {
                 return;
             }
 
-            if(RAC_currentRadioState == RAC_RadioState.RxSearch || RAC_currentRadioState == RAC_RadioState.RxFrame)
+            // This is called on the thread of whoever changed the queue, which may be another machine's CPU
+            // thread running in parallel with ours, and which holds its own radio lock: do not take ours here.
+            // Hand the update to our own time source instead, which runs it when our CPU is not running, the same
+            // way frames are delivered. The RSSI is sampled at the time of the change rather than at the time we
+            // get to run, so that a transmission that is already over by then still latches its threshold
+            // interrupts. The RSSI register itself does not depend on this: it reads the queue at read time.
+            machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
             {
-                AGC_UpdateRssi();
-            }
-            CheckOngoingRx();
+                machine.ClockSource.ExecuteInLock(delegate
+                {
+                    if(RAC_currentRadioState == RAC_RadioState.RxSearch || RAC_currentRadioState == RAC_RadioState.RxFrame)
+                    {
+                        AGC_UpdateRssi(changeTime);
+                    }
+                    CheckOngoingRx();
+                });
+            });
         }
 
         public UInt64 PacketTraceRadioTimestamp()
@@ -1106,7 +1109,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         public void ReceiveFrame(byte[] frame, IRadio sender)
         {
-            TryReceiveFrame(frame, sender, rxStartedMidPacket: false);
+            // Sync time before taking the radio lock, not inside it, so that this path never holds the
+            // time source lock and the radio lock at the same time.
+            TrySyncTime();
+            machine.ClockSource.ExecuteInLock(() => TryReceiveFrame(frame, sender, rxStartedMidPacket: false, syncTime: false));
         }
 
         public void PROTIMER_PrsRtcTrigger()
@@ -1526,6 +1532,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         where T : struct, IComparable, IFormattable
         {
             var result = 0U;
+            machine.ClockSource.ExecuteInLock(() => result = ReadInner<T>(registersCollection, regionName, offset, internal_read));
+            return result;
+        }
+
+        private uint ReadInner<T>(DoubleWordRegisterCollection registersCollection, string regionName, long offset, bool internal_read)
+        where T : struct, IComparable, IFormattable
+        {
+            var result = 0U;
             var internal_offset = offset;
 
             // Set, Clear, Toggle registers should only be used for write operations. But just in case we convert here as well.
@@ -1725,7 +1739,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)AutomaticGainControlRegisters.ReceivedSignalStrengthIndicator, new DoubleWordRegister(this, 0x00008000)
                   .WithReservedBits(0, 6)
                   .WithValueField(6, 2, FieldMode.Read, valueProviderCallback: _ => (uint)AGC_RssiFractionalPart, name: "RSSIFRAC")
-                  .WithValueField(8, 8, FieldMode.Read, valueProviderCallback: _ => (uint)AGC_RssiIntegerPartAdjusted, name: "RSSIINT")
+                  .WithValueField(8, 8, FieldMode.Read, valueProviderCallback: _ => (uint)AGC_LiveRssiIntegerPartAdjusted, name: "RSSIINT")
                   .WithReservedBits(16, 16)
                 },
                 {(long)AutomaticGainControlRegisters.FrameReceivedSignalStrengthIndicator, new DoubleWordRegister(this, 0x00008000)
@@ -3142,7 +3156,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return;
             }
 
-            foreach(var packet in InterferenceQueue.GetLivePackets())
+            TrySyncTime();
+            foreach(var packet in InterferenceQueue.GetLivePackets(GetTime()))
             {
                 if(packet.Sender == this || packet.Channel != Channel)
                 {
@@ -3152,7 +3167,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
-        private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket)
+        private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket, bool syncTime = true)
         {
             TimeInterval txStartTime = InterferenceQueue.GetTxStartTime(sender);
 
@@ -3163,8 +3178,30 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return;
             }
 
-            TrySyncTime();
-            var txRxSimulatorDelayUs = (GetTime() - txStartTime).TotalMicroseconds;
+            if(syncTime)
+            {
+                TrySyncTime();
+            }
+            var currentTime = GetTime();
+            // With independently advancing machine time sources, the frame can be delivered before this
+            // receiver has reached the sender's TX timestamp. The medium notifies only once, so retry here:
+            // run the reception again when our own time reaches the TX start. If the sender has started
+            // another transmission by then, this one is gone and so is the frame.
+            if(currentTime < txStartTime)
+            {
+                machine.LocalTimeSource.ExecuteInSyncedState(_ =>
+                {
+                    machine.ClockSource.ExecuteInLock(() =>
+                    {
+                        if(InterferenceQueue.GetTxStartTime(sender) == txStartTime)
+                        {
+                            TryReceiveFrame(frame, sender, rxStartedMidPacket, syncTime: false);
+                        }
+                    });
+                }, new TimeStamp(txStartTime, machine.LocalTimeSource.Domain));
+                return;
+            }
+            var txRxSimulatorDelayUs = (currentTime - txStartTime).TotalMicroseconds;
 
             // If we are already receiving a frame, this co-channel transmission interferes with the
             // ongoing reception. Energy-based: any co-channel signal corrupts it, regardless of whether
@@ -3246,11 +3283,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             // We set the RSSIFRAME here to make sure the sender hasn't removed the packet from the interference queue
             // by the time the receiver has completed its RX delay.
-            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
+            // It is sampled at the TX start, when this frame is certainly on the air, whatever the time at which
+            // the frame reached us.
+            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel, txStartTime);
 
-            // If another transmission is already on air on our channel as we begin this reception, the two
+            // If another transmission is on air on our channel at any point since this one began, the two
             // overlap in time: mark the reception as collided from the start (energy-based interference).
-            if(InterferenceQueue.AnyOtherOnAir(sender, Channel))
+            if(InterferenceQueue.AnyOtherOnAir(sender, Channel, txStartTime, currentTime))
             {
                 RAC_rxFailReason |= RAC_RxFailReason.Collision;
                 this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "RX starting with co-channel interference already on air -> collision");
@@ -4345,9 +4384,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
-        private void AGC_UpdateRssi()
+        // Samples the channel at `sampleTime`, or at our own current time if not given.
+        private void AGC_UpdateRssi(TimeInterval? sampleTime = null)
         {
-            this.Log(LogLevel.Noisy, "AGC_UpdateRssi: updating RSSI value at {0}", GetTime());
+            this.Log(LogLevel.Noisy, "AGC_UpdateRssi: updating RSSI value at {0}", sampleTime ?? GetTime());
 
             // First RSSI read
             if(AGC_rssiLastRead == AGC_RssiInvalid)
@@ -4359,7 +4399,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             // Update the RSSI values
             AGC_rssiSecondLastRead = AGC_rssiLastRead;
             AGC_rssiLastRead = AGC_RssiIntegerPart;
-            AGC_RssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
+            AGC_RssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel, sampleTime ?? GetTime());
 
             if(AGC_RssiIntegerPartAdjusted < (int)AGC_ccaThreshold.Value)
             {
@@ -5209,12 +5249,16 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private void RAC_ClearOngoingTx(bool transmissionCompleted = false)
         {
-            txTimer.Enabled = false;
-            if(RAC_internalTxState != RAC_InternalTxState.Idle)
+            // Retires our InterferenceQueue entry, which other radios read: keep it under the radio lock.
+            machine.ClockSource.ExecuteInLock(delegate
             {
-                InterferenceQueue.Remove(this, transmissionCompleted);
-            }
-            RAC_internalTxState = RAC_InternalTxState.Idle;
+                txTimer.Enabled = false;
+                if(RAC_internalTxState != RAC_InternalTxState.Idle)
+                {
+                    InterferenceQueue.Remove(this, transmissionCompleted);
+                }
+                RAC_internalTxState = RAC_InternalTxState.Idle;
+            });
         }
 
         //-------------------------------------------------------------
@@ -6029,6 +6073,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
             {
                 return;
             }
+            if(RAC_sequencerResetPending)
+            {
+                // The EM2 reset has not run yet. Release the core right after it.
+                machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => RAC_ReleaseSequencer());
+                return;
+            }
             sequencer.VectorTableOffset = SequencerMemoryBaseAddress;
             sequencer.SP = machine.SystemBus.ReadDoubleWord(0x0, sequencer);
             sequencer.PC = machine.SystemBus.ReadDoubleWord(0x4, sequencer);
@@ -6038,42 +6088,31 @@ namespace Antmicro.Renode.Peripherals.Wireless
         }
 
         // EM2 retains PD1 but resets its non-retained flops, and the radio is inactive. The core
-        // stays in CPUWAIT afterwards. Neither hook may touch the core: the enter hook runs on the
-        // sequencer thread, and the exit hook runs on the host thread, and pausing a core from
-        // either one stalls virtual time. The reset is applied once the machine is paused.
+        // stays in CPUWAIT afterwards, until software sets CPUWAITDIS. The enter hook runs on the
+        // sequencer thread, where a core cannot be reset, so the reset runs at the next synced
+        // state, when no CPU is executing.
         private void RAC_PowerDownSequencer()
         {
-            if(sequencer.CpuWaitSignal.IsSet || RAC_sequencerPoweredDown)
-            {
-                return;
-            }
-            RAC_sequencerPoweredDown = true;
-        }
-
-        private void RAC_PowerUpSequencer()
-        {
-            if(!RAC_sequencerPoweredDown)
+            if(sequencer.CpuWaitSignal.IsSet)
             {
                 return;
             }
             RAC_sequencerResetPending = true;
-            if(machine.IsPaused)
-            {
-                RAC_ApplySequencerPowerUp();
-            }
+            sequencer.CpuWaitSignal.Set(true);
+            machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => RAC_ResetSequencer());
         }
 
-        private void RAC_ApplySequencerPowerUp()
+        private void RAC_ResetSequencer()
         {
-            if(!RAC_sequencerPoweredDown || !RAC_sequencerResetPending)
+            if(!RAC_sequencerResetPending)
             {
                 return;
             }
-            sequencer.CpuWaitSignal.Set(true);
-            sequencer.Reset();
-            RAC_sequencerInWfi = false;
-            RAC_sequencerPoweredDown = false;
             RAC_sequencerResetPending = false;
+            sequencer.Reset();
+            // Reset leaves the core with a pause request. Clear it, so the core is just halted by CPUWAIT.
+            sequencer.Resume();
+            RAC_sequencerInWfi = false;
             RAC_UpdateEm1pRequest();
         }
 
@@ -6352,6 +6391,24 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        // Channel energy at the moment of the read, while the AGC is sampling. Threshold
+        // interrupts and CCA keep the cached sample in AGC_RssiIntegerPart, which the queue
+        // callback refreshes. Outside RxSearch and RxFrame the register keeps that sample.
+        private sbyte AGC_LiveRssiIntegerPartAdjusted
+        {
+            get
+            {
+                if(RAC_currentRadioState != RAC_RadioState.RxSearch && RAC_currentRadioState != RAC_RadioState.RxFrame)
+                {
+                    return AGC_RssiIntegerPartAdjusted;
+                }
+
+                TrySyncTime();
+                var rssi = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel, GetTime());
+                return (sbyte)(rssi + AGC_RssiWrapCompensationOffsetDbm);
+            }
+        }
+
         private sbyte AGC_RssiIntegerPartAdjusted => (sbyte)(AGC_RssiIntegerPart + AGC_RssiWrapCompensationOffsetDbm);
 
         private sbyte AGC_RssiIntegerPart
@@ -6531,7 +6588,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     // The vector table in sequencer RAM is retained, but the core stays in CPUWAIT
                     // until software sets CPUWAITDIS again.
                     emu?.AddEnterDeepSleepHook(RAC_PowerDownSequencer);
-                    emu?.AddExitDeepSleepHook(RAC_PowerUpSequencer);
                 }
                 return emu;
             }
@@ -6876,7 +6932,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField RAC_paRampingDone;
         private IFlagRegisterField RAC_synthStartRequest;
         private bool RAC_sequencerInWfi;
-        private bool RAC_sequencerPoweredDown;
         private bool RAC_sequencerResetPending;
         private IFlagRegisterField RAC_em1pRadioSwControl;
         private IFlagRegisterField RAC_em1pRadioDisableSwRequest;

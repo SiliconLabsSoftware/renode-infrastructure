@@ -754,6 +754,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             sequencer.IsHalted = true;
             RAC_sequencerInWfi = false;
             RAC_sequencerPoweredDown = false;
+            RAC_sequencerResetPending = false;
 
             RAC_UpdateRadioStateMachine(Enumeration_AC.EnumerationACValue1);
 
@@ -1365,7 +1366,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         public void ReceiveFrame(byte[] frame, IRadio sender)
         {
-            TryReceiveFrame(frame, sender, rxStartedMidPacket: false);
+            TrySyncTime();
+            machine.ClockSource.ExecuteInLock(() => TryReceiveFrame(frame, sender, rxStartedMidPacket: false, syncTime: false));
         }
 
         public uint PROTIMER_BaseCounterValue
@@ -1502,19 +1504,25 @@ namespace Antmicro.Renode.Peripherals.Wireless
         public bool LogBasicRadioActivityAsError = false;
         public bool LogInterrupts = false;
 
-        private void InteferenceQueueChangedCallback()
+        private void InteferenceQueueChangedCallback(TimeInterval changeTime)
         {
             if(!EmulationManager.Instance.CurrentEmulation.TryGetMachineName(machine, out _))
             {
                 return;
             }
 
-            if(RAC_currentRadioState == Enumeration_AB.EnumerationABValue2 || RAC_currentRadioState == Enumeration_AB.EnumerationABValue3)
+            machine.LocalTimeSource.ExecuteInNearestSyncedState(_ =>
             {
-                AGC_UpdateRssi();
-            }
+                machine.ClockSource.ExecuteInLock(delegate
+                {
+                    if(RAC_currentRadioState == Enumeration_AB.EnumerationABValue2 || RAC_currentRadioState == Enumeration_AB.EnumerationABValue3)
+                    {
+                        AGC_UpdateRssi(changeTime);
+                    }
 
-            CheckOngoingRx();
+                    CheckOngoingRx();
+                });
+            });
         }
 
         private void Write<T>(DoubleWordRegisterCollection registersCollection, string regionName, long offset, uint value)
@@ -1563,6 +1571,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
 #pragma warning disable IDE0060
         private uint Read<T>(DoubleWordRegisterCollection registersCollection, string regionName, long offset, bool internal_read = false)
 #pragma warning restore IDE0060
+        where T : struct, IComparable, IFormattable
+        {
+            var result = 0U;
+            machine.ClockSource.ExecuteInLock(() => result = ReadInner<T>(registersCollection, regionName, offset, internal_read));
+            return result;
+        }
+
+        private uint ReadInner<T>(DoubleWordRegisterCollection registersCollection, string regionName, long offset, bool internal_read)
         where T : struct, IComparable, IFormattable
         {
             var result = 0U;
@@ -2078,7 +2094,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)Registers_A.RegA_6, new DoubleWordRegister(this, 0x00008000)
                   .WithReservedBits(0, 6)
                   .WithValueField(6, 2, FieldMode.Read, valueProviderCallback: _ => (uint)AGC_RssiFractionalPart, name: "REG_A_6_FIELD_1")
-                  .WithValueField(8, 8, FieldMode.Read, valueProviderCallback: _ => (uint)AGC_RssiIntegerPartAdjusted, name: "REG_A_6_FIELD_2")
+                  .WithValueField(8, 8, FieldMode.Read, valueProviderCallback: _ => (uint)AGC_LiveRssiIntegerPartAdjusted, name: "REG_A_6_FIELD_2")
                   .WithReservedBits(16, 16)
                 },
                 {(long)Registers_A.RegA_7, new DoubleWordRegister(this, 0x00008000)
@@ -3900,7 +3916,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return;
             }
 
-            foreach(var packet in InterferenceQueue.GetLivePackets())
+            TrySyncTime();
+            foreach(var packet in InterferenceQueue.GetLivePackets(GetTime()))
             {
                 if(packet.Sender == this || packet.Channel != Channel)
                 {
@@ -3910,7 +3927,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
-        private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket)
+        private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket, bool syncTime = true)
         {
             TimeInterval txStartTime = InterferenceQueue.GetTxStartTime(sender);
             if(txStartTime == TimeInterval.Empty)
@@ -3920,8 +3937,26 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return;
             }
 
-            TrySyncTime();
-            var txRxSimulatorDelayUs = (GetTime() - txStartTime).TotalMicroseconds;
+            if(syncTime)
+            {
+                TrySyncTime();
+            }
+            var currentTime = GetTime();
+            if(currentTime < txStartTime)
+            {
+                machine.LocalTimeSource.ExecuteInSyncedState(_ =>
+                {
+                    machine.ClockSource.ExecuteInLock(() =>
+                    {
+                        if(InterferenceQueue.GetTxStartTime(sender) == txStartTime)
+                        {
+                            TryReceiveFrame(frame, sender, rxStartedMidPacket, syncTime: false);
+                        }
+                    });
+                }, new TimeStamp(txStartTime, machine.LocalTimeSource.Domain));
+                return;
+            }
+            var txRxSimulatorDelayUs = (currentTime - txStartTime).TotalMicroseconds;
 
             if(RAC_internalRxState != Enumeration_Z.EnumerationZValue0)
             {
@@ -3982,9 +4017,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
             currentFrameTxStart = txStartTime;
             currentFrameChannel = Channel;
 
-            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
+            AGC_FrameRssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel, txStartTime);
 
-            if(InterferenceQueue.AnyOtherOnAir(sender, Channel))
+            if(InterferenceQueue.AnyOtherOnAir(sender, Channel, txStartTime, currentTime))
             {
                 RAC_rxFailReason |= Enumeration_AG.EnumerationAGValue1;
                 this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "RX starting with co-channel interference already on air -> collision");
@@ -5008,9 +5043,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
             rssiUpdateTimer.Enabled = true;
         }
 
-        private void AGC_UpdateRssi()
+        private void AGC_UpdateRssi(TimeInterval? sampleTime = null)
         {
-            AGC_RssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel);
+            AGC_RssiIntegerPart = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel, sampleTime ?? GetTime());
 
             if(AGC_rssiFirstRead)
             {
@@ -6118,12 +6153,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private void RAC_ClearOngoingTx(bool transmissionCompleted = false)
         {
-            txTimer.Enabled = false;
-            if(RAC_internalTxState != Enumeration_AA.EnumerationAAValue0)
+            machine.ClockSource.ExecuteInLock(delegate
             {
-                InterferenceQueue.Remove(this, transmissionCompleted);
-            }
-            RAC_internalTxState = Enumeration_AA.EnumerationAAValue0;
+                txTimer.Enabled = false;
+                if(RAC_internalTxState != Enumeration_AA.EnumerationAAValue0)
+                {
+                    InterferenceQueue.Remove(this, transmissionCompleted);
+                }
+                RAC_internalTxState = Enumeration_AA.EnumerationAAValue0;
+            });
         }
 
         private void RAC_ClearOngoingRx()
@@ -6168,8 +6206,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             Emu?.SetEm1pHostClockRequest(this, RAC_Em1pHostClockRequest);
         }
 
-        private bool RAC_Em1pHardwareRequest => (sequencer != null && !sequencer.IsHalted && !RAC_sequencerInWfi)
+        private bool RAC_Em1pHardwareRequest => (RAC_sequencerReleased && !RAC_sequencerInWfi)
                                                 || RAC_currentRadioState != Enumeration_AB.EnumerationABValue0;
+
+        private bool RAC_sequencerReleased => sequencer != null && !sequencer.IsHalted && !RAC_sequencerPoweredDown;
 
         private bool RAC_Em1pRequest => (field_415.Value && !field_414.Value)
                                         || RAC_Em1pHardwareRequest;
@@ -6181,15 +6221,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
             Emu?.SetQChannelBusy(this, RAC_QChannelBusy);
         }
 
-        private bool RAC_QChannelBusy => sequencer != null && !sequencer.IsHalted && !RAC_sequencerInWfi;
+        private bool RAC_QChannelBusy => RAC_sequencerReleased && !RAC_sequencerInWfi;
 
         private void RAC_StartSequencer()
         {
-            if(RAC_sequencerPoweredDown)
+            if(RAC_sequencerResetPending)
             {
-                sequencer.Reset();
+                machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => RAC_StartSequencer());
+                return;
             }
-            RAC_sequencerPoweredDown = false;
             sequencer.PC = sequencerConfig.BootAddress;
             sequencer.IsHalted = false;
             sequencer.Resume();
@@ -6199,22 +6239,44 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private void RAC_PowerDownSequencer()
         {
-            if(sequencer == null || sequencer.IsHalted)
+            if(sequencer == null || sequencer.IsHalted || RAC_sequencerPoweredDown)
             {
                 return;
             }
-            sequencer.IsHalted = true;
-            RAC_sequencerInWfi = false;
             RAC_sequencerPoweredDown = true;
+            RAC_sequencerResetPending = true;
+            machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => RAC_ResetSequencer());
+        }
+
+        private void RAC_ResetSequencer()
+        {
+            if(!RAC_sequencerResetPending)
+            {
+                return;
+            }
+            RAC_sequencerResetPending = false;
+            sequencer.IsHalted = true;
+            sequencer.Reset();
+            sequencer.Resume();
+            RAC_sequencerInWfi = false;
             RAC_UpdateEm1pRequest();
             RAC_UpdateQChannel();
         }
 
         private void RAC_PowerUpSequencer()
         {
-            if(RAC_sequencerPoweredDown)
+            if(!RAC_sequencerPoweredDown)
+            {
+                return;
+            }
+            RAC_sequencerPoweredDown = false;
+            if(machine.IsPaused)
             {
                 RAC_StartSequencer();
+            }
+            else
+            {
+                machine.LocalTimeSource.ExecuteInNearestSyncedState(_ => RAC_StartSequencer());
             }
         }
 
@@ -6715,6 +6777,21 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        private sbyte AGC_LiveRssiIntegerPartAdjusted
+        {
+            get
+            {
+                if(RAC_currentRadioState != Enumeration_AB.EnumerationABValue2 && RAC_currentRadioState != Enumeration_AB.EnumerationABValue3)
+                {
+                    return AGC_RssiIntegerPartAdjusted;
+                }
+
+                TrySyncTime();
+                var rssi = (sbyte)InterferenceQueue.GetCurrentRssi(this, Channel, GetTime());
+                return (sbyte)(rssi + AGC_RssiWrapCompensationOffsetDbm);
+            }
+        }
+
         private sbyte AGC_RssiIntegerPartAdjusted => (sbyte)(AGC_RssiIntegerPart + AGC_RssiWrapCompensationOffsetDbm);
 
         private byte AGC_FrameRssiFractionalPart
@@ -7126,6 +7203,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField field_329;
         private bool RAC_sequencerInWfi;
         private bool RAC_sequencerPoweredDown;
+        private bool RAC_sequencerResetPending;
         private IFlagRegisterField field_415;
         private IFlagRegisterField field_414;
         private IFlagRegisterField field_413;
