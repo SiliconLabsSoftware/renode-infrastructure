@@ -24,7 +24,7 @@ using Antmicro.Renode.Time;
 namespace Antmicro.Renode.Peripherals.UART
 {
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.DoubleWordToByte)]
-    public class SiLabs_EUSART_2 : UARTBase, IUARTWithBufferState, IDoubleWordPeripheral, IPeripheralContainer<ISPIPeripheral, NullRegistrationPoint>, IKnownSize
+    public class SiLabs_EUSART_2 : UARTBase, IUARTWithBufferState, IDoubleWordPeripheral, IPeripheralContainer<ISPIPeripheral, NullRegistrationPoint>, IKnownSize, ISPIPeripheral
     {
         // The EM2 capable instance (EUSART0 on xG24) keeps DMA flowing in deep sleep. With
         // RXDMAWU or TXDMAWU set it raises an EM1P request and a host-clock request while a DMA
@@ -90,6 +90,48 @@ namespace Antmicro.Renode.Peripherals.UART
             return new[] { NullRegistrationPoint.Instance };
         }
 
+        // SPI slave mode (CFG0.SYNC set, CFG2.MASTER clear): a master clocks this EUSART as an
+        // ISPIPeripheral. Each frame is answered from the 16-deep TX FIFO or, when that is empty,
+        // with the DTXDATCFG default frame and a TXUF flag.
+        public byte Transmit(byte data)
+        {
+            if(!isEnabled || !IsSpiSlave)
+            {
+                this.Log(LogLevel.Warning, "Clocked as an SPI slave while {0}; answering 0x{1:X2}",
+                         !isEnabled ? "disabled" : "not configured as a synchronous slave", (byte)defaultTxData.Value);
+                return (byte)defaultTxData.Value;
+            }
+            byte miso;
+            if(txFifo.Count > 0)
+            {
+                miso = txFifo.Dequeue();
+            }
+            else
+            {
+                miso = (byte)defaultTxData.Value;
+                txUnderflowInterrupt.Value = true;
+                SlaveUnderflows++;
+            }
+            SlaveFramesClocked++;
+            // The received byte lands in the receive FIFO, which raises RXFL; when the FIFO is
+            // full WriteChar drops it and sets RXOF.
+            WriteChar(data);
+            if(txFifo.Count == 0)
+            {
+                transferCompleteFlag.Value = true;
+                txCompleteInterrupt.Value = true;
+            }
+            UpdateInterrupts();
+            return miso;
+        }
+
+        // Chip select released. Framing is left to the firmware, which watches the chip select
+        // pin through a GPIO interrupt; the FIFOs keep their contents.
+        public void FinishTransmission()
+        {
+            SlaveTransactions++;
+        }
+
         public override void WriteChar(byte value)
         {
             if(BufferState == BufferState.Full)
@@ -109,7 +151,9 @@ namespace Antmicro.Renode.Peripherals.UART
             isEnabled = false;
             txWakeupCleared = false;
             syncBusy = false;
-            spiSlaveDevice = null;
+            // The SPI child is not cleared: it is registered by the platform description, which
+            // is structure rather than state, and Register() is not called again after a reset.
+            txFifo.Clear();
             deferredActionsMask = 0;
             deferTimer.Enabled = false;
             RxFifoLevel.Set(false);
@@ -233,6 +277,16 @@ namespace Antmicro.Renode.Peripherals.UART
 
         public GPIO TxFifoLevel { get; }
 
+        // Frames answered as an SPI slave, how many of them fell back to the default frame, and
+        // how many times the chip select was released.
+        public ulong SlaveFramesClocked { get; private set; }
+
+        public ulong SlaveUnderflows { get; private set; }
+
+        public ulong SlaveTransactions { get; private set; }
+
+        public int TxFifoCount => txFifo.Count;
+
         public long Size => 0x4000;
 
         public event Action<BufferState> BufferStateChanged;
@@ -292,6 +346,10 @@ namespace Antmicro.Renode.Peripherals.UART
             deferredActionsMask = 0;
         }
 
+        private bool IsSpiSlave => operationModeField.Value == OperationMode.Synchronous && !spiMasterMode.Value;
+
+        private bool TxFifoHasSpace => !IsSpiSlave || txFifo.Count < TxFifoDepth;
+
         private byte PeekBuffer()
         {
             byte character;
@@ -302,8 +360,23 @@ namespace Antmicro.Renode.Peripherals.UART
         {
             machine.ClockSource.ExecuteInLock(delegate
             {
+                // RXFL follows the receive FIFO level: clearing the flag while RXFIW + 1 frames
+                // are still queued has no lasting effect, so a driver that reads one byte per
+                // interrupt and then clears RXFLIF is interrupted again until the FIFO drains.
+                if(Count >= (int)rxWatermark.Value + 1)
+                {
+                    rxDataValidInterrupt.Value = true;
+                    receiveDataValidFlag.Value = true;
+                }
+                // TXFL, likewise, follows the transmit FIFO level while the transmitter is enabled.
+                if(transmitterEnableFlag.Value && TxFifoHasSpace)
+                {
+                    txBufferLevelInterrupt.Value = true;
+                }
+
                 var txIrq = ((txCompleteInterruptEnable.Value && txCompleteInterrupt.Value)
-                             || (txBufferLevelInterruptEnable.Value && txBufferLevelInterrupt.Value));
+                             || (txBufferLevelInterruptEnable.Value && txBufferLevelInterrupt.Value)
+                             || (txUnderflowInterruptEnable.Value && txUnderflowInterrupt.Value));
                 TransmitIRQ.Set(txIrq);
 
                 var rxIrq = ((rxDataValidInterruptEnable.Value && rxDataValidInterrupt.Value)
@@ -334,6 +407,12 @@ namespace Antmicro.Renode.Peripherals.UART
             }
 
             transferCompleteFlag.Value = false;
+            if(IsSpiSlave)
+            {
+                // Nothing leaves until a master clocks it out through Transmit().
+                EnqueueSlaveTxData(data);
+                return;
+            }
             if(operationModeField.Value == OperationMode.Synchronous)
             {
                 if(spiSlaveDevice != null)
@@ -355,6 +434,19 @@ namespace Antmicro.Renode.Peripherals.UART
                 UpdateInterrupts();
             }
             transferCompleteFlag.Value = true;
+        }
+
+        private void EnqueueSlaveTxData(byte data)
+        {
+            if(txFifo.Count >= TxFifoDepth)
+            {
+                this.Log(LogLevel.Warning, "TX FIFO full (depth {0}); dropping 0x{1:X2}", TxFifoDepth, data);
+                UpdateInterrupts();
+                return;
+            }
+            txFifo.Enqueue(data);
+            transferCompleteFlag.Value = false;
+            UpdateInterrupts();
         }
 
         private byte ReadBuffer()
@@ -520,7 +612,7 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithFlag(4, out rxOverflowInterrupt, name: "RXOFIF")
                     .WithFlag(5, out rxUnderflowInterrupt, name: "RXUFIF")
                     .WithFlag(6, name: "TXOFIF")
-                    .WithFlag(7, name: "TXUFIF")
+                    .WithFlag(7, out txUnderflowInterrupt, name: "TXUFIF")
                     .WithFlag(8, name: "PERRIF")
                     .WithFlag(9, name: "FERRIF")
                     .WithFlag(10, name: "MPAFIF")
@@ -546,7 +638,7 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithFlag(4, out rxOverflowInterruptEnable, name: "RXOFIEN")
                     .WithFlag(5, out rxUnderflowInterruptEnable, name: "RXUFIEN")
                     .WithFlag(6, name: "TXOFIEN")
-                    .WithFlag(7, name: "TXUFIEN")
+                    .WithFlag(7, out txUnderflowInterruptEnable, name: "TXUFIEN")
                     .WithFlag(8, name: "PERRIEN")
                     .WithFlag(9, name: "FERRIEN")
                     .WithFlag(10, name: "MPAFIEN")
@@ -617,8 +709,10 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithReservedBits(31,1)
                     .WithChangeCallback((_, __) => UpdateEm1pRequest())
                 },
-                {(long)Registers.Cfg_2, new DoubleWordRegister(this)
-                    .WithFlag(0, name: "MASTER")
+                // AUTOCS is set and MASTER is clear out of reset, so the EUSART is an SPI slave
+                // until firmware selects master mode.
+                {(long)Registers.Cfg_2, new DoubleWordRegister(this, 0x00000020)
+                    .WithFlag(0, out spiMasterMode, name: "MASTER")
                     .WithFlag(1, name: "CLKPOL")
                     .WithFlag(2, name: "CLKPHA")
                     .WithFlag(3, name: "CSINV")
@@ -638,7 +732,7 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithReservedBits(14, 18)
                 },
                 {(long)Registers.DtxDataCfg, new DoubleWordRegister(this)
-                    .WithValueField(0, 16, name: "DTXDAT")
+                    .WithValueField(0, 16, out defaultTxData, name: "DTXDAT")
                     .WithReservedBits(16, 16)
                 },
                 {(long)Registers.IrHfCfg, new DoubleWordRegister(this)
@@ -711,6 +805,8 @@ namespace Antmicro.Renode.Peripherals.UART
                     {
                         if(newValue)
                         {
+                            txFifo.Clear();
+                            UpdateInterrupts();
                             txWakeupCleared = true;
                             UpdateEm1pRequest();
                         }
@@ -736,14 +832,14 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithFlag(3, name: "RXBLOCK")
                     .WithFlag(4, name: "TXTRI")
                     .WithFlag(5, out transferCompleteFlag, FieldMode.Read, name: "TXC")
-                    .WithFlag(6, name: "TXFL")
+                    .WithFlag(6, FieldMode.Read, valueProviderCallback: _ => TxFifoHasSpace, name: "TXFL")
                     .WithFlag(7, out receiveDataValidFlag, FieldMode.Read, name: "RXFL")
                     .WithFlag(8, FieldMode.Read, valueProviderCallback: _ => Count == BufferSize, name: "RXFULL")
                     .WithReservedBits(9,3)
                     .WithFlag(12, FieldMode.Read, valueProviderCallback: _ => true, name: "RXIDLE")
                     .WithFlag(13, FieldMode.Read, valueProviderCallback: _ => true, name: "TXIDLE")
                     .WithReservedBits(14,2)
-                    .WithValueField(16, 5, FieldMode.Read, valueProviderCallback: _ => 0, name: "TXFCNT")
+                    .WithValueField(16, 5, FieldMode.Read, valueProviderCallback: _ => (ulong)txFifo.Count, name: "TXFCNT")
                     .WithReservedBits(21,3)
                     .WithFlag(24, name: "AUTOBAUDDONE")
                     .WithFlag(25, name: "CLEARTXBUSY")
@@ -790,6 +886,10 @@ namespace Antmicro.Renode.Peripherals.UART
         private bool em1pRequested = false;
         private uint deferredActionsMask = 0;
         private ISPIPeripheral spiSlaveDevice;
+        private IFlagRegisterField txUnderflowInterrupt;
+        private IFlagRegisterField txUnderflowInterruptEnable;
+        private IFlagRegisterField spiMasterMode;
+        private IValueRegisterField defaultTxData;
         private IFlagRegisterField rxBufferFullInterruptEnable;
         private IFlagRegisterField rxDataValidInterruptEnable;
         private IFlagRegisterField txBufferLevelInterruptEnable;
@@ -819,10 +919,12 @@ namespace Antmicro.Renode.Peripherals.UART
         private readonly uint uartClockFrequency;
         private readonly DoubleWordRegisterCollection registersCollection;
         private readonly LimitTimer deferTimer;
+        private readonly Queue<byte> txFifo = new Queue<byte>();
         private const uint SetRegisterOffset = 0x1000;
         private const uint ClearRegisterOffset = 0x2000;
         private const uint ToggleRegisterOffset = 0x3000;
         private const int BufferSize = 17; // with shift register
+        private const int TxFifoDepth = 16;
 
         IEnumerable<IRegistered<ISPIPeripheral, NullRegistrationPoint>> IPeripheralContainer<ISPIPeripheral, NullRegistrationPoint>.Children
         {
