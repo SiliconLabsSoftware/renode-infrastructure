@@ -43,6 +43,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         public SiLabs_SecureElement(Machine machine, IDoubleWordPeripheral parent, Queue<uint> txFifo, Queue<uint> rxFifo, bool series3,
                                     uint flashSize, uint flashPageSize, uint flashRegionSize, uint flashCodeRegionStart, uint flashCodeRegionEnd = 0, uint flashDataRegionStart = 0, ISiLabs_KeyStorage ksuStorage = null)
         {
+            random = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
             this.machine = machine;
             this.parent = parent;
             this.ksuStorage = ksuStorage;
@@ -2026,7 +2027,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         private ResponseCode HandleReadDeviceDataCommand(uint inputDma, uint outputDma, uint[] commandParams, uint commandParamsCount, uint commandOptions)
 #pragma warning restore IDE0060
         {
-            if(commandParamsCount < 1 || commandParamsCount > 2)
+            // Parameter count depends on Option 1 (DeviceDataReadSize). Per SE command 0x4330 ReadDeviceData:
+            // WholeElement/GetSize: 0 params; OneWord/GetValue: offset; ChunkOfElement: offset+size.
+            if(commandParamsCount > 2)
             {
                 parent.Log(LogLevel.Error, "ReadDeviceData: invalid param count {0}", commandParamsCount);
                 return ResponseCode.InvalidParameter;
@@ -2070,6 +2073,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 //Get one word from specified offset
                 break;
             case DeviceDataReadSize.GetSize:
+                if(commandParamsCount != 0)
+                {
+                    parent.Log(LogLevel.Error, "ReadDeviceData: invalid param count {0} for GetSize", commandParamsCount);
+                    return ResponseCode.InvalidParameter;
+                }
                 //Get size of element
                 break;
             case DeviceDataReadSize.GetValue:
@@ -4959,13 +4967,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         private readonly IDoubleWordPeripheral parent;
         private readonly List<AsymmetricCipherKeyPair> ecKeyPairs = new List<AsymmetricCipherKeyPair>();
         private readonly byte[] userDataToken = new byte[UserDataTokenSize];
+        private readonly PseudorandomNumberGenerator random;
 
         // BouncyCastle's Sha{1,224,256,384,512}Digest classes hold H1..Hn as private (or internal-to-BC)
         // fields with no public accessor. The firmware exchanges raw H bytes with the host on every
         // HashUpdate/HashFinish, so we read/write those fields by reflection. Field names are stable
         // across BC's vendored history (see lib/bc-csharp/crypto/src/crypto/digests/).
         private const BindingFlags PrivateInstanceField = BindingFlags.NonPublic | BindingFlags.Instance;
-        private static readonly PseudorandomNumberGenerator random = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
         private const uint NullDescriptor = 1;
         // Series3 specific value.
         // Related to PSEC-5391, once that gets resolved, we might need to update this accordingly.

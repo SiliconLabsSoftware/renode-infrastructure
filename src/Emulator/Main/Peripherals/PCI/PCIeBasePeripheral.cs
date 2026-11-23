@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2026 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -10,6 +10,7 @@ using System.Linq;
 using Antmicro.Renode.Core.Structure.Registers;
 using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
+using Antmicro.Renode.Peripherals.Bus.Wrappers;
 using Antmicro.Renode.Peripherals.PCI.BAR;
 using Antmicro.Renode.Peripherals.PCI.Capabilities;
 
@@ -17,24 +18,24 @@ using Range = Antmicro.Renode.Core.Range;
 
 namespace Antmicro.Renode.Peripherals.PCI
 {
-    public abstract class PCIeBasePeripheral : IPCIePeripheral
+    public abstract class PCIeBasePeripheral : IPCIePeripheral, IHasMappedRegisters
     {
         public virtual uint ConfigurationReadDoubleWord(long offset)
         {
             var value = registers.Read(offset);
-            this.Log(LogLevel.Noisy, "Accessing Configuration space, reading from {0} (0x{1:X}), read 0x{2:X}.", (Registers)offset, offset, value);
+            this.Log(LogLevel.Noisy, "Accessing Configuration space, reading from {0} (0x{1:X}), read 0x{2:X}.", (RegistersCommon)offset, offset, value);
             return value;
+        }
+
+        public virtual void ConfigurationWriteDoubleWord(long offset, uint value)
+        {
+            this.Log(LogLevel.Noisy, "Accessing Configuration space, writing to {0} (0x{1:X}), value {2:X}.", (RegistersCommon)offset, offset, value);
+            registers.Write(offset, value);
         }
 
         public virtual void Reset()
         {
             registers.Reset();
-        }
-
-        public virtual void ConfigurationWriteDoubleWord(long offset, uint value)
-        {
-            this.Log(LogLevel.Noisy, "Accessing Configuration space, writing to {0} (0x{1:X}), value {2:X}.", (Registers)offset, offset, value);
-            registers.Write(offset, value);
         }
 
         public uint MemoryReadDoubleWord(uint bar, long offset)
@@ -67,32 +68,54 @@ namespace Antmicro.Renode.Peripherals.PCI
             WriteDoubleWordToBar(bar, offset, value);
         }
 
+        public PCIeCapability GetPCIeCapability(int nth = 0)
+        {
+            return capabilities.Values.OfType<PCIeCapability>().Skip(nth).First();
+        }
+
+        public virtual string OffsetToString(long offset) => configurationMapper.ToString(offset) ?? "<undefined>";
+
         public ushort DeviceId { get; set; }
 
         public ushort VendorId { get; set; }
 
         public byte RevisionId { get; set; }
 
-        public uint ClassCode { get; set; }
+        public PCIBaseClass BaseClassCode { get; set; }
+
+        public PCISubClass SubClassCode { get; set; }
+
+        public uint ProgrammingInterface { get; set; }
 
         public HeaderType HeaderType { get; }
 
-        protected PCIeBasePeripheral(IPCIeRouter parent, HeaderType headerType)
+        public const byte PCIeCapabilitiesOffset = 0x70;
+
+        protected PCIeBasePeripheral(HeaderType headerType)
         {
             if(!IsHeaderAcceptable(headerType))
             {
                 throw new ConstructionException($"Currently only devices of type {HeaderType.Bridge} or {HeaderType.Endpoint} are supported.");
             }
-            this.parent = parent;
+            configurationMapper = new RegisterMapper(typeof(RegistersCommon));
+            configurationMapper.RegisterEnumMapping(typeof(PCIeCapability.PCIeCapabilityRegisters), PCIeCapabilitiesOffset);
+            if(headerType == HeaderType.Bridge)
+            {
+                configurationMapper.RegisterEnumMapping(typeof(RegistersBridge));
+            }
+            else if(headerType == HeaderType.Endpoint)
+            {
+                configurationMapper.RegisterEnumMapping(typeof(RegistersEndpoint));
+            }
             this.HeaderType = headerType;
             this.baseAddressRegisters = new BaseAddressRegister[headerType.MaxNumberOfBARs()];
             var registerMap = new Dictionary<long, DoubleWordRegister>
             {
-                {(long)Registers.DeviceAndVendorId, new DoubleWordRegister(this)
+                {(long)RegistersCommon.DeviceAndVendorId, new DoubleWordRegister(this)
                     .WithValueField(0, 16, FieldMode.Read, valueProviderCallback: _ => VendorId)
                     .WithValueField(16, 16, FieldMode.Read, valueProviderCallback: _ => DeviceId)
                 },
-                {(long)Registers.StatusAndConfiguration, new DoubleWordRegister(this) //unsupported fields do not have to be implemented. Maybe we should move it to inheriting classes?
+                {(long)RegistersCommon.StatusAndConfiguration, new DoubleWordRegister(this) //unsupported fields do not have to be implemented. Maybe we should move it to inheriting classes?
                     //First 16 bits: command register. RW. Writing 0 to these fields should effectively disable all accesses but the configuration accesses
                     .WithTaggedFlag("I/O Space", 0)
                     .WithTaggedFlag("Memory Space", 1)
@@ -120,22 +143,50 @@ namespace Antmicro.Renode.Peripherals.PCI
                     .WithTaggedFlag("Signaled System Error", 30)
                     .WithTaggedFlag("Detected Parity Error", 31)
                 },
-                {(long)Registers.ClassCode, new DoubleWordRegister(this)
+                {(long)RegistersCommon.ClassCode, new DoubleWordRegister(this)
                     .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => RevisionId)
-                    .WithValueField(16, 16, FieldMode.Read, valueProviderCallback: _ => ClassCode)
+                    .WithValueField(8, 8, FieldMode.Read, valueProviderCallback: _ => ProgrammingInterface)
+                    .WithEnumField(16, 8, FieldMode.Read, valueProviderCallback: (PCISubClass _) => SubClassCode)
+                    .WithEnumField(24, 8, FieldMode.Read, valueProviderCallback: (PCIBaseClass _) => BaseClassCode)
                 },
-                {(long)Registers.Header, new DoubleWordRegister(this)
+                {(long)RegistersCommon.Header, new DoubleWordRegister(this)
                     .WithTag("Cacheline Size", 0, 8)
                     .WithTag("Latency Timer", 8, 8)
                     .WithEnumField(16, 8, FieldMode.Read, valueProviderCallback: (HeaderType _) => headerType)
                     .WithTag("BIST", 24, 8)
                 },
-                {(long)Registers.Capabilities, new DoubleWordRegister(this)
+                {(long)RegistersCommon.Capabilities, new DoubleWordRegister(this)
                     .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => capabilities.FirstOrDefault().Key)
+                    .WithReservedBits(8, 24)
                 },
             };
+
+            if(headerType == HeaderType.Bridge)
+            {
+                // Since Renode does not simulate TLP packets, there is no general concept of routing
+                // and these registers are R/W only, with no effect on the packet flow
+                // The BARs are instead registered directly into the Host's address space.
+                registerMap.Add((long)RegistersBridge.MemoryLimitBase, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "Memory Base")
+                    .WithValueField(16, 16, name: "Memory Limit")
+                );
+
+                registerMap.Add((long)RegistersBridge.PrefetchableMemoryLimitBase, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "Prefetchable Memory Base")
+                    .WithValueField(16, 16, name: "Prefetchable Memory Limit")
+                );
+
+                registerMap.Add((long)RegistersBridge.PrefetchableMemoryBaseUpper, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "Prefetchable Memory Base Upper 32 bits")
+                );
+
+                registerMap.Add((long)RegistersBridge.PrefetchableMemoryLimitUpper, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "Prefetchable Memory Limit Upper 32 bits")
+                );
+            }
+
             registers = new DoubleWordRegisterCollection(this, registerMap);
-            AddCapability(0x80, new PCIeCapability(this));
+            AddCapability(PCIeCapabilitiesOffset, new PCIeCapability(this));
         }
 
         protected virtual void WriteDoubleWordToBar(uint bar, long offset, uint value)
@@ -149,7 +200,7 @@ namespace Antmicro.Renode.Peripherals.PCI
             return 0;
         }
 
-        protected void AddBaseAddressRegister(uint i, BaseAddressRegister register)
+        protected void AddBaseAddressRegister(IPCIeRouter parent, uint i, BaseAddressRegister register)
         {
             if(i > HeaderType.MaxNumberOfBARs())
             {
@@ -161,36 +212,36 @@ namespace Antmicro.Renode.Peripherals.PCI
                 throw new ConstructionException($"Base address register number at {i} is already registered.");
             }
             baseAddressRegisters[i] = register;
-            registers.AddRegister((long)Registers.BaseAddressRegister0 + 4 * i, new DoubleWordRegister(this)
+            registers.AddRegister((long)RegistersCommon.BaseAddressRegister0 + 4 * i, new DoubleWordRegister(this)
                     .WithValueField(0, 32, changeCallback: (_, value) => baseAddressRegisters[i].Value = (uint)value,
                         valueProviderCallback: _ => baseAddressRegisters[i].Value, name: $"BAR{i}"))
                     .WithWriteCallback((_, value) => parent.RegisterBar(new Range(baseAddressRegisters[i].BaseAddress, baseAddressRegisters[i].RequestedSize), this, i));
         }
 
-        protected void AddCapability(byte offset, Capability capability)
+        protected void AddCapability(byte initialOffset, Capability capability)
         {
-            if(offset < CapabilitiesOffset)
+            if(initialOffset < CapabilitiesOffset)
             {
-                throw new ConstructionException($"Capability offset (0x{offset:X}) is below the minimal address (0x{CapabilitiesOffset:X})");
+                throw new ConstructionException($"Capability offset (0x{initialOffset:X}) is below the minimal address (0x{CapabilitiesOffset:X})");
             }
-            if(capabilities.ContainsKey(offset))
+            if(capabilities.ContainsKey(initialOffset))
             {
-                throw new ConstructionException($"Capability already registered at 0x{offset}");
+                throw new ConstructionException($"Capability already registered at 0x{initialOffset}");
             }
             if(capabilities.Any())
             {
                 var lastCapability = capabilities.Last();
-                lastCapability.Value.NextCapability = offset;
+                lastCapability.Value.NextCapability = initialOffset;
             }
-            capabilities.Add(offset, capability);
-            foreach(var register in capability.Registers)
+            capabilities.Add(initialOffset, capability);
+            foreach(var (address, register) in capability.Registers)
             {
-                registers.AddRegister(offset, register);
-                offset += 4;
+                registers.AddRegister(address + initialOffset, register);
             }
         }
 
         protected readonly DoubleWordRegisterCollection registers;
+        protected readonly RegisterMapper configurationMapper;
 
         private bool IsHeaderAcceptable(HeaderType header)
         {
@@ -199,13 +250,12 @@ namespace Antmicro.Renode.Peripherals.PCI
             return headerWithoutMultiFunctionFlag == HeaderType.Bridge || headerWithoutMultiFunctionFlag == HeaderType.Endpoint;
         }
 
-        private readonly IPCIeRouter parent;
         private readonly BaseAddressRegister[] baseAddressRegisters;
-        private readonly Dictionary<byte, Capability> capabilities = new Dictionary<byte, Capability>();
+        private readonly SortedDictionary<byte, Capability> capabilities = new ();
 
         private const byte CapabilitiesOffset = 0x40;
 
-        private enum Registers
+        protected enum RegistersCommon
         {
             DeviceAndVendorId = 0x0,
             StatusAndConfiguration = 0x4,
@@ -215,6 +265,25 @@ namespace Antmicro.Renode.Peripherals.PCI
             BaseAddressRegister1 = 0x14,
             //missing offsets are type-specific
             Capabilities = 0x34,
+        }
+
+        protected enum RegistersBridge
+        {
+            SecondaryStatus = 0x1C,
+            MemoryLimitBase = 0x20,
+            PrefetchableMemoryLimitBase = 0x24,
+            PrefetchableMemoryBaseUpper = 0x28,
+            PrefetchableMemoryLimitUpper = 0x2C,
+            IOBaseLimitUpper = 0x30,
+        }
+
+        protected enum RegistersEndpoint
+        {
+            // BARs above the second one are relevant in some EPs only
+            BaseAddressRegister2 = 0x18,
+            BaseAddressRegister3 = 0x1C,
+            BaseAddressRegister4 = 0x20,
+            BaseAddressRegister5 = 0x24,
         }
     }
 }

@@ -829,7 +829,7 @@ namespace Antmicro.Renode.Peripherals.Bus
         {
             cpu = null;
             cpuState = default;
-            if(!threadLocalContext.InUse || !threadLocalContext.InitiatorState.HasValue)
+            if(!threadLocalContext.InitiatorState.HasValue)
             {
                 return false;
             }
@@ -868,7 +868,7 @@ namespace Antmicro.Renode.Peripherals.Bus
 
         public bool TryGetTransactionInitiator(out IPeripheral initiator)
         {
-            if(threadLocalContext.InUse && threadLocalContext.Initiator != null)
+            if(threadLocalContext.Initiator != null)
             {
                 initiator = threadLocalContext.Initiator;
                 return true;
@@ -1178,13 +1178,7 @@ namespace Antmicro.Renode.Peripherals.Bus
 
         public IPeripheral WhatPeripheralIsAt(ulong address, IPeripheral context = null, ulong? initiatorState = null)
         {
-            var registered = GetAccessiblePeripheralsForContext(context, initiatorState)
-                .FirstOrDefault(x => x.RegistrationPoint.Range.Contains(address));
-            if(registered != null)
-            {
-                return registered.Peripheral;
-            }
-            return null;
+            return GetBusRegistered(address, context, initiatorState)?.Peripheral;
         }
 
         /// <summary>Checks what is at a given address.</summary>
@@ -1202,7 +1196,7 @@ namespace Antmicro.Renode.Peripherals.Bus
         /// </returns>
         public IBusRegistered<IBusPeripheral> WhatIsAt(ulong address, IPeripheral context = null)
         {
-            return GetAccessiblePeripheralsForContext(context).FirstOrDefault(x => x.RegistrationPoint.Range.Contains(address));
+            return GetBusRegistered(address, context);
         }
 
         public IEnumerable<IBusRegistered<IBusPeripheral>> GetRegistrationsForPeripheralType<T>(IPeripheral context = null)
@@ -1568,7 +1562,8 @@ namespace Antmicro.Renode.Peripherals.Bus
 
         private static MappedSegmentWrapper FromRegistrationPointToSegmentWrapper(IMappedSegment segment, BusRangeRegistration registrationPoint, ICPUWithMappedMemory context)
         {
-            if(segment.StartingOffset >= registrationPoint.Range.Size + registrationPoint.Offset)
+            if(segment.StartingOffset + segment.Size <= registrationPoint.Offset
+                || segment.StartingOffset >= registrationPoint.Range.Size + registrationPoint.Offset)
             {
                 return null;
             }
@@ -1650,7 +1645,7 @@ namespace Antmicro.Renode.Peripherals.Bus
 
         private bool TryGetCurrentCPUId(out int cpuId)
         {
-            if(threadLocalContext.InUse && threadLocalContext.Initiator is ICPU cpu)
+            if(threadLocalContext.Initiator is ICPU cpu)
             {
                 cpuId = idByCpu[cpu];
                 return true;
@@ -1790,6 +1785,24 @@ namespace Antmicro.Renode.Peripherals.Bus
         {
             var locals = peripheralsCollectionByContext.GetValue(context, initiatorState).Peripherals;
             return context != null ? locals.Concat(peripheralsCollectionByContext[null].Peripherals) : locals;
+        }
+
+        /// <summary>
+        /// The method gets peripheral registered at the given address for the given context and falls back to searching the global (`null`) context
+        /// if no peripheral is found in a peripheral collection for given non-null `context` and `initiatorState`.
+        /// </summary>
+        /// <remarks>
+        /// This method has much better performance than calling `GetAccessiblePeripheralsForContext` and filtering its results because
+        /// `PeripheralCollection.FindBusRegistered` uses an optimized registration lookup.
+        /// </remarks>
+        private IBusRegistered<IBusPeripheral> GetBusRegistered(ulong address, IPeripheral context, ulong? initiatorState = null)
+        {
+            IBusRegistered<IBusPeripheral> localBusRegistered = null;
+            if(context is not null || initiatorState is not null)
+            {
+                localBusRegistered = peripheralsCollectionByContext.GetValue(context, initiatorState).FindBusRegistered(address);
+            }
+            return localBusRegistered ?? peripheralsCollectionByContext[null].FindBusRegistered(address);
         }
 
         private void FillAccessMethodsWithTaggedMethods(IBusPeripheral peripheral, string tag, ref PeripheralAccessMethods methods)
@@ -2775,7 +2788,8 @@ namespace Antmicro.Renode.Peripherals.Bus
         {
             public ThreadLocalContext()
             {
-                context = new ThreadLocal<Tuple<IPeripheral, ulong?>>(() => null, true);
+                // We don't need values from other threads which is why `trackAllValues: false`.
+                localContextStack = new ThreadLocal<ContextStack>(static () => new ContextStack(), trackAllValues: false);
                 emptyDisposable.Disable();
             }
 
@@ -2785,28 +2799,32 @@ namespace Antmicro.Renode.Peripherals.Bus
                 {
                     return emptyDisposable;
                 }
-                var previousContext = context.Value;
-                context.Value = Tuple.Create(cpu, initiatorState);
-                return DisposableWrapper.New(() =>
-                {
-                    context.Value = previousContext;
-                });
+                localContextStack.Value.Push((cpu, initiatorState));
+                return localContextStack.Value;
             }
 
             public void Dispose()
             {
-                context.Dispose();
+                localContextStack.Dispose();
             }
 
-            public bool InUse => context.Value != null;
+            public bool InUse => localContextStack.Value.Count > 0;
 
-            public IPeripheral Initiator => context.Value.Item1;
+            public IPeripheral Initiator => InUse ? localContextStack.Value.Peek().Initiator : null;
 
-            public ulong? InitiatorState => context.Value.Item2;
+            public ulong? InitiatorState => InUse ? localContextStack.Value.Peek().InitiatorState : null;
 
-            private readonly ThreadLocal<Tuple<IPeripheral, ulong?>> context;
+            private readonly ThreadLocal<ContextStack> localContextStack;
 
             private static readonly DisposableWrapper emptyDisposable = new DisposableWrapper();
+
+            private class ContextStack : Stack<(IPeripheral Initiator, ulong? InitiatorState)>, IDisposable
+            {
+                public void Dispose()
+                {
+                    _ = Pop();
+                }
+            }
         }
 
         // It doesn't implement IDictionary because serialization doesn't work correctly for dictionaries without two generic parameters.

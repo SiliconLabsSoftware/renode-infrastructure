@@ -26,6 +26,8 @@ namespace Antmicro.Renode.Peripherals.Bus
 
             PeripheralAccessMethods FindAccessMethods(ulong address, out ulong startAddress, out ulong endAddress, out ulong offset);
 
+            IBusRegistered<IBusPeripheral> FindBusRegistered(ulong address);
+
 #if DEBUG
             void ShowStatistics();
 #endif
@@ -178,8 +180,9 @@ namespace Antmicro.Renode.Peripherals.Bus
                 sync.EnterWriteLock();
                 try
                 {
-                    blocks = blocks.Where(x => x.Start > end || x.End < start).ToArray();
-                    var toRemove = shortBlocks.Where(x => x.Value.Start >= start && x.Value.End <= end).Select(x => x.Key).ToArray();
+                    // Block.End is exclusive, whereas the range passed to Remove is inclusive.
+                    blocks = blocks.Where(x => x.Start > end || x.End <= start).ToArray();
+                    var toRemove = shortBlocks.Where(x => x.Value.Start >= start && x.Value.End - 1 <= end).Select(x => x.Key).ToArray();
                     foreach(var keyToRemove in toRemove)
                     {
                         shortBlocks.Remove(keyToRemove);
@@ -228,59 +231,23 @@ namespace Antmicro.Renode.Peripherals.Bus
 
             public PeripheralAccessMethods FindAccessMethods(ulong address, out ulong startAddress, out ulong endAddress, out ulong offset)
             {
-                // no need to lock here yet, cause last block is in the thread local storage
-                var lastBlock = lastBlockStorage.Value;
-#if DEBUG
-                Interlocked.Increment(ref queryCount);
-#endif
-                /// Note `< End` - End is currently one past the end in reality. Please also change <see cref="ICoalescable{T}.Coalesce"> after changing this.
-                if(address >= lastBlock.Start && address < lastBlock.End)
+                if(!TryGetBlock(address, out var block))
                 {
-#if DEBUG
-                    Interlocked.Increment(ref lastPeripheralCount);
-#endif
-                    startAddress = lastBlock.Start;
-                    endAddress = lastBlock.End;
-                    offset = lastBlock.Peripheral.RegistrationPoint.Offset;
-                    return lastBlock.AccessMethods;
+                    startAddress = default;
+                    endAddress = default;
+                    offset = default;
+                    return null;
                 }
-                sync.EnterWriteLock();
-                try
-                {
-                    // let's try dictionary
-                    Block block;
-                    if(!shortBlocks.TryGetValue(address & ~PageAlign, out block))
-                    {
-                        // binary search - our last resort
-                        var index = BinarySearch(address);
-                        if(index == -1)
-                        {
-                            startAddress = 0;
-                            endAddress = 0;
-                            offset = 0;
-                            return null;
-                        }
-#if DEBUG
-                        Interlocked.Increment(ref binarySearchCount);
-#endif
-                        block = blocks[index];
-                    }
-#if DEBUG
-                    else
-                    {
-                        Interlocked.Increment(ref dictionaryCount);
-                    }
-#endif
-                    startAddress = block.Start;
-                    endAddress = block.End;
-                    offset = block.Peripheral.RegistrationPoint.Offset;
-                    lastBlockStorage.Value = block;
-                    return block.AccessMethods;
-                }
-                finally
-                {
-                    sync.ExitWriteLock();
-                }
+
+                startAddress = block.Start;
+                endAddress = block.End;
+                offset = block.Peripheral.RegistrationPoint.Offset;
+                return block.AccessMethods;
+            }
+
+            public IBusRegistered<IBusPeripheral> FindBusRegistered(ulong address)
+            {
+                return TryGetBlock(address, out var block) ? block.Peripheral : null;
             }
 
 #if DEBUG
@@ -365,6 +332,54 @@ namespace Antmicro.Renode.Peripherals.Bus
             private void InvalidateLastBlock()
             {
                 lastBlockStorage = new ThreadLocal<Block>();
+            }
+
+            private bool TryGetBlock(ulong address, out Block block)
+            {
+                // no need to lock here yet, cause last block is in the thread local storage
+                var lastBlock = lastBlockStorage.Value;
+#if DEBUG
+                Interlocked.Increment(ref queryCount);
+#endif
+                /// Note `< End` - End is currently one past the end in reality. Please also change <see cref="ICoalescable{T}.Coalesce"> after changing this.
+                if(address >= lastBlock.Start && address < lastBlock.End)
+                {
+#if DEBUG
+                    Interlocked.Increment(ref lastPeripheralCount);
+#endif
+                    block = lastBlock;
+                    return true;
+                }
+                sync.EnterWriteLock();
+                try
+                {
+                    // let's try dictionary
+                    if(!shortBlocks.TryGetValue(address & ~PageAlign, out block))
+                    {
+                        // binary search - our last resort
+                        var index = BinarySearch(address);
+                        if(index == -1)
+                        {
+                            return false;
+                        }
+#if DEBUG
+                        Interlocked.Increment(ref binarySearchCount);
+#endif
+                        block = blocks[index];
+                    }
+#if DEBUG
+                    else
+                    {
+                        Interlocked.Increment(ref dictionaryCount);
+                    }
+#endif
+                    lastBlockStorage.Value = block;
+                    return true;
+                }
+                finally
+                {
+                    sync.ExitWriteLock();
+                }
             }
 
             private IBusRegistered<IBusPeripheral>[] peripherals = Array.Empty<IBusRegistered<IBusPeripheral>>();

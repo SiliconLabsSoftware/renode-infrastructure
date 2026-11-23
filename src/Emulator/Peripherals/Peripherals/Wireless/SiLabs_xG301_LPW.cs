@@ -28,6 +28,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
     {
         public SiLabs_xG301_LPW(Machine machine, CV32E40P sequencer = null, ISiLabs_RvConfig sequencerConfig = null, SiLabs_BUFC_5 bufferController = null, SiLabs_SYSRTC_2 sysrtc = null)
         {
+            random = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
             this.machine = machine;
             this.sequencer = sequencer;
             this.sequencerConfig = sequencerConfig;
@@ -711,6 +712,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             FRC_rxFrameExitPending = false;
             FRC_rxDonePending = false;
             FRC_rxAbortInProgress = false;
+            FRC_frameOk = false;
+            FRC_frameLengthError = false;
+            FRC_rxFrameDiscarded = false;
+            FRC_crcErrorTolerated = false;
 
             RAC_rxFailReason = Enumeration_AG.EnumerationAGValue0;
             RAC_previous1RadioState = Enumeration_AB.EnumerationABValue0;
@@ -771,6 +776,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             fswMailboxRegistersCollection.Reset();
 
             RAC_UpdateEm1pRequest();
+            RAC_UpdateQChannel();
             UpdateInterrupts();
         }
 
@@ -795,6 +801,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 irq = ((field_139.Value && field_140.Value)
                        || (field_137.Value && field_138.Value)
+                       || (field_418.Value && field_419.Value)
                        || (field_144.Value && field_145.Value)
                        || (field_104.Value && field_105.Value)
                        || (field_92.Value && field_93.Value)
@@ -922,6 +929,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 irq = ((field_131.Value && field_132.Value)
                        || (field_129.Value && field_130.Value)
+                       || (field_416.Value && field_417.Value)
                        || (field_135.Value && field_136.Value)
                        || (field_123.Value && field_124.Value)
                        || (field_121.Value && field_122.Value)
@@ -1643,6 +1651,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers_F.RegF_1, new DoubleWordRegister(this, 0x00000001)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_F_1_FIELD_1")
+                },
                 {(long)Registers_F.RegF_2, new DoubleWordRegister(this)
                     .WithFlag(0, valueProviderCallback: _ => LPW0PORTAL_PowerUpRequest, writeCallback: (_, value) => {LPW0PORTAL_PowerUpRequest = value;}, name: "REG_F_2_FIELD_1")
                     .WithReservedBits(1, 31)
@@ -1753,6 +1764,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers_E.RegE_1, new DoubleWordRegister(this, 0x00000001)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_E_1_FIELD_1")
+                },
                 {(long)Registers_E.RegE_2, new DoubleWordRegister(this)
                     .WithFlag(0, valueProviderCallback: _ => HOSTPORTAL_PowerUpRequest, writeCallback: (_, value) => {HOSTPORTAL_PowerUpRequest = value;}, name: "REG_E_2_FIELD_1")
                     .WithReservedBits(1, 31)
@@ -1937,6 +1951,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers_A.RegA_1, new DoubleWordRegister(this, 0x00000006)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_A_1_FIELD_1")
+                },
+                {(long)Registers_A.RegA_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_A_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)Registers_A.RegA_3, new DoubleWordRegister(this)
                     .WithValueField(0, 6, name: "REG_A_3_FIELD_1")
                     .WithFlag(6, name: "REG_A_3_FIELD_2")
@@ -2068,7 +2089,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(30, name: "REG_A_8_FIELD_14")
                     .WithFlag(31, name: "REG_A_8_FIELD_15")
                 },
-                {(long)Registers_A.RegA_9, new DoubleWordRegister(this, 0x00001300)
+                {(long)Registers_A.RegA_9, new DoubleWordRegister(this, 0x04001300)
                   .WithValueField(0, 8, out field_11, name: "REG_A_9_FIELD_1")
                   .WithValueField(8, 4, out field_21, name: "REG_A_9_FIELD_2")
                   .WithValueField(12, 3, out field_12, name: "REG_A_9_FIELD_3")
@@ -2113,6 +2134,481 @@ namespace Antmicro.Renode.Peripherals.Wireless
                   .WithValueField(16, 8, name: "REG_A_46_FIELD_3")
                   .WithValueField(24, 8, name: "REG_A_46_FIELD_4")
                 },
+                {(long)Registers_A.RegA_5, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, FieldMode.Read, name: "REG_A_5_FIELD_1")
+                    .WithReservedBits(12, 2)
+                    .WithFlag(14, FieldMode.Read, name: "REG_A_5_FIELD_2")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 16, FieldMode.Read, name: "REG_A_5_FIELD_3")
+                },
+                {(long)Registers_A.RegA_10, new DoubleWordRegister(this, 0x0000610A)
+                    .WithFlag(0, name: "REG_A_10_FIELD_1")
+                    .WithFlag(1, name: "REG_A_10_FIELD_2")
+                    .WithValueField(2, 3, name: "REG_A_10_FIELD_3")
+                    .WithValueField(5, 8, name: "REG_A_10_FIELD_4")
+                    .WithValueField(13, 3, name: "REG_A_10_FIELD_5")
+                    .WithValueField(16, 2, name: "REG_A_10_FIELD_6")
+                    .WithValueField(18, 8, name: "REG_A_10_FIELD_7")
+                    .WithValueField(26, 3, name: "REG_A_10_FIELD_8")
+                    .WithFlag(29, name: "REG_A_10_FIELD_9")
+                    .WithFlag(30, name: "REG_A_10_FIELD_10")
+                    .WithFlag(31, name: "REG_A_10_FIELD_11")
+                },
+                {(long)Registers_A.RegA_11, new DoubleWordRegister(this, 0x5140A800)
+                    .WithFlag(0, name: "REG_A_11_FIELD_1")
+                    .WithValueField(1, 2, name: "REG_A_11_FIELD_2")
+                    .WithValueField(3, 6, name: "REG_A_11_FIELD_3")
+                    .WithValueField(9, 4, name: "REG_A_11_FIELD_4")
+                    .WithFlag(13, name: "REG_A_11_FIELD_5")
+                    .WithValueField(14, 5, name: "REG_A_11_FIELD_6")
+                    .WithValueField(19, 8, name: "REG_A_11_FIELD_7")
+                    .WithValueField(27, 5, name: "REG_A_11_FIELD_8")
+                },
+                {(long)Registers_A.RegA_12, new DoubleWordRegister(this, 0x0000000E)
+                    .WithValueField(0, 16, name: "REG_A_12_FIELD_1")
+                    .WithReservedBits(16, 7)
+                    .WithFlag(23, name: "REG_A_12_FIELD_2")
+                    .WithFlag(24, name: "REG_A_12_FIELD_3")
+                    .WithValueField(25, 3, name: "REG_A_12_FIELD_4")
+                    .WithFlag(28, name: "REG_A_12_FIELD_5")
+                    .WithFlag(29, name: "REG_A_12_FIELD_6")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "REG_A_12_FIELD_7")
+                },
+                {(long)Registers_A.RegA_13, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "REG_A_13_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_13_FIELD_2")
+                    .WithReservedBits(24, 6)
+                    .WithFlag(30, name: "REG_A_13_FIELD_3")
+                    .WithFlag(31, name: "REG_A_13_FIELD_4")
+                },
+                {(long)Registers_A.RegA_14, new DoubleWordRegister(this, 0x0003AAA8)
+                    .WithValueField(0, 18, name: "REG_A_14_FIELD_1")
+                    .WithFlag(18, name: "REG_A_14_FIELD_2")
+                    .WithValueField(19, 12, name: "REG_A_14_FIELD_3")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_A.RegA_16, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_A_16_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_16_FIELD_2")
+                    .WithFlag(16, name: "REG_A_16_FIELD_3")
+                    .WithValueField(17, 4, name: "REG_A_16_FIELD_4")
+                    .WithValueField(21, 8, name: "REG_A_16_FIELD_5")
+                    .WithFlag(29, name: "REG_A_16_FIELD_6")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_A.RegA_17, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_A_17_FIELD_1")
+                    .WithValueField(1, 4, name: "REG_A_17_FIELD_2")
+                    .WithValueField(5, 4, name: "REG_A_17_FIELD_3")
+                    .WithValueField(9, 5, name: "REG_A_17_FIELD_4")
+                    .WithFlag(14, name: "REG_A_17_FIELD_5")
+                    .WithFlag(15, name: "REG_A_17_FIELD_6")
+                    .WithFlag(16, name: "REG_A_17_FIELD_7")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_A.RegA_21, new DoubleWordRegister(this, 0x00813187)
+                    .WithValueField(0, 4, name: "REG_A_21_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_A_21_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_A_21_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_A_21_FIELD_4")
+                    .WithValueField(16, 4, name: "REG_A_21_FIELD_5")
+                    .WithValueField(20, 6, name: "REG_A_21_FIELD_6")
+                    .WithValueField(26, 5, name: "REG_A_21_FIELD_7")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_A.RegA_22, new DoubleWordRegister(this, 0xD607060E)
+                    .WithValueField(0, 9, name: "REG_A_22_FIELD_1")
+                    .WithFlag(9, name: "REG_A_22_FIELD_2")
+                    .WithFlag(10, name: "REG_A_22_FIELD_3")
+                    .WithReservedBits(11, 5)
+                    .WithValueField(16, 8, name: "REG_A_22_FIELD_4")
+                    .WithValueField(24, 4, name: "REG_A_22_FIELD_5")
+                    .WithValueField(28, 4, name: "REG_A_22_FIELD_6")
+                },
+                {(long)Registers_A.RegA_23, new DoubleWordRegister(this, 0x00000037)
+                    .WithValueField(0, 32, name: "REG_A_23_FIELD_1")
+                },
+                {(long)Registers_A.RegA_24, new DoubleWordRegister(this, 0x06050403)
+                    .WithValueField(0, 8, name: "REG_A_24_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_24_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_24_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_24_FIELD_4")
+                },
+                {(long)Registers_A.RegA_25, new DoubleWordRegister(this, 0x00000008)
+                    .WithValueField(0, 8, name: "REG_A_25_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_A.RegA_26, new DoubleWordRegister(this, 0x00036D10)
+                    .WithValueField(0, 3, name: "REG_A_26_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_A_26_FIELD_2")
+                    .WithValueField(6, 3, name: "REG_A_26_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_A_26_FIELD_4")
+                    .WithValueField(12, 3, name: "REG_A_26_FIELD_5")
+                    .WithValueField(15, 3, name: "REG_A_26_FIELD_6")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_A.RegA_27, new DoubleWordRegister(this, 0x00003144)
+                    .WithValueField(0, 5, name: "REG_A_27_FIELD_1")
+                    .WithValueField(5, 7, name: "REG_A_27_FIELD_2")
+                    .WithValueField(12, 4, name: "REG_A_27_FIELD_3")
+                    .WithValueField(16, 8, name: "REG_A_27_FIELD_4")
+                    .WithFlag(24, name: "REG_A_27_FIELD_5")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_A.RegA_28, new DoubleWordRegister(this, 0x0000F1BA)
+                    .WithValueField(0, 4, name: "REG_A_28_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_A_28_FIELD_2")
+                    .WithValueField(8, 5, name: "REG_A_28_FIELD_3")
+                    .WithValueField(13, 5, name: "REG_A_28_FIELD_4")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_A.RegA_29, new DoubleWordRegister(this, 0x00003000)
+                    .WithValueField(0, 12, name: "REG_A_29_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_29_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_30, new DoubleWordRegister(this, 0x0000A006)
+                    .WithValueField(0, 12, name: "REG_A_30_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_30_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_31, new DoubleWordRegister(this, 0x00015010)
+                    .WithValueField(0, 12, name: "REG_A_31_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_31_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_32, new DoubleWordRegister(this, 0x0002101D)
+                    .WithValueField(0, 12, name: "REG_A_32_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_32_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_33, new DoubleWordRegister(this, 0x0003F02F)
+                    .WithValueField(0, 12, name: "REG_A_33_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_33_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_34, new DoubleWordRegister(this, 0x0009F071)
+                    .WithValueField(0, 12, name: "REG_A_34_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_34_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_35, new DoubleWordRegister(this, 0x003FF0FF)
+                    .WithValueField(0, 12, name: "REG_A_35_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_35_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_36, new DoubleWordRegister(this, 0x00FFF7FF)
+                    .WithValueField(0, 12, name: "REG_A_36_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_A_36_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_37, new DoubleWordRegister(this, 0x0000007F)
+                    .WithValueField(0, 12, name: "REG_A_37_FIELD_1")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)Registers_A.RegA_38, new DoubleWordRegister(this, 0x0724C422)
+                    .WithValueField(0, 6, name: "REG_A_38_FIELD_1")
+                    .WithValueField(6, 6, name: "REG_A_38_FIELD_2")
+                    .WithValueField(12, 6, name: "REG_A_38_FIELD_3")
+                    .WithValueField(18, 6, name: "REG_A_38_FIELD_4")
+                    .WithValueField(24, 6, name: "REG_A_38_FIELD_5")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_A.RegA_39, new DoubleWordRegister(this, 0x000420C5)
+                    .WithValueField(0, 6, name: "REG_A_39_FIELD_1")
+                    .WithValueField(6, 6, name: "REG_A_39_FIELD_2")
+                    .WithValueField(12, 6, name: "REG_A_39_FIELD_3")
+                    .WithValueField(18, 6, name: "REG_A_39_FIELD_4")
+                    .WithValueField(24, 6, name: "REG_A_39_FIELD_5")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_A.RegA_40, new DoubleWordRegister(this, 0x76543210)
+                    .WithValueField(0, 4, name: "REG_A_40_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_A_40_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_A_40_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_A_40_FIELD_4")
+                    .WithValueField(16, 4, name: "REG_A_40_FIELD_5")
+                    .WithValueField(20, 4, name: "REG_A_40_FIELD_6")
+                    .WithValueField(24, 4, name: "REG_A_40_FIELD_7")
+                    .WithValueField(28, 4, name: "REG_A_40_FIELD_8")
+                },
+                {(long)Registers_A.RegA_41, new DoubleWordRegister(this, 0x00000A98)
+                    .WithValueField(0, 4, name: "REG_A_41_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_A_41_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_A_41_FIELD_3")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)Registers_A.RegA_43, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_A_43_FIELD_1")
+                    .WithFlag(1, name: "REG_A_43_FIELD_2")
+                    .WithFlag(2, name: "REG_A_43_FIELD_3")
+                    .WithFlag(3, name: "REG_A_43_FIELD_4")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_A.RegA_47, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_A_47_FIELD_1")
+                    .WithValueField(2, 7, name: "REG_A_47_FIELD_2")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_A.RegA_48, new DoubleWordRegister(this, 0x000A0001)
+                    .WithValueField(0, 12, name: "REG_A_48_FIELD_1")
+                    .WithReservedBits(12, 4)
+                    .WithValueField(16, 12, name: "REG_A_48_FIELD_2")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_A.RegA_49, new DoubleWordRegister(this, 0x00280001)
+                    .WithValueField(0, 12, name: "REG_A_49_FIELD_1")
+                    .WithReservedBits(12, 4)
+                    .WithValueField(16, 12, name: "REG_A_49_FIELD_2")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_A.RegA_50, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_A_50_FIELD_1")
+                },
+                {(long)Registers_A.RegA_51, new DoubleWordRegister(this, 0x00000004)
+                    .WithValueField(0, 5, name: "REG_A_51_FIELD_1")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_A.RegA_52, new DoubleWordRegister(this, 0x00036D11)
+                    .WithValueField(0, 3, name: "REG_A_52_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_A_52_FIELD_2")
+                    .WithValueField(6, 3, name: "REG_A_52_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_A_52_FIELD_4")
+                    .WithValueField(12, 3, name: "REG_A_52_FIELD_5")
+                    .WithValueField(15, 3, name: "REG_A_52_FIELD_6")
+                    .WithFlag(18, name: "REG_A_52_FIELD_7")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_A.RegA_53, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_A_53_FIELD_1")
+                    .WithFlag(8, FieldMode.Read, name: "REG_A_53_FIELD_2")
+                    .WithFlag(9, FieldMode.Read, name: "REG_A_53_FIELD_3")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)Registers_A.RegA_54, new DoubleWordRegister(this, 0x00200000)
+                    .WithValueField(0, 3, name: "REG_A_54_FIELD_1")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 3, name: "REG_A_54_FIELD_2")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 3, name: "REG_A_54_FIELD_3")
+                    .WithReservedBits(11, 1)
+                    .WithValueField(12, 3, name: "REG_A_54_FIELD_4")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 3, name: "REG_A_54_FIELD_5")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 3, name: "REG_A_54_FIELD_6")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)Registers_A.RegA_55, new DoubleWordRegister(this, 0x00044222)
+                    .WithValueField(0, 3, name: "REG_A_55_FIELD_1")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 3, name: "REG_A_55_FIELD_2")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 3, name: "REG_A_55_FIELD_3")
+                    .WithReservedBits(11, 1)
+                    .WithValueField(12, 3, name: "REG_A_55_FIELD_4")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 3, name: "REG_A_55_FIELD_5")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_A.RegA_56, new DoubleWordRegister(this, 0x000003FE)
+                    .WithValueField(0, 10, name: "REG_A_56_FIELD_1")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)Registers_A.RegA_57, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_A_57_FIELD_1")
+                    .WithReservedBits(1, 1)
+                    .WithFlag(2, name: "REG_A_57_FIELD_2")
+                    .WithFlag(3, name: "REG_A_57_FIELD_3")
+                    .WithFlag(4, name: "REG_A_57_FIELD_4")
+                    .WithFlag(5, name: "REG_A_57_FIELD_5")
+                    .WithFlag(6, name: "REG_A_57_FIELD_6")
+                    .WithReservedBits(7, 1)
+                    .WithFlag(8, name: "REG_A_57_FIELD_7")
+                    .WithFlag(9, name: "REG_A_57_FIELD_8")
+                    .WithFlag(10, name: "REG_A_57_FIELD_9")
+                    .WithFlag(11, name: "REG_A_57_FIELD_10")
+                    .WithFlag(12, name: "REG_A_57_FIELD_11")
+                    .WithFlag(13, name: "REG_A_57_FIELD_12")
+                    .WithFlag(14, name: "REG_A_57_FIELD_13")
+                    .WithFlag(15, name: "REG_A_57_FIELD_14")
+                    .WithFlag(16, name: "REG_A_57_FIELD_15")
+                    .WithFlag(17, name: "REG_A_57_FIELD_16")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_A.RegA_58, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_A_58_FIELD_1")
+                    .WithReservedBits(1, 1)
+                    .WithFlag(2, name: "REG_A_58_FIELD_2")
+                    .WithFlag(3, name: "REG_A_58_FIELD_3")
+                    .WithFlag(4, name: "REG_A_58_FIELD_4")
+                    .WithFlag(5, name: "REG_A_58_FIELD_5")
+                    .WithFlag(6, name: "REG_A_58_FIELD_6")
+                    .WithReservedBits(7, 1)
+                    .WithFlag(8, name: "REG_A_58_FIELD_7")
+                    .WithFlag(9, name: "REG_A_58_FIELD_8")
+                    .WithFlag(10, name: "REG_A_58_FIELD_9")
+                    .WithFlag(11, name: "REG_A_58_FIELD_10")
+                    .WithFlag(12, name: "REG_A_58_FIELD_11")
+                    .WithFlag(13, name: "REG_A_58_FIELD_12")
+                    .WithFlag(14, name: "REG_A_58_FIELD_13")
+                    .WithFlag(15, name: "REG_A_58_FIELD_14")
+                    .WithFlag(16, name: "REG_A_58_FIELD_15")
+                    .WithFlag(17, name: "REG_A_58_FIELD_16")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_A.RegA_59, new DoubleWordRegister(this, 0x00004400)
+                    .WithValueField(0, 10, name: "REG_A_59_FIELD_1")
+                    .WithValueField(10, 4, name: "REG_A_59_FIELD_2")
+                    .WithValueField(14, 4, name: "REG_A_59_FIELD_3")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_A.RegA_60, new DoubleWordRegister(this, 0x00076000)
+                    .WithValueField(0, 4, name: "REG_A_60_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_A_60_FIELD_2")
+                    .WithValueField(8, 2, name: "REG_A_60_FIELD_3")
+                    .WithFlag(10, name: "REG_A_60_FIELD_4")
+                    .WithFlag(11, name: "REG_A_60_FIELD_5")
+                    .WithValueField(12, 7, name: "REG_A_60_FIELD_6")
+                    .WithFlag(19, name: "REG_A_60_FIELD_7")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)Registers_A.RegA_61, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_A_61_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_A.RegA_62, new DoubleWordRegister(this, 0x10171E26)
+                    .WithValueField(0, 8, name: "REG_A_62_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_62_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_62_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_62_FIELD_4")
+                },
+                {(long)Registers_A.RegA_63, new DoubleWordRegister(this, 0xF0F8FF04)
+                    .WithValueField(0, 8, name: "REG_A_63_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_63_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_63_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_63_FIELD_4")
+                },
+                {(long)Registers_A.RegA_64, new DoubleWordRegister(this, 0xCED7E0E8)
+                    .WithValueField(0, 8, name: "REG_A_64_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_64_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_64_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_64_FIELD_4")
+                },
+                {(long)Registers_A.RegA_65, new DoubleWordRegister(this, 0xADB5BDC5)
+                    .WithValueField(0, 8, name: "REG_A_65_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_65_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_65_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_65_FIELD_4")
+                },
+                {(long)Registers_A.RegA_66, new DoubleWordRegister(this, 0x0C141C24)
+                    .WithValueField(0, 8, name: "REG_A_66_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_66_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_66_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_66_FIELD_4")
+                },
+                {(long)Registers_A.RegA_67, new DoubleWordRegister(this, 0xEBF4FC04)
+                    .WithValueField(0, 8, name: "REG_A_67_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_67_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_67_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_67_FIELD_4")
+                },
+                {(long)Registers_A.RegA_68, new DoubleWordRegister(this, 0x0000DBE3)
+                    .WithValueField(0, 8, name: "REG_A_68_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_68_FIELD_2")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_A.RegA_69, new DoubleWordRegister(this, 0x211A1410)
+                    .WithValueField(0, 8, name: "REG_A_69_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_69_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_69_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_69_FIELD_4")
+                },
+                {(long)Registers_A.RegA_70, new DoubleWordRegister(this, 0x51403429)
+                    .WithValueField(0, 8, name: "REG_A_70_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_70_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_70_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_A_70_FIELD_4")
+                },
+                {(long)Registers_A.RegA_71, new DoubleWordRegister(this, 0x009B7E67)
+                    .WithValueField(0, 8, name: "REG_A_71_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_A_71_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_A_71_FIELD_3")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_A.RegA_72, new DoubleWordRegister(this, 0x01E10088)
+                    .WithValueField(0, 9, name: "REG_A_72_FIELD_1")
+                    .WithValueField(9, 9, name: "REG_A_72_FIELD_2")
+                    .WithValueField(18, 9, name: "REG_A_72_FIELD_3")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_A.RegA_73, new DoubleWordRegister(this, 0x0180D070)
+                    .WithValueField(0, 9, name: "REG_A_73_FIELD_1")
+                    .WithValueField(9, 9, name: "REG_A_73_FIELD_2")
+                    .WithValueField(18, 9, name: "REG_A_73_FIELD_3")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_A.RegA_74, new DoubleWordRegister(this, 0x0120A058)
+                    .WithValueField(0, 9, name: "REG_A_74_FIELD_1")
+                    .WithValueField(9, 9, name: "REG_A_74_FIELD_2")
+                    .WithValueField(18, 9, name: "REG_A_74_FIELD_3")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_A.RegA_75, new DoubleWordRegister(this, 0x00007040)
+                    .WithValueField(0, 9, name: "REG_A_75_FIELD_1")
+                    .WithValueField(9, 9, name: "REG_A_75_FIELD_2")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_A.RegA_76, new DoubleWordRegister(this, 0x06A30E00)
+                    .WithValueField(0, 6, name: "REG_A_76_FIELD_1")
+                    .WithValueField(6, 6, name: "REG_A_76_FIELD_2")
+                    .WithValueField(12, 6, name: "REG_A_76_FIELD_3")
+                    .WithValueField(18, 6, name: "REG_A_76_FIELD_4")
+                    .WithValueField(24, 2, name: "REG_A_76_FIELD_5")
+                    .WithValueField(26, 2, name: "REG_A_76_FIELD_6")
+                    .WithValueField(28, 2, name: "REG_A_76_FIELD_7")
+                    .WithValueField(30, 2, name: "REG_A_76_FIELD_8")
+                },
+                {(long)Registers_A.RegA_77, new DoubleWordRegister(this, 0x00002800)
+                    .WithFlag(0, name: "REG_A_77_FIELD_1")
+                    .WithValueField(1, 2, name: "REG_A_77_FIELD_2")
+                    .WithFlag(3, name: "REG_A_77_FIELD_3")
+                    .WithReservedBits(4, 3)
+                    .WithFlag(7, name: "REG_A_77_FIELD_4")
+                    .WithValueField(8, 2, name: "REG_A_77_FIELD_5")
+                    .WithValueField(10, 2, name: "REG_A_77_FIELD_6")
+                    .WithValueField(12, 2, name: "REG_A_77_FIELD_7")
+                    .WithFlag(14, name: "REG_A_77_FIELD_8")
+                    .WithReservedBits(15, 9)
+                    .WithFlag(24, name: "REG_A_77_FIELD_9")
+                    .WithFlag(25, name: "REG_A_77_FIELD_10")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_A.RegA_78, new DoubleWordRegister(this, 0x00281606)
+                    .WithValueField(0, 4, name: "REG_A_78_FIELD_1")
+                    .WithReservedBits(4, 4)
+                    .WithValueField(8, 9, name: "REG_A_78_FIELD_2")
+                    .WithReservedBits(17, 1)
+                    .WithValueField(18, 9, name: "REG_A_78_FIELD_3")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_A.RegA_79, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, FieldMode.Read, name: "REG_A_79_FIELD_1")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_A.RegA_80, new DoubleWordRegister(this, 0x00010100)
+                    .WithFlag(0, name: "REG_A_80_FIELD_1")
+                    .WithReservedBits(1, 7)
+                    .WithValueField(8, 6, name: "REG_A_80_FIELD_2")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 6, name: "REG_A_80_FIELD_3")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_A.RegA_81, new DoubleWordRegister(this, 0x02000100)
+                    .WithValueField(0, 16, name: "REG_A_81_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_A_81_FIELD_2")
+                },
             };
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
@@ -2121,7 +2617,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
-                {(long)Registers_G.RegG_3, new DoubleWordRegister(this, 0x00000008)
+                {(long)Registers_G.RegG_1, new DoubleWordRegister(this, 0x00000006)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_G_1_FIELD_1")
+                },
+                {(long)Registers_G.RegG_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_G.RegG_3, new DoubleWordRegister(this)
                     .WithFlag(0, out field_220, name: "REG_G_3_FIELD_1")
                     .WithFlag(1, out field_227, name: "REG_G_3_FIELD_2")
                     .WithFlag(2, out field_223, name: "REG_G_3_FIELD_3")
@@ -2201,7 +2704,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(1, 31)
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
-                {(long)Registers_G.RegG_7, new DoubleWordRegister(this, 0x00000008)
+                {(long)Registers_G.RegG_7, new DoubleWordRegister(this)
                     .WithFlag(0, out field_203, name: "REG_G_7_FIELD_1")
                     .WithFlag(1, out field_208, name: "REG_G_7_FIELD_2")
                     .WithFlag(2, out field_205, name: "REG_G_7_FIELD_3")
@@ -2398,7 +2901,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(16, 2)
                     .WithValueField(18, 14, FieldMode.Read, name: "REG_G_12_FIELD_6")
                 },
-                {(long)Registers_G.RegG_69, new DoubleWordRegister(this)
+                {(long)Registers_G.RegG_69, new DoubleWordRegister(this, 0x00FA53E8)
                     .WithValueField(0, 32, name: "REG_G_69_FIELD_1")
                 },
                 {(long)Registers_G.RegG_56, new DoubleWordRegister(this, 0x00000555)
@@ -2418,7 +2921,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                   .WithValueField(16, 8, out field_172, name: "REG_G_57_FIELD_3")
                   .WithValueField(24, 8, out field_173, name: "REG_G_57_FIELD_4")
                 },
-                {(long)Registers_G.RegG_222, new DoubleWordRegister(this)
+                {(long)Registers_G.RegG_222, new DoubleWordRegister(this, 0x00206100)
                     .WithFlag(0, out field_229, name: "REG_G_222_FIELD_1")
                     .WithFlag(1, name: "REG_G_222_FIELD_2")
                     .WithValueField(2, 7, name: "REG_G_222_FIELD_3")
@@ -2428,6 +2931,1525 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(24, 4, name: "REG_G_222_FIELD_7")
                     .WithValueField(28, 4, name: "REG_G_222_FIELD_8")
                 },
+                {(long)Registers_G.RegG_13, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, FieldMode.Read, name: "REG_G_13_FIELD_1")
+                    .WithValueField(11, 11, FieldMode.Read, name: "REG_G_13_FIELD_2")
+                    .WithFlag(22, FieldMode.Read, name: "REG_G_13_FIELD_3")
+                    .WithFlag(23, FieldMode.Read, name: "REG_G_13_FIELD_4")
+                    .WithReservedBits(24, 1)
+                    .WithFlag(25, FieldMode.Read, name: "REG_G_13_FIELD_5")
+                    .WithFlag(26, FieldMode.Read, name: "REG_G_13_FIELD_6")
+                    .WithFlag(27, FieldMode.Read, name: "REG_G_13_FIELD_7")
+                    .WithFlag(28, FieldMode.Read, name: "REG_G_13_FIELD_8")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_G.RegG_14, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, FieldMode.Read, name: "REG_G_14_FIELD_1")
+                    .WithReservedBits(9, 7)
+                    .WithValueField(16, 9, FieldMode.Read, name: "REG_G_14_FIELD_2")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_G.RegG_15, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, FieldMode.Read, name: "REG_G_15_FIELD_1")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_G.RegG_16, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "REG_G_16_FIELD_1")
+                    .WithValueField(10, 10, FieldMode.Read, name: "REG_G_16_FIELD_2")
+                    .WithReservedBits(20, 10)
+                    .WithFlag(30, FieldMode.Read, name: "REG_G_16_FIELD_3")
+                    .WithFlag(31, FieldMode.Read, name: "REG_G_16_FIELD_4")
+                },
+                {(long)Registers_G.RegG_17, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, FieldMode.Read, name: "REG_G_17_FIELD_1")
+                    .WithValueField(6, 13, FieldMode.Read, name: "REG_G_17_FIELD_2")
+                    .WithValueField(19, 10, FieldMode.Read, name: "REG_G_17_FIELD_3")
+                    .WithFlag(29, FieldMode.Read, name: "REG_G_17_FIELD_4")
+                    .WithFlag(30, FieldMode.Read, name: "REG_G_17_FIELD_5")
+                    .WithFlag(31, FieldMode.Read, name: "REG_G_17_FIELD_6")
+                },
+                {(long)Registers_G.RegG_18, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_G_18_FIELD_1")
+                    .WithValueField(8, 8, FieldMode.Read, name: "REG_G_18_FIELD_2")
+                    .WithValueField(16, 4, FieldMode.Read, name: "REG_G_18_FIELD_3")
+                    .WithFlag(20, FieldMode.Read, name: "REG_G_18_FIELD_4")
+                    .WithValueField(21, 4, FieldMode.Read, name: "REG_G_18_FIELD_5")
+                    .WithValueField(25, 7, FieldMode.Read, name: "REG_G_18_FIELD_6")
+                },
+                {(long)Registers_G.RegG_19, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "REG_G_19_FIELD_1")
+                    .WithFlag(1, FieldMode.Read, name: "REG_G_19_FIELD_2")
+                    .WithFlag(2, FieldMode.Read, name: "REG_G_19_FIELD_3")
+                    .WithFlag(3, FieldMode.Read, name: "REG_G_19_FIELD_4")
+                    .WithReservedBits(4, 4)
+                    .WithValueField(8, 5, FieldMode.Read, name: "REG_G_19_FIELD_5")
+                    .WithValueField(13, 5, FieldMode.Read, name: "REG_G_19_FIELD_6")
+                    .WithValueField(18, 4, FieldMode.Read, name: "REG_G_19_FIELD_7")
+                    .WithValueField(22, 5, FieldMode.Read, name: "REG_G_19_FIELD_8")
+                    .WithReservedBits(27, 1)
+                    .WithFlag(28, FieldMode.Read, name: "REG_G_19_FIELD_9")
+                    .WithFlag(29, FieldMode.Read, name: "REG_G_19_FIELD_10")
+                    .WithFlag(30, FieldMode.Read, name: "REG_G_19_FIELD_11")
+                    .WithFlag(31, FieldMode.Read, name: "REG_G_19_FIELD_12")
+                },
+                {(long)Registers_G.RegG_20, new DoubleWordRegister(this)
+                    .WithValueField(0, 13, FieldMode.Read, name: "REG_G_20_FIELD_1")
+                    .WithValueField(13, 11, FieldMode.Read, name: "REG_G_20_FIELD_2")
+                    .WithValueField(24, 8, FieldMode.Read, name: "REG_G_20_FIELD_3")
+                },
+                {(long)Registers_G.RegG_21, new DoubleWordRegister(this)
+                    .WithValueField(0, 19, name: "REG_G_21_FIELD_1")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 5, name: "REG_G_21_FIELD_2")
+                    .WithReservedBits(25, 3)
+                    .WithValueField(28, 4, name: "REG_G_21_FIELD_3")
+                },
+                {(long)Registers_G.RegG_22, new DoubleWordRegister(this)
+                    .WithValueField(0, 19, name: "REG_G_22_FIELD_1")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 5, name: "REG_G_22_FIELD_2")
+                    .WithReservedBits(25, 3)
+                    .WithValueField(28, 4, name: "REG_G_22_FIELD_3")
+                },
+                {(long)Registers_G.RegG_23, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 4)
+                    .WithFlag(4, name: "REG_G_23_FIELD_1")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_G.RegG_26, new DoubleWordRegister(this, 0x00001000)
+                    .WithValueField(0, 8, name: "REG_G_26_FIELD_1")
+                    .WithFlag(8, name: "REG_G_26_FIELD_2")
+                    .WithFlag(9, name: "REG_G_26_FIELD_3")
+                    .WithValueField(10, 2, name: "REG_G_26_FIELD_4")
+                    .WithValueField(12, 3, name: "REG_G_26_FIELD_5")
+                    .WithValueField(15, 4, name: "REG_G_26_FIELD_6")
+                    .WithValueField(19, 4, name: "REG_G_26_FIELD_7")
+                    .WithValueField(23, 2, name: "REG_G_26_FIELD_8")
+                    .WithValueField(25, 2, name: "REG_G_26_FIELD_9")
+                    .WithValueField(27, 2, name: "REG_G_26_FIELD_10")
+                    .WithFlag(29, name: "REG_G_26_FIELD_11")
+                    .WithValueField(30, 2, name: "REG_G_26_FIELD_12")
+                },
+                {(long)Registers_G.RegG_27, new DoubleWordRegister(this, 0x00008000)
+                    .WithFlag(0, name: "REG_G_27_FIELD_1")
+                    .WithValueField(1, 2, name: "REG_G_27_FIELD_2")
+                    .WithFlag(3, name: "REG_G_27_FIELD_3")
+                    .WithReservedBits(4, 3)
+                    .WithFlag(7, name: "REG_G_27_FIELD_4")
+                    .WithValueField(8, 3, name: "REG_G_27_FIELD_5")
+                    .WithFlag(11, name: "REG_G_27_FIELD_6")
+                    .WithValueField(12, 2, name: "REG_G_27_FIELD_7")
+                    .WithValueField(14, 2, name: "REG_G_27_FIELD_8")
+                    .WithValueField(16, 16, name: "REG_G_27_FIELD_9")
+                },
+                {(long)Registers_G.RegG_28, new DoubleWordRegister(this, 0x03000000)
+                    .WithValueField(0, 4, name: "REG_G_28_FIELD_1")
+                    .WithFlag(4, name: "REG_G_28_FIELD_2")
+                    .WithValueField(5, 5, name: "REG_G_28_FIELD_3")
+                    .WithValueField(10, 3, name: "REG_G_28_FIELD_4")
+                    .WithFlag(13, name: "REG_G_28_FIELD_5")
+                    .WithFlag(14, name: "REG_G_28_FIELD_6")
+                    .WithValueField(15, 7, name: "REG_G_28_FIELD_7")
+                    .WithFlag(22, name: "REG_G_28_FIELD_8")
+                    .WithValueField(23, 3, name: "REG_G_28_FIELD_9")
+                    .WithValueField(26, 2, name: "REG_G_28_FIELD_10")
+                    .WithFlag(28, name: "REG_G_28_FIELD_11")
+                    .WithFlag(29, name: "REG_G_28_FIELD_12")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "REG_G_28_FIELD_13")
+                },
+                {(long)Registers_G.RegG_29, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "REG_G_29_FIELD_1")
+                    .WithValueField(2, 2, name: "REG_G_29_FIELD_2")
+                    .WithValueField(4, 2, name: "REG_G_29_FIELD_3")
+                    .WithValueField(6, 3, name: "REG_G_29_FIELD_4")
+                    .WithFlag(9, name: "REG_G_29_FIELD_5")
+                    .WithFlag(10, name: "REG_G_29_FIELD_6")
+                    .WithFlag(11, name: "REG_G_29_FIELD_7")
+                    .WithValueField(12, 4, name: "REG_G_29_FIELD_8")
+                    .WithValueField(16, 4, name: "REG_G_29_FIELD_9")
+                    .WithValueField(20, 3, name: "REG_G_29_FIELD_10")
+                    .WithFlag(23, name: "REG_G_29_FIELD_11")
+                    .WithValueField(24, 3, name: "REG_G_29_FIELD_12")
+                    .WithFlag(27, name: "REG_G_29_FIELD_13")
+                    .WithFlag(28, name: "REG_G_29_FIELD_14")
+                    .WithFlag(29, name: "REG_G_29_FIELD_15")
+                    .WithFlag(30, name: "REG_G_29_FIELD_16")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_30, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, name: "REG_G_30_FIELD_1")
+                    .WithValueField(7, 4, name: "REG_G_30_FIELD_2")
+                    .WithFlag(11, name: "REG_G_30_FIELD_3")
+                    .WithFlag(12, name: "REG_G_30_FIELD_4")
+                    .WithFlag(13, name: "REG_G_30_FIELD_5")
+                    .WithFlag(14, name: "REG_G_30_FIELD_6")
+                    .WithValueField(15, 2, name: "REG_G_30_FIELD_7")
+                    .WithValueField(17, 3, name: "REG_G_30_FIELD_8")
+                    .WithFlag(20, name: "REG_G_30_FIELD_9")
+                    .WithFlag(21, name: "REG_G_30_FIELD_10")
+                    .WithFlag(22, name: "REG_G_30_FIELD_11")
+                    .WithFlag(23, name: "REG_G_30_FIELD_12")
+                    .WithReservedBits(24, 1)
+                    .WithValueField(25, 2, name: "REG_G_30_FIELD_13")
+                    .WithReservedBits(27, 1)
+                    .WithFlag(28, name: "REG_G_30_FIELD_14")
+                    .WithFlag(29, name: "REG_G_30_FIELD_15")
+                    .WithFlag(30, name: "REG_G_30_FIELD_16")
+                    .WithFlag(31, name: "REG_G_30_FIELD_17")
+                },
+                {(long)Registers_G.RegG_32, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "REG_G_32_FIELD_1")
+                    .WithValueField(5, 5, name: "REG_G_32_FIELD_2")
+                    .WithValueField(10, 3, name: "REG_G_32_FIELD_3")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)Registers_G.RegG_33, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_G_33_FIELD_1")
+                    .WithValueField(3, 14, name: "REG_G_33_FIELD_2")
+                    .WithValueField(17, 6, name: "REG_G_33_FIELD_3")
+                    .WithValueField(23, 3, name: "REG_G_33_FIELD_4")
+                    .WithValueField(26, 2, name: "REG_G_33_FIELD_5")
+                    .WithReservedBits(28, 1)
+                    .WithFlag(29, name: "REG_G_33_FIELD_6")
+                    .WithFlag(30, name: "REG_G_33_FIELD_7")
+                    .WithFlag(31, name: "REG_G_33_FIELD_8")
+                },
+                {(long)Registers_G.RegG_35, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_35_FIELD_1")
+                    .WithValueField(8, 4, name: "REG_G_35_FIELD_2")
+                    .WithValueField(12, 4, name: "REG_G_35_FIELD_3")
+                    .WithFlag(16, name: "REG_G_35_FIELD_4")
+                    .WithFlag(17, name: "REG_G_35_FIELD_5")
+                    .WithValueField(18, 3, name: "REG_G_35_FIELD_6")
+                    .WithValueField(21, 4, name: "REG_G_35_FIELD_7")
+                    .WithValueField(25, 4, name: "REG_G_35_FIELD_8")
+                    .WithFlag(29, name: "REG_G_35_FIELD_9")
+                    .WithValueField(30, 2, name: "REG_G_35_FIELD_10")
+                },
+                {(long)Registers_G.RegG_36, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_G_36_FIELD_1")
+                },
+                {(long)Registers_G.RegG_37, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_37_FIELD_1")
+                    .WithValueField(8, 5, name: "REG_G_37_FIELD_2")
+                    .WithValueField(13, 3, name: "REG_G_37_FIELD_3")
+                    .WithValueField(16, 3, name: "REG_G_37_FIELD_4")
+                    .WithValueField(19, 5, name: "REG_G_37_FIELD_5")
+                    .WithValueField(24, 5, name: "REG_G_37_FIELD_6")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_G.RegG_38, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 10)
+                    .WithValueField(10, 3, name: "REG_G_38_FIELD_1")
+                    .WithValueField(13, 2, name: "REG_G_38_FIELD_2")
+                    .WithFlag(15, name: "REG_G_38_FIELD_3")
+                    .WithValueField(16, 5, name: "REG_G_38_FIELD_4")
+                    .WithValueField(21, 3, name: "REG_G_38_FIELD_5")
+                    .WithFlag(24, name: "REG_G_38_FIELD_6")
+                    .WithFlag(25, name: "REG_G_38_FIELD_7")
+                    .WithFlag(26, name: "REG_G_38_FIELD_8")
+                    .WithFlag(27, name: "REG_G_38_FIELD_9")
+                    .WithFlag(28, name: "REG_G_38_FIELD_10")
+                    .WithValueField(29, 2, name: "REG_G_38_FIELD_11")
+                    .WithFlag(31, name: "REG_G_38_FIELD_12")
+                },
+                {(long)Registers_G.RegG_39, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "REG_G_39_FIELD_1")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_G.RegG_40, new DoubleWordRegister(this, 0x22130A04)
+                    .WithValueField(0, 8, name: "REG_G_40_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_40_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_40_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_40_FIELD_4")
+                },
+                {(long)Registers_G.RegG_41, new DoubleWordRegister(this, 0x4F4A4132)
+                    .WithValueField(0, 8, name: "REG_G_41_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_41_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_41_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_41_FIELD_4")
+                },
+                {(long)Registers_G.RegG_42, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_42_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_42_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_42_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_42_FIELD_4")
+                },
+                {(long)Registers_G.RegG_43, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_43_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_43_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_43_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_43_FIELD_4")
+                },
+                {(long)Registers_G.RegG_44, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_44_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_44_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_44_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_44_FIELD_4")
+                },
+                {(long)Registers_G.RegG_45, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_45_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_45_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_45_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_45_FIELD_4")
+                },
+                {(long)Registers_G.RegG_46, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_46_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_46_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_46_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_46_FIELD_4")
+                },
+                {(long)Registers_G.RegG_47, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_47_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_47_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_47_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_47_FIELD_4")
+                },
+                {(long)Registers_G.RegG_48, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_48_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_48_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_48_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_48_FIELD_4")
+                },
+                {(long)Registers_G.RegG_49, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_49_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_49_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_49_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_49_FIELD_4")
+                },
+                {(long)Registers_G.RegG_50, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_50_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_50_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_50_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_50_FIELD_4")
+                },
+                {(long)Registers_G.RegG_51, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_51_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_51_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_51_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_51_FIELD_4")
+                },
+                {(long)Registers_G.RegG_52, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_52_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_52_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_52_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_52_FIELD_4")
+                },
+                {(long)Registers_G.RegG_53, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_53_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_53_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_53_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_53_FIELD_4")
+                },
+                {(long)Registers_G.RegG_54, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_54_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_54_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_54_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_54_FIELD_4")
+                },
+                {(long)Registers_G.RegG_55, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_55_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_55_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_55_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_55_FIELD_4")
+                },
+                {(long)Registers_G.RegG_949, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_949_FIELD_1")
+                    .WithValueField(1, 9, name: "REG_G_949_FIELD_2")
+                    .WithValueField(10, 3, name: "REG_G_949_FIELD_3")
+                    .WithValueField(13, 6, name: "REG_G_949_FIELD_4")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_G.RegG_58, new DoubleWordRegister(this, 0x00000030)
+                    .WithFlag(0, name: "REG_G_58_FIELD_1")
+                    .WithFlag(1, name: "REG_G_58_FIELD_2")
+                    .WithFlag(2, name: "REG_G_58_FIELD_3")
+                    .WithFlag(3, name: "REG_G_58_FIELD_4")
+                    .WithValueField(4, 3, name: "REG_G_58_FIELD_5")
+                    .WithValueField(7, 2, name: "REG_G_58_FIELD_6")
+                    .WithFlag(9, name: "REG_G_58_FIELD_7")
+                    .WithValueField(10, 3, name: "REG_G_58_FIELD_8")
+                    .WithValueField(13, 8, name: "REG_G_58_FIELD_9")
+                    .WithReservedBits(21, 11)
+                },
+                {(long)Registers_G.RegG_59, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "REG_G_59_FIELD_1")
+                    .WithValueField(15, 15, name: "REG_G_59_FIELD_2")
+                    .WithFlag(30, name: "REG_G_59_FIELD_3")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_60, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "REG_G_60_FIELD_1")
+                    .WithValueField(15, 15, FieldMode.Read, name: "REG_G_60_FIELD_2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_61, new DoubleWordRegister(this, 0x000000FC)
+                    .WithValueField(0, 10, name: "REG_G_61_FIELD_1")
+                    .WithReservedBits(10, 2)
+                    .WithValueField(12, 15, name: "REG_G_61_FIELD_2")
+                    .WithFlag(27, name: "REG_G_61_FIELD_3")
+                    .WithValueField(28, 2, name: "REG_G_61_FIELD_4")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "REG_G_61_FIELD_5")
+                },
+                {(long)Registers_G.RegG_62, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_G_62_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_G_62_FIELD_2")
+                    .WithValueField(6, 3, name: "REG_G_62_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_G_62_FIELD_4")
+                    .WithValueField(12, 3, name: "REG_G_62_FIELD_5")
+                    .WithValueField(15, 3, name: "REG_G_62_FIELD_6")
+                    .WithValueField(18, 3, name: "REG_G_62_FIELD_7")
+                    .WithValueField(21, 3, name: "REG_G_62_FIELD_8")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_G.RegG_950, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_950_FIELD_1")
+                    .WithValueField(1, 15, name: "REG_G_950_FIELD_2")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_G.RegG_951, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_951_FIELD_1")
+                    .WithFlag(1, name: "REG_G_951_FIELD_2")
+                    .WithFlag(2, name: "REG_G_951_FIELD_3")
+                    .WithValueField(3, 2, name: "REG_G_951_FIELD_4")
+                    .WithValueField(5, 4, name: "REG_G_951_FIELD_5")
+                    .WithValueField(9, 7, name: "REG_G_951_FIELD_6")
+                    .WithValueField(16, 4, name: "REG_G_951_FIELD_7")
+                    .WithFlag(20, name: "REG_G_951_FIELD_8")
+                    .WithValueField(21, 4, name: "REG_G_951_FIELD_9")
+                    .WithValueField(25, 3, name: "REG_G_951_FIELD_10")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_G.RegG_63, new DoubleWordRegister(this)
+                    .WithValueField(0, 20, name: "REG_G_63_FIELD_1")
+                    .WithFlag(20, name: "REG_G_63_FIELD_2")
+                    .WithFlag(21, name: "REG_G_63_FIELD_3")
+                    .WithFlag(22, name: "REG_G_63_FIELD_4")
+                    .WithValueField(23, 2, name: "REG_G_63_FIELD_5")
+                    .WithValueField(25, 2, name: "REG_G_63_FIELD_6")
+                    .WithFlag(27, name: "REG_G_63_FIELD_7")
+                    .WithFlag(28, name: "REG_G_63_FIELD_8")
+                    .WithFlag(29, name: "REG_G_63_FIELD_9")
+                    .WithValueField(30, 2, name: "REG_G_63_FIELD_10")
+                },
+                {(long)Registers_G.RegG_64, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, FieldMode.Read, name: "REG_G_64_FIELD_1")
+                    .WithValueField(6, 5, FieldMode.Read, name: "REG_G_64_FIELD_2")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)Registers_G.RegG_65, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_65_FIELD_1")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_G.RegG_66, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_66_FIELD_1")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_G.RegG_67, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "REG_G_67_FIELD_1")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, FieldMode.Read, name: "REG_G_67_FIELD_2")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_G.RegG_68, new DoubleWordRegister(this, 0x0000010C)
+                    .WithFlag(0, name: "REG_G_68_FIELD_1")
+                    .WithFlag(1, name: "REG_G_68_FIELD_2")
+                    .WithValueField(2, 2, name: "REG_G_68_FIELD_3")
+                    .WithReservedBits(4, 4)
+                    .WithValueField(8, 5, name: "REG_G_68_FIELD_4")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)Registers_G.RegG_70, new DoubleWordRegister(this, 0x40000000)
+                    .WithValueField(0, 4, name: "REG_G_70_FIELD_1")
+                    .WithValueField(4, 11, name: "REG_G_70_FIELD_2")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 2, name: "REG_G_70_FIELD_3")
+                    .WithValueField(18, 3, name: "REG_G_70_FIELD_4")
+                    .WithValueField(21, 3, name: "REG_G_70_FIELD_5")
+                    .WithValueField(24, 4, name: "REG_G_70_FIELD_6")
+                    .WithFlag(28, name: "REG_G_70_FIELD_7")
+                    .WithFlag(29, name: "REG_G_70_FIELD_8")
+                    .WithValueField(30, 2, name: "REG_G_70_FIELD_9")
+                },
+                {(long)Registers_G.RegG_71, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_71_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_71_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_71_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_71_FIELD_4")
+                },
+                {(long)Registers_G.RegG_72, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_72_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_72_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_72_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_72_FIELD_4")
+                },
+                {(long)Registers_G.RegG_73, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_73_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_73_FIELD_2")
+                    .WithValueField(16, 4, name: "REG_G_73_FIELD_3")
+                    .WithValueField(20, 4, name: "REG_G_73_FIELD_4")
+                    .WithValueField(24, 4, name: "REG_G_73_FIELD_5")
+                    .WithValueField(28, 4, name: "REG_G_73_FIELD_6")
+                },
+                {(long)Registers_G.RegG_74, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "REG_G_74_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_G_74_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_G_74_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_G_74_FIELD_4")
+                    .WithValueField(16, 4, name: "REG_G_74_FIELD_5")
+                    .WithValueField(20, 4, name: "REG_G_74_FIELD_6")
+                    .WithValueField(24, 4, name: "REG_G_74_FIELD_7")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_G.RegG_75, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_75_FIELD_1")
+                    .WithValueField(8, 11, name: "REG_G_75_FIELD_2")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 8, name: "REG_G_75_FIELD_3")
+                    .WithValueField(28, 4, name: "REG_G_75_FIELD_4")
+                },
+                {(long)Registers_G.RegG_76, new DoubleWordRegister(this, 0x00000101)
+                    .WithValueField(0, 2, name: "REG_G_76_FIELD_1")
+                    .WithValueField(2, 6, name: "REG_G_76_FIELD_2")
+                    .WithFlag(8, name: "REG_G_76_FIELD_3")
+                    .WithValueField(9, 11, name: "REG_G_76_FIELD_4")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)Registers_G.RegG_77, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_77_FIELD_1")
+                    .WithFlag(1, name: "REG_G_77_FIELD_2")
+                    .WithFlag(2, name: "REG_G_77_FIELD_3")
+                    .WithFlag(3, name: "REG_G_77_FIELD_4")
+                    .WithFlag(4, name: "REG_G_77_FIELD_5")
+                    .WithValueField(5, 3, name: "REG_G_77_FIELD_6")
+                    .WithValueField(8, 8, name: "REG_G_77_FIELD_7")
+                    .WithValueField(16, 8, name: "REG_G_77_FIELD_8")
+                    .WithValueField(24, 8, name: "REG_G_77_FIELD_9")
+                },
+                {(long)Registers_G.RegG_78, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_78_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_78_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_78_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_78_FIELD_4")
+                },
+                {(long)Registers_G.RegG_79, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "REG_G_79_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_G_79_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_G_79_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_G_79_FIELD_4")
+                    .WithValueField(16, 8, name: "REG_G_79_FIELD_5")
+                    .WithValueField(24, 8, name: "REG_G_79_FIELD_6")
+                },
+                {(long)Registers_G.RegG_80, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_80_FIELD_1")
+                    .WithValueField(1, 10, name: "REG_G_80_FIELD_2")
+                    .WithValueField(11, 3, name: "REG_G_80_FIELD_3")
+                    .WithFlag(14, name: "REG_G_80_FIELD_4")
+                    .WithValueField(15, 3, name: "REG_G_80_FIELD_5")
+                    .WithFlag(18, name: "REG_G_80_FIELD_6")
+                    .WithFlag(19, name: "REG_G_80_FIELD_7")
+                    .WithValueField(20, 2, name: "REG_G_80_FIELD_8")
+                    .WithFlag(22, name: "REG_G_80_FIELD_9")
+                    .WithValueField(23, 5, name: "REG_G_80_FIELD_10")
+                    .WithFlag(28, name: "REG_G_80_FIELD_11")
+                    .WithFlag(29, name: "REG_G_80_FIELD_12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_82, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 8)
+                    .WithFlag(8, name: "REG_G_82_FIELD_1")
+                    .WithValueField(9, 8, name: "REG_G_82_FIELD_2")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_G.RegG_83, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_83_FIELD_1")
+                    .WithValueField(1, 5, name: "REG_G_83_FIELD_2")
+                    .WithFlag(6, name: "REG_G_83_FIELD_3")
+                    .WithFlag(7, name: "REG_G_83_FIELD_4")
+                    .WithFlag(8, name: "REG_G_83_FIELD_5")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_G.RegG_84, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_G_84_FIELD_1")
+                    .WithValueField(2, 2, name: "REG_G_84_FIELD_2")
+                    .WithValueField(4, 2, name: "REG_G_84_FIELD_3")
+                    .WithValueField(6, 2, name: "REG_G_84_FIELD_4")
+                    .WithValueField(8, 2, name: "REG_G_84_FIELD_5")
+                    .WithValueField(10, 2, name: "REG_G_84_FIELD_6")
+                    .WithValueField(12, 3, name: "REG_G_84_FIELD_7")
+                    .WithValueField(15, 3, name: "REG_G_84_FIELD_8")
+                    .WithValueField(18, 3, name: "REG_G_84_FIELD_9")
+                    .WithValueField(21, 2, name: "REG_G_84_FIELD_10")
+                    .WithValueField(23, 3, name: "REG_G_84_FIELD_11")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_G.RegG_85, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "REG_G_85_FIELD_1")
+                    .WithFlag(10, name: "REG_G_85_FIELD_2")
+                    .WithReservedBits(11, 1)
+                    .WithValueField(12, 18, name: "REG_G_85_FIELD_3")
+                    .WithFlag(30, name: "REG_G_85_FIELD_4")
+                    .WithFlag(31, name: "REG_G_85_FIELD_5")
+                },
+                {(long)Registers_G.RegG_86, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, name: "REG_G_86_FIELD_1")
+                    .WithFlag(17, name: "REG_G_86_FIELD_2")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_G.RegG_87, new DoubleWordRegister(this, 0x003C0000)
+                    .WithValueField(0, 6, name: "REG_G_87_FIELD_1")
+                    .WithValueField(6, 6, name: "REG_G_87_FIELD_2")
+                    .WithValueField(12, 2, name: "REG_G_87_FIELD_3")
+                    .WithFlag(14, name: "REG_G_87_FIELD_4")
+                    .WithFlag(15, name: "REG_G_87_FIELD_5")
+                    .WithFlag(16, name: "REG_G_87_FIELD_6")
+                    .WithValueField(17, 8, name: "REG_G_87_FIELD_7")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_G.RegG_88, new DoubleWordRegister(this, 0x0006AAAA)
+                    .WithValueField(0, 24, name: "REG_G_88_FIELD_1")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_G.RegG_89, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "REG_G_89_FIELD_1")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_G.RegG_90, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "REG_G_90_FIELD_1")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_G.RegG_91, new DoubleWordRegister(this)
+                    .WithValueField(0, 30, name: "REG_G_91_FIELD_1")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_92, new DoubleWordRegister(this, 0x00000004)
+                    .WithValueField(0, 5, name: "REG_G_92_FIELD_1")
+                    .WithReservedBits(5, 5)
+                    .WithValueField(10, 7, name: "REG_G_92_FIELD_2")
+                    .WithValueField(17, 7, name: "REG_G_92_FIELD_3")
+                    .WithReservedBits(24, 6)
+                    .WithFlag(30, name: "REG_G_92_FIELD_4")
+                    .WithFlag(31, name: "REG_G_92_FIELD_5")
+                },
+                {(long)Registers_G.RegG_93, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "REG_G_93_FIELD_1")
+                    .WithValueField(10, 10, name: "REG_G_93_FIELD_2")
+                    .WithValueField(20, 10, name: "REG_G_93_FIELD_3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_94, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "REG_G_94_FIELD_1")
+                    .WithValueField(11, 11, name: "REG_G_94_FIELD_2")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_G.RegG_95, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "REG_G_95_FIELD_1")
+                    .WithValueField(11, 12, name: "REG_G_95_FIELD_2")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)Registers_G.RegG_96, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "REG_G_96_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_G_96_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_G.RegG_97, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "REG_G_97_FIELD_1")
+                    .WithValueField(14, 14, name: "REG_G_97_FIELD_2")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_G.RegG_98, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "REG_G_98_FIELD_1")
+                    .WithValueField(14, 16, name: "REG_G_98_FIELD_2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_99, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_99_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_99_FIELD_2")
+                },
+                {(long)Registers_G.RegG_100, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "REG_G_100_FIELD_1")
+                    .WithValueField(10, 10, name: "REG_G_100_FIELD_2")
+                    .WithValueField(20, 10, name: "REG_G_100_FIELD_3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_101, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "REG_G_101_FIELD_1")
+                    .WithValueField(11, 11, name: "REG_G_101_FIELD_2")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_G.RegG_102, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "REG_G_102_FIELD_1")
+                    .WithValueField(11, 12, name: "REG_G_102_FIELD_2")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)Registers_G.RegG_103, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "REG_G_103_FIELD_1")
+                    .WithValueField(12, 12, name: "REG_G_103_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_G.RegG_104, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "REG_G_104_FIELD_1")
+                    .WithValueField(14, 14, name: "REG_G_104_FIELD_2")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_G.RegG_105, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "REG_G_105_FIELD_1")
+                    .WithValueField(14, 16, name: "REG_G_105_FIELD_2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_106, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_106_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_106_FIELD_2")
+                },
+                {(long)Registers_G.RegG_107, new DoubleWordRegister(this, 0x0000AA00)
+                    .WithFlag(0, name: "REG_G_107_FIELD_1")
+                    .WithFlag(1, name: "REG_G_107_FIELD_2")
+                    .WithReservedBits(2, 7)
+                    .WithValueField(9, 8, name: "REG_G_107_FIELD_3")
+                    .WithReservedBits(17, 11)
+                    .WithValueField(28, 2, name: "REG_G_107_FIELD_4")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "REG_G_107_FIELD_5")
+                },
+                {(long)Registers_G.RegG_108, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_G_108_FIELD_1")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_G.RegG_109, new DoubleWordRegister(this, 0x00100040)
+                    .WithValueField(0, 16, name: "REG_G_109_FIELD_1")
+                    .WithReservedBits(16, 4)
+                    .WithValueField(20, 2, name: "REG_G_109_FIELD_2")
+                    .WithReservedBits(22, 7)
+                    .WithFlag(29, name: "REG_G_109_FIELD_3")
+                    .WithFlag(30, name: "REG_G_109_FIELD_4")
+                    .WithFlag(31, name: "REG_G_109_FIELD_5")
+                },
+                {(long)Registers_G.RegG_110, new DoubleWordRegister(this, 0x3B3B3B3B)
+                    .WithValueField(0, 32, name: "REG_G_110_FIELD_1")
+                },
+                {(long)Registers_G.RegG_111, new DoubleWordRegister(this, 0x00001860)
+                    .WithFlag(0, name: "REG_G_111_FIELD_1")
+                    .WithReservedBits(1, 3)
+                    .WithValueField(4, 4, name: "REG_G_111_FIELD_2")
+                    .WithValueField(8, 2, name: "REG_G_111_FIELD_3")
+                    .WithValueField(10, 2, name: "REG_G_111_FIELD_4")
+                    .WithFlag(12, name: "REG_G_111_FIELD_5")
+                    .WithReservedBits(13, 3)
+                    .WithFlag(16, name: "REG_G_111_FIELD_6")
+                    .WithReservedBits(17, 13)
+                    .WithFlag(30, name: "REG_G_111_FIELD_7")
+                    .WithFlag(31, name: "REG_G_111_FIELD_8")
+                },
+                {(long)Registers_G.RegG_112, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_112_FIELD_1")
+                    .WithFlag(1, name: "REG_G_112_FIELD_2")
+                    .WithReservedBits(2, 14)
+                    .WithValueField(16, 16, name: "REG_G_112_FIELD_3")
+                },
+                {(long)Registers_G.RegG_113, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_113_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_113_FIELD_2")
+                },
+                {(long)Registers_G.RegG_114, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_114_FIELD_1")
+                    .WithReservedBits(1, 15)
+                    .WithValueField(16, 8, name: "REG_G_114_FIELD_2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_G.RegG_115, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_115_FIELD_1")
+                    .WithFlag(8, name: "REG_G_115_FIELD_2")
+                    .WithFlag(9, name: "REG_G_115_FIELD_3")
+                    .WithFlag(10, name: "REG_G_115_FIELD_4")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)Registers_G.RegG_116, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_116_FIELD_1")
+                    .WithFlag(1, name: "REG_G_116_FIELD_2")
+                    .WithReservedBits(2, 29)
+                    .WithFlag(31, name: "REG_G_116_FIELD_3")
+                },
+                {(long)Registers_G.RegG_117, new DoubleWordRegister(this, 0x0000000F)
+                    .WithValueField(0, 8, name: "REG_G_117_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_117_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_117_FIELD_3")
+                    .WithReservedBits(24, 6)
+                    .WithFlag(30, name: "REG_G_117_FIELD_4")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_118, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "REG_G_118_FIELD_1")
+                    .WithValueField(10, 9, name: "REG_G_118_FIELD_2")
+                    .WithReservedBits(19, 9)
+                    .WithFlag(28, name: "REG_G_118_FIELD_3")
+                    .WithFlag(29, name: "REG_G_118_FIELD_4")
+                    .WithFlag(30, name: "REG_G_118_FIELD_5")
+                    .WithFlag(31, name: "REG_G_118_FIELD_6")
+                },
+                {(long)Registers_G.RegG_119, new DoubleWordRegister(this, 0x01C70004)
+                    .WithValueField(0, 5, name: "REG_G_119_FIELD_1")
+                    .WithValueField(5, 8, name: "REG_G_119_FIELD_2")
+                    .WithFlag(13, name: "REG_G_119_FIELD_3")
+                    .WithFlag(14, name: "REG_G_119_FIELD_4")
+                    .WithFlag(15, name: "REG_G_119_FIELD_5")
+                    .WithValueField(16, 3, name: "REG_G_119_FIELD_6")
+                    .WithFlag(19, name: "REG_G_119_FIELD_7")
+                    .WithFlag(20, name: "REG_G_119_FIELD_8")
+                    .WithFlag(21, name: "REG_G_119_FIELD_9")
+                    .WithValueField(22, 4, name: "REG_G_119_FIELD_10")
+                    .WithValueField(26, 2, name: "REG_G_119_FIELD_11")
+                    .WithFlag(28, name: "REG_G_119_FIELD_12")
+                    .WithFlag(29, name: "REG_G_119_FIELD_13")
+                    .WithFlag(30, name: "REG_G_119_FIELD_14")
+                    .WithFlag(31, name: "REG_G_119_FIELD_15")
+                },
+                {(long)Registers_G.RegG_120, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, name: "REG_G_120_FIELD_1")
+                    .WithValueField(9, 7, name: "REG_G_120_FIELD_2")
+                    .WithValueField(16, 7, name: "REG_G_120_FIELD_3")
+                    .WithValueField(23, 8, name: "REG_G_120_FIELD_4")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_121, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_G_121_FIELD_1")
+                    .WithValueField(2, 8, name: "REG_G_121_FIELD_2")
+                    .WithValueField(10, 5, name: "REG_G_121_FIELD_3")
+                    .WithValueField(15, 3, name: "REG_G_121_FIELD_4")
+                    .WithValueField(18, 6, name: "REG_G_121_FIELD_5")
+                    .WithValueField(24, 7, name: "REG_G_121_FIELD_6")
+                    .WithFlag(31, name: "REG_G_121_FIELD_7")
+                },
+                {(long)Registers_G.RegG_122, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, name: "REG_G_122_FIELD_1")
+                    .WithValueField(6, 5, name: "REG_G_122_FIELD_2")
+                    .WithValueField(11, 2, name: "REG_G_122_FIELD_3")
+                    .WithFlag(13, name: "REG_G_122_FIELD_4")
+                    .WithFlag(14, name: "REG_G_122_FIELD_5")
+                    .WithFlag(15, name: "REG_G_122_FIELD_6")
+                    .WithValueField(16, 5, name: "REG_G_122_FIELD_7")
+                    .WithFlag(21, name: "REG_G_122_FIELD_8")
+                    .WithValueField(22, 7, name: "REG_G_122_FIELD_9")
+                    .WithValueField(29, 3, name: "REG_G_122_FIELD_10")
+                },
+                {(long)Registers_G.RegG_123, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, FieldMode.Read, name: "REG_G_123_FIELD_1")
+                    .WithFlag(4, FieldMode.Read, name: "REG_G_123_FIELD_2")
+                    .WithValueField(5, 7, FieldMode.Read, name: "REG_G_123_FIELD_3")
+                    .WithValueField(12, 5, FieldMode.Read, name: "REG_G_123_FIELD_4")
+                    .WithFlag(17, FieldMode.Read, name: "REG_G_123_FIELD_5")
+                    .WithFlag(18, FieldMode.Read, name: "REG_G_123_FIELD_6")
+                    .WithFlag(19, FieldMode.Read, name: "REG_G_123_FIELD_7")
+                    .WithValueField(20, 2, FieldMode.Read, name: "REG_G_123_FIELD_8")
+                    .WithValueField(22, 6, FieldMode.Read, name: "REG_G_123_FIELD_9")
+                    .WithFlag(28, FieldMode.Read, name: "REG_G_123_FIELD_10")
+                    .WithFlag(29, FieldMode.Read, name: "REG_G_123_FIELD_11")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_124, new DoubleWordRegister(this)
+                    .WithValueField(0, 30, name: "REG_G_124_FIELD_1")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_125, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_125_FIELD_1")
+                    .WithFlag(1, name: "REG_G_125_FIELD_2")
+                    .WithFlag(2, name: "REG_G_125_FIELD_3")
+                    .WithFlag(3, name: "REG_G_125_FIELD_4")
+                    .WithFlag(4, name: "REG_G_125_FIELD_5")
+                    .WithValueField(5, 4, name: "REG_G_125_FIELD_6")
+                    .WithValueField(9, 3, name: "REG_G_125_FIELD_7")
+                    .WithValueField(12, 3, name: "REG_G_125_FIELD_8")
+                    .WithValueField(15, 5, name: "REG_G_125_FIELD_9")
+                    .WithValueField(20, 8, name: "REG_G_125_FIELD_10")
+                    .WithFlag(28, name: "REG_G_125_FIELD_11")
+                    .WithValueField(29, 3, name: "REG_G_125_FIELD_12")
+                },
+                {(long)Registers_G.RegG_126, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "REG_G_126_FIELD_1")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_G.RegG_127, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 31)
+                    .WithFlag(31, name: "REG_G_127_FIELD_1")
+                },
+                {(long)Registers_G.RegG_128, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_128_FIELD_1")
+                    .WithFlag(1, name: "REG_G_128_FIELD_2")
+                    .WithFlag(2, name: "REG_G_128_FIELD_3")
+                    .WithFlag(3, name: "REG_G_128_FIELD_4")
+                    .WithFlag(4, name: "REG_G_128_FIELD_5")
+                    .WithFlag(5, name: "REG_G_128_FIELD_6")
+                    .WithFlag(6, name: "REG_G_128_FIELD_7")
+                    .WithFlag(7, name: "REG_G_128_FIELD_8")
+                    .WithFlag(8, name: "REG_G_128_FIELD_9")
+                    .WithFlag(9, name: "REG_G_128_FIELD_10")
+                    .WithFlag(10, name: "REG_G_128_FIELD_11")
+                    .WithFlag(11, name: "REG_G_128_FIELD_12")
+                    .WithFlag(12, name: "REG_G_128_FIELD_13")
+                    .WithFlag(13, name: "REG_G_128_FIELD_14")
+                    .WithFlag(14, name: "REG_G_128_FIELD_15")
+                    .WithFlag(15, name: "REG_G_128_FIELD_16")
+                    .WithFlag(16, name: "REG_G_128_FIELD_17")
+                    .WithFlag(17, name: "REG_G_128_FIELD_18")
+                    .WithFlag(18, name: "REG_G_128_FIELD_19")
+                    .WithFlag(19, name: "REG_G_128_FIELD_20")
+                    .WithFlag(20, name: "REG_G_128_FIELD_21")
+                    .WithFlag(21, name: "REG_G_128_FIELD_22")
+                    .WithFlag(22, name: "REG_G_128_FIELD_23")
+                    .WithFlag(23, name: "REG_G_128_FIELD_24")
+                    .WithFlag(24, name: "REG_G_128_FIELD_25")
+                    .WithFlag(25, name: "REG_G_128_FIELD_26")
+                    .WithFlag(26, name: "REG_G_128_FIELD_27")
+                    .WithFlag(27, name: "REG_G_128_FIELD_28")
+                    .WithFlag(28, name: "REG_G_128_FIELD_29")
+                    .WithFlag(29, name: "REG_G_128_FIELD_30")
+                    .WithFlag(30, name: "REG_G_128_FIELD_31")
+                    .WithFlag(31, name: "REG_G_128_FIELD_32")
+                },
+                {(long)Registers_G.RegG_129, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_129_FIELD_1")
+                    .WithFlag(1, name: "REG_G_129_FIELD_2")
+                    .WithFlag(2, name: "REG_G_129_FIELD_3")
+                    .WithFlag(3, name: "REG_G_129_FIELD_4")
+                    .WithFlag(4, name: "REG_G_129_FIELD_5")
+                    .WithFlag(5, name: "REG_G_129_FIELD_6")
+                    .WithFlag(6, name: "REG_G_129_FIELD_7")
+                    .WithFlag(7, name: "REG_G_129_FIELD_8")
+                    .WithFlag(8, name: "REG_G_129_FIELD_9")
+                    .WithFlag(9, name: "REG_G_129_FIELD_10")
+                    .WithFlag(10, name: "REG_G_129_FIELD_11")
+                    .WithFlag(11, name: "REG_G_129_FIELD_12")
+                    .WithFlag(12, name: "REG_G_129_FIELD_13")
+                    .WithFlag(13, name: "REG_G_129_FIELD_14")
+                    .WithFlag(14, name: "REG_G_129_FIELD_15")
+                    .WithFlag(15, name: "REG_G_129_FIELD_16")
+                    .WithFlag(16, name: "REG_G_129_FIELD_17")
+                    .WithFlag(17, name: "REG_G_129_FIELD_18")
+                    .WithFlag(18, name: "REG_G_129_FIELD_19")
+                    .WithFlag(19, name: "REG_G_129_FIELD_20")
+                    .WithFlag(20, name: "REG_G_129_FIELD_21")
+                    .WithFlag(21, name: "REG_G_129_FIELD_22")
+                    .WithFlag(22, name: "REG_G_129_FIELD_23")
+                    .WithFlag(23, name: "REG_G_129_FIELD_24")
+                    .WithFlag(24, name: "REG_G_129_FIELD_25")
+                    .WithFlag(25, name: "REG_G_129_FIELD_26")
+                    .WithFlag(26, name: "REG_G_129_FIELD_27")
+                    .WithFlag(27, name: "REG_G_129_FIELD_28")
+                    .WithFlag(28, name: "REG_G_129_FIELD_29")
+                    .WithFlag(29, name: "REG_G_129_FIELD_30")
+                    .WithFlag(30, name: "REG_G_129_FIELD_31")
+                    .WithFlag(31, name: "REG_G_129_FIELD_32")
+                },
+                {(long)Registers_G.RegG_130, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_G_130_FIELD_1")
+                },
+                {(long)Registers_G.RegG_131, new DoubleWordRegister(this, 0x3675EE07)
+                    .WithValueField(0, 32, name: "REG_G_131_FIELD_1")
+                },
+                {(long)Registers_G.RegG_132, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, name: "REG_G_132_FIELD_1")
+                    .WithFlag(7, name: "REG_G_132_FIELD_2")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_G.RegG_133, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_G_133_FIELD_1")
+                    .WithFlag(2, name: "REG_G_133_FIELD_2")
+                    .WithValueField(3, 3, name: "REG_G_133_FIELD_3")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)Registers_G.RegG_134, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_134_FIELD_1")
+                    .WithValueField(1, 5, name: "REG_G_134_FIELD_2")
+                    .WithReservedBits(6, 1)
+                    .WithValueField(7, 6, name: "REG_G_134_FIELD_3")
+                    .WithFlag(13, name: "REG_G_134_FIELD_4")
+                    .WithFlag(14, name: "REG_G_134_FIELD_5")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_G.RegG_135, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "REG_G_135_FIELD_1")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 15, FieldMode.Read, name: "REG_G_135_FIELD_2")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_136, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "REG_G_136_FIELD_1")
+                    .WithFlag(15, name: "REG_G_136_FIELD_2")
+                    .WithValueField(16, 15, name: "REG_G_136_FIELD_3")
+                    .WithFlag(31, name: "REG_G_136_FIELD_4")
+                },
+                {(long)Registers_G.RegG_952, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "REG_G_952_FIELD_1")
+                    .WithFlag(15, name: "REG_G_952_FIELD_2")
+                    .WithValueField(16, 15, name: "REG_G_952_FIELD_3")
+                    .WithFlag(31, name: "REG_G_952_FIELD_4")
+                },
+                {(long)Registers_G.RegG_137, new DoubleWordRegister(this, 0x00080000)
+                    .WithValueField(0, 32, name: "REG_G_137_FIELD_1")
+                },
+                {(long)Registers_G.RegG_138, new DoubleWordRegister(this, 0x00000001)
+                    .WithValueField(0, 32, name: "REG_G_138_FIELD_1")
+                },
+                {(long)Registers_G.RegG_139, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "REG_G_139_FIELD_1")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, FieldMode.Read, name: "REG_G_139_FIELD_2")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_G.RegG_140, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "REG_G_140_FIELD_1")
+                    .WithValueField(17, 15, FieldMode.Read, name: "REG_G_140_FIELD_2")
+                },
+                {(long)Registers_G.RegG_141, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "REG_G_141_FIELD_1")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, FieldMode.Read, name: "REG_G_141_FIELD_2")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_G.RegG_142, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "REG_G_142_FIELD_1")
+                    .WithValueField(17, 15, FieldMode.Read, name: "REG_G_142_FIELD_2")
+                },
+                {(long)Registers_G.RegG_143, new DoubleWordRegister(this, 0x0200003F)
+                    .WithValueField(0, 6, name: "REG_G_143_FIELD_1")
+                    .WithReservedBits(6, 10)
+                    .WithValueField(16, 10, name: "REG_G_143_FIELD_2")
+                    .WithReservedBits(26, 4)
+                    .WithValueField(30, 2, name: "REG_G_143_FIELD_3")
+                },
+                {(long)Registers_G.RegG_144, new DoubleWordRegister(this, 0x0000FFFF)
+                    .WithValueField(0, 17, name: "REG_G_144_FIELD_1")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_G.RegG_145, new DoubleWordRegister(this, 0x0000FFFF)
+                    .WithValueField(0, 17, name: "REG_G_145_FIELD_1")
+                    .WithValueField(17, 15, name: "REG_G_145_FIELD_2")
+                },
+                {(long)Registers_G.RegG_146, new DoubleWordRegister(this, 0x000003FF)
+                    .WithValueField(0, 10, name: "REG_G_146_FIELD_1")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, name: "REG_G_146_FIELD_2")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_G.RegG_147, new DoubleWordRegister(this, 0x0000FFFF)
+                    .WithValueField(0, 17, name: "REG_G_147_FIELD_1")
+                    .WithReservedBits(17, 3)
+                    .WithValueField(20, 2, name: "REG_G_147_FIELD_2")
+                    .WithReservedBits(22, 2)
+                    .WithValueField(24, 6, name: "REG_G_147_FIELD_3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_148, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "REG_G_148_FIELD_1")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_G.RegG_149, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "REG_G_149_FIELD_1")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_G.RegG_150, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "REG_G_150_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_G_150_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_G_150_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_G_150_FIELD_4")
+                    .WithFlag(16, name: "REG_G_150_FIELD_5")
+                    .WithFlag(17, name: "REG_G_150_FIELD_6")
+                    .WithFlag(18, name: "REG_G_150_FIELD_7")
+                    .WithFlag(19, name: "REG_G_150_FIELD_8")
+                    .WithFlag(20, name: "REG_G_150_FIELD_9")
+                    .WithValueField(21, 5, name: "REG_G_150_FIELD_10")
+                    .WithValueField(26, 5, name: "REG_G_150_FIELD_11")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_151, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_151_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_151_FIELD_2")
+                },
+                {(long)Registers_G.RegG_152, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_152_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_152_FIELD_2")
+                },
+                {(long)Registers_G.RegG_153, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_153_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_153_FIELD_2")
+                },
+                {(long)Registers_G.RegG_154, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_154_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_154_FIELD_2")
+                },
+                {(long)Registers_G.RegG_155, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_G_155_FIELD_1")
+                },
+                {(long)Registers_G.RegG_156, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_156_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_156_FIELD_2")
+                },
+                {(long)Registers_G.RegG_157, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_157_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_157_FIELD_2")
+                },
+                {(long)Registers_G.RegG_158, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_158_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_158_FIELD_2")
+                },
+                {(long)Registers_G.RegG_159, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_159_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_159_FIELD_2")
+                },
+                {(long)Registers_G.RegG_160, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_160_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_160_FIELD_2")
+                },
+                {(long)Registers_G.RegG_161, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_161_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_161_FIELD_2")
+                },
+                {(long)Registers_G.RegG_162, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_162_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_162_FIELD_2")
+                },
+                {(long)Registers_G.RegG_163, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_163_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_163_FIELD_2")
+                },
+                {(long)Registers_G.RegG_164, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_164_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_164_FIELD_2")
+                },
+                {(long)Registers_G.RegG_165, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_165_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_165_FIELD_2")
+                },
+                {(long)Registers_G.RegG_166, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_166_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_166_FIELD_2")
+                },
+                {(long)Registers_G.RegG_167, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_167_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_167_FIELD_2")
+                },
+                {(long)Registers_G.RegG_168, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_G_168_FIELD_1")
+                },
+                {(long)Registers_G.RegG_169, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_169_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_169_FIELD_2")
+                },
+                {(long)Registers_G.RegG_170, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_170_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_170_FIELD_2")
+                },
+                {(long)Registers_G.RegG_171, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_171_FIELD_1")
+                    .WithFlag(1, name: "REG_G_171_FIELD_2")
+                    .WithFlag(2, name: "REG_G_171_FIELD_3")
+                    .WithValueField(3, 4, name: "REG_G_171_FIELD_4")
+                    .WithFlag(7, name: "REG_G_171_FIELD_5")
+                    .WithFlag(8, name: "REG_G_171_FIELD_6")
+                    .WithReservedBits(9, 7)
+                    .WithFlag(16, name: "REG_G_171_FIELD_7")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_G.RegG_172, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "REG_G_172_FIELD_1")
+                    .WithValueField(16, 16, FieldMode.Read, name: "REG_G_172_FIELD_2")
+                },
+                {(long)Registers_G.RegG_173, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_173_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_173_FIELD_2")
+                },
+                {(long)Registers_G.RegG_174, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_174_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_174_FIELD_2")
+                },
+                {(long)Registers_G.RegG_175, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_175_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_175_FIELD_2")
+                },
+                {(long)Registers_G.RegG_176, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_176_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_176_FIELD_2")
+                },
+                {(long)Registers_G.RegG_177, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_177_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_177_FIELD_2")
+                },
+                {(long)Registers_G.RegG_178, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_178_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_178_FIELD_2")
+                },
+                {(long)Registers_G.RegG_179, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_179_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_179_FIELD_2")
+                },
+                {(long)Registers_G.RegG_180, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_G_180_FIELD_1")
+                },
+                {(long)Registers_G.RegG_181, new DoubleWordRegister(this, 0x01200040)
+                    .WithFlag(0, name: "REG_G_181_FIELD_1")
+                    .WithValueField(1, 7, name: "REG_G_181_FIELD_2")
+                    .WithValueField(8, 7, name: "REG_G_181_FIELD_3")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 8, name: "REG_G_181_FIELD_4")
+                    .WithValueField(24, 3, name: "REG_G_181_FIELD_5")
+                    .WithValueField(27, 5, name: "REG_G_181_FIELD_6")
+                },
+                {(long)Registers_G.RegG_182, new DoubleWordRegister(this, 0x000000A0)
+                    .WithValueField(0, 10, name: "REG_G_182_FIELD_1")
+                    .WithValueField(10, 8, name: "REG_G_182_FIELD_2")
+                    .WithFlag(18, name: "REG_G_182_FIELD_3")
+                    .WithValueField(19, 8, name: "REG_G_182_FIELD_4")
+                    .WithValueField(27, 3, name: "REG_G_182_FIELD_5")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_183, new DoubleWordRegister(this, 0x01005008)
+                    .WithFlag(0, name: "REG_G_183_FIELD_1")
+                    .WithValueField(1, 3, name: "REG_G_183_FIELD_2")
+                    .WithFlag(4, name: "REG_G_183_FIELD_3")
+                    .WithValueField(5, 3, name: "REG_G_183_FIELD_4")
+                    .WithValueField(8, 4, name: "REG_G_183_FIELD_5")
+                    .WithValueField(12, 4, name: "REG_G_183_FIELD_6")
+                    .WithValueField(16, 8, name: "REG_G_183_FIELD_7")
+                    .WithFlag(24, name: "REG_G_183_FIELD_8")
+                    .WithFlag(25, name: "REG_G_183_FIELD_9")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_G.RegG_184, new DoubleWordRegister(this, 0x1F1F1F1F)
+                    .WithValueField(0, 5, name: "REG_G_184_FIELD_1")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "REG_G_184_FIELD_2")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "REG_G_184_FIELD_3")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "REG_G_184_FIELD_4")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_G.RegG_185, new DoubleWordRegister(this, 0x1B1F1F1F)
+                    .WithValueField(0, 5, name: "REG_G_185_FIELD_1")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "REG_G_185_FIELD_2")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "REG_G_185_FIELD_3")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "REG_G_185_FIELD_4")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_G.RegG_186, new DoubleWordRegister(this, 0x11131518)
+                    .WithValueField(0, 5, name: "REG_G_186_FIELD_1")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "REG_G_186_FIELD_2")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "REG_G_186_FIELD_3")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "REG_G_186_FIELD_4")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_G.RegG_187, new DoubleWordRegister(this, 0x0C0D0E10)
+                    .WithValueField(0, 5, name: "REG_G_187_FIELD_1")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "REG_G_187_FIELD_2")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "REG_G_187_FIELD_3")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "REG_G_187_FIELD_4")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_G.RegG_188, new DoubleWordRegister(this, 0x2F87C145)
+                    .WithValueField(0, 3, name: "REG_G_188_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_G_188_FIELD_2")
+                    .WithFlag(6, name: "REG_G_188_FIELD_3")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 6, name: "REG_G_188_FIELD_4")
+                    .WithValueField(14, 8, name: "REG_G_188_FIELD_5")
+                    .WithValueField(22, 10, name: "REG_G_188_FIELD_6")
+                },
+                {(long)Registers_G.RegG_189, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_189_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_189_FIELD_2")
+                    .WithFlag(16, name: "REG_G_189_FIELD_3")
+                    .WithValueField(17, 4, name: "REG_G_189_FIELD_4")
+                    .WithValueField(21, 4, name: "REG_G_189_FIELD_5")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_G.RegG_190, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_190_FIELD_1")
+                    .WithFlag(8, name: "REG_G_190_FIELD_2")
+                    .WithValueField(9, 4, name: "REG_G_190_FIELD_3")
+                    .WithValueField(13, 4, name: "REG_G_190_FIELD_4")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_G.RegG_191, new DoubleWordRegister(this, 0x10000000)
+                    .WithFlag(0, name: "REG_G_191_FIELD_1")
+                    .WithFlag(1, name: "REG_G_191_FIELD_2")
+                    .WithFlag(2, name: "REG_G_191_FIELD_3")
+                    .WithFlag(3, name: "REG_G_191_FIELD_4")
+                    .WithFlag(4, name: "REG_G_191_FIELD_5")
+                    .WithFlag(5, name: "REG_G_191_FIELD_6")
+                    .WithFlag(6, name: "REG_G_191_FIELD_7")
+                    .WithValueField(7, 2, name: "REG_G_191_FIELD_8")
+                    .WithValueField(9, 2, name: "REG_G_191_FIELD_9")
+                    .WithFlag(11, name: "REG_G_191_FIELD_10")
+                    .WithReservedBits(12, 1)
+                    .WithFlag(13, name: "REG_G_191_FIELD_11")
+                    .WithFlag(14, name: "REG_G_191_FIELD_12")
+                    .WithValueField(15, 4, name: "REG_G_191_FIELD_13")
+                    .WithValueField(19, 3, name: "REG_G_191_FIELD_14")
+                    .WithValueField(22, 3, name: "REG_G_191_FIELD_15")
+                    .WithValueField(25, 4, name: "REG_G_191_FIELD_16")
+                    .WithValueField(29, 3, name: "REG_G_191_FIELD_17")
+                },
+                {(long)Registers_G.RegG_192, new DoubleWordRegister(this, 0x00004000)
+                    .WithValueField(0, 4, name: "REG_G_192_FIELD_1")
+                    .WithValueField(4, 7, name: "REG_G_192_FIELD_2")
+                    .WithValueField(11, 4, name: "REG_G_192_FIELD_3")
+                    .WithValueField(15, 10, name: "REG_G_192_FIELD_4")
+                    .WithValueField(25, 5, name: "REG_G_192_FIELD_5")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_193, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "REG_G_193_FIELD_1")
+                    .WithValueField(16, 16, FieldMode.Read, name: "REG_G_193_FIELD_2")
+                },
+                {(long)Registers_G.RegG_194, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "REG_G_194_FIELD_1")
+                    .WithValueField(16, 16, FieldMode.Read, name: "REG_G_194_FIELD_2")
+                },
+                {(long)Registers_G.RegG_195, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "REG_G_195_FIELD_1")
+                    .WithValueField(10, 10, FieldMode.Read, name: "REG_G_195_FIELD_2")
+                    .WithValueField(20, 10, FieldMode.Read, name: "REG_G_195_FIELD_3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_196, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "REG_G_196_FIELD_1")
+                    .WithValueField(10, 10, FieldMode.Read, name: "REG_G_196_FIELD_2")
+                    .WithValueField(20, 10, FieldMode.Read, name: "REG_G_196_FIELD_3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_197, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "REG_G_197_FIELD_1")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 15, FieldMode.Read, name: "REG_G_197_FIELD_2")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_198, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "REG_G_198_FIELD_1")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 15, FieldMode.Read, name: "REG_G_198_FIELD_2")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_199, new DoubleWordRegister(this, 0x00030000)
+                    .WithValueField(0, 16, FieldMode.Read, name: "REG_G_199_FIELD_1")
+                    .WithValueField(16, 2, FieldMode.Read, name: "REG_G_199_FIELD_2")
+                    .WithReservedBits(18, 2)
+                    .WithValueField(20, 6, FieldMode.Read, name: "REG_G_199_FIELD_3")
+                    .WithValueField(26, 6, FieldMode.Read, name: "REG_G_199_FIELD_4")
+                },
+                {(long)Registers_G.RegG_200, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_G_200_FIELD_1")
+                    .WithValueField(8, 16, name: "REG_G_200_FIELD_2")
+                    .WithValueField(24, 6, name: "REG_G_200_FIELD_3")
+                    .WithFlag(30, name: "REG_G_200_FIELD_4")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_201, new DoubleWordRegister(this)
+                    .WithValueField(0, 24, name: "REG_G_201_FIELD_1")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_G.RegG_202, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_G_202_FIELD_1")
+                    .WithValueField(2, 3, name: "REG_G_202_FIELD_2")
+                    .WithValueField(5, 3, name: "REG_G_202_FIELD_3")
+                    .WithValueField(8, 3, name: "REG_G_202_FIELD_4")
+                    .WithValueField(11, 3, name: "REG_G_202_FIELD_5")
+                    .WithReservedBits(14, 11)
+                    .WithValueField(25, 2, name: "REG_G_202_FIELD_6")
+                    .WithValueField(27, 2, name: "REG_G_202_FIELD_7")
+                    .WithValueField(29, 3, name: "REG_G_202_FIELD_8")
+                },
+                {(long)Registers_G.RegG_203, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "REG_G_203_FIELD_1")
+                    .WithValueField(10, 10, FieldMode.Read, name: "REG_G_203_FIELD_2")
+                    .WithValueField(20, 10, FieldMode.Read, name: "REG_G_203_FIELD_3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_204, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_G_204_FIELD_1")
+                    .WithValueField(16, 16, name: "REG_G_204_FIELD_2")
+                },
+                {(long)Registers_G.RegG_205, new DoubleWordRegister(this, 0x001FA3DC)
+                    .WithFlag(0, name: "REG_G_205_FIELD_1")
+                    .WithValueField(1, 8, name: "REG_G_205_FIELD_2")
+                    .WithValueField(9, 4, name: "REG_G_205_FIELD_3")
+                    .WithValueField(13, 2, name: "REG_G_205_FIELD_4")
+                    .WithValueField(15, 7, name: "REG_G_205_FIELD_5")
+                    .WithValueField(22, 2, name: "REG_G_205_FIELD_6")
+                    .WithReservedBits(24, 1)
+                    .WithValueField(25, 3, name: "REG_G_205_FIELD_7")
+                    .WithValueField(28, 3, name: "REG_G_205_FIELD_8")
+                    .WithFlag(31, name: "REG_G_205_FIELD_9")
+                },
+                {(long)Registers_G.RegG_206, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_G_206_FIELD_1")
+                },
+                {(long)Registers_G.RegG_207, new DoubleWordRegister(this, 0x3207D080)
+                    .WithValueField(0, 9, name: "REG_G_207_FIELD_1")
+                    .WithValueField(9, 11, name: "REG_G_207_FIELD_2")
+                    .WithValueField(20, 11, name: "REG_G_207_FIELD_3")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_G.RegG_208, new DoubleWordRegister(this, 0x356260FA)
+                    .WithValueField(0, 11, name: "REG_G_208_FIELD_1")
+                    .WithValueField(11, 11, name: "REG_G_208_FIELD_2")
+                    .WithValueField(22, 3, name: "REG_G_208_FIELD_3")
+                    .WithValueField(25, 4, name: "REG_G_208_FIELD_4")
+                    .WithFlag(29, name: "REG_G_208_FIELD_5")
+                    .WithFlag(30, name: "REG_G_208_FIELD_6")
+                    .WithFlag(31, name: "REG_G_208_FIELD_7")
+                },
+                {(long)Registers_G.RegG_209, new DoubleWordRegister(this, 0x30000578)
+                    .WithValueField(0, 11, name: "REG_G_209_FIELD_1")
+                    .WithValueField(11, 2, name: "REG_G_209_FIELD_2")
+                    .WithValueField(13, 3, name: "REG_G_209_FIELD_3")
+                    .WithReservedBits(16, 4)
+                    .WithValueField(20, 8, name: "REG_G_209_FIELD_4")
+                    .WithValueField(28, 2, name: "REG_G_209_FIELD_5")
+                    .WithValueField(30, 2, name: "REG_G_209_FIELD_6")
+                },
+                {(long)Registers_G.RegG_210, new DoubleWordRegister(this, 0xD9C3522E)
+                    .WithValueField(0, 32, name: "REG_G_210_FIELD_1")
+                },
+                {(long)Registers_G.RegG_211, new DoubleWordRegister(this, 0x8C96077B)
+                    .WithValueField(0, 32, name: "REG_G_211_FIELD_1")
+                },
+                {(long)Registers_G.RegG_212, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_G_212_FIELD_1")
+                },
+                {(long)Registers_G.RegG_219, new DoubleWordRegister(this, 0xFF800000)
+                    .WithValueField(0, 8, name: "REG_G_219_FIELD_1")
+                    .WithValueField(8, 8, name: "REG_G_219_FIELD_2")
+                    .WithValueField(16, 8, name: "REG_G_219_FIELD_3")
+                    .WithValueField(24, 8, name: "REG_G_219_FIELD_4")
+                },
+                {(long)Registers_G.RegG_220, new DoubleWordRegister(this, 0x000000C0)
+                    .WithFlag(0, name: "REG_G_220_FIELD_1")
+                    .WithValueField(1, 4, name: "REG_G_220_FIELD_2")
+                    .WithFlag(5, name: "REG_G_220_FIELD_3")
+                    .WithFlag(6, name: "REG_G_220_FIELD_4")
+                    .WithFlag(7, name: "REG_G_220_FIELD_5")
+                    .WithValueField(8, 19, name: "REG_G_220_FIELD_6")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_G.RegG_221, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_221_FIELD_1")
+                    .WithValueField(1, 6, name: "REG_G_221_FIELD_2")
+                    .WithValueField(7, 6, name: "REG_G_221_FIELD_3")
+                    .WithValueField(13, 8, name: "REG_G_221_FIELD_4")
+                    .WithValueField(21, 8, name: "REG_G_221_FIELD_5")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_G.RegG_223, new DoubleWordRegister(this, 0x123556B7)
+                    .WithValueField(0, 32, name: "REG_G_223_FIELD_1")
+                },
+                {(long)Registers_G.RegG_224, new DoubleWordRegister(this, 0x5020C000)
+                    .WithValueField(0, 7, name: "REG_G_224_FIELD_1")
+                    .WithFlag(7, name: "REG_G_224_FIELD_2")
+                    .WithValueField(8, 9, name: "REG_G_224_FIELD_3")
+                    .WithReservedBits(17, 1)
+                    .WithValueField(18, 9, name: "REG_G_224_FIELD_4")
+                    .WithReservedBits(27, 1)
+                    .WithValueField(28, 4, name: "REG_G_224_FIELD_5")
+                },
+                {(long)Registers_G.RegG_225, new DoubleWordRegister(this, 0x0D803B88)
+                    .WithValueField(0, 2, name: "REG_G_225_FIELD_1")
+                    .WithValueField(2, 4, name: "REG_G_225_FIELD_2")
+                    .WithValueField(6, 8, name: "REG_G_225_FIELD_3")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 2, name: "REG_G_225_FIELD_4")
+                    .WithValueField(18, 4, name: "REG_G_225_FIELD_5")
+                    .WithValueField(22, 8, name: "REG_G_225_FIELD_6")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_G.RegG_226, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_G_226_FIELD_1")
+                    .WithFlag(2, name: "REG_G_226_FIELD_2")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 8, name: "REG_G_226_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_G_226_FIELD_4")
+                    .WithReservedBits(16, 15)
+                    .WithFlag(31, name: "REG_G_226_FIELD_5")
+                },
+                {(long)Registers_G.RegG_227, new DoubleWordRegister(this, 0x001F81F4)
+                    .WithValueField(0, 10, name: "REG_G_227_FIELD_1")
+                    .WithValueField(10, 4, name: "REG_G_227_FIELD_2")
+                    .WithFlag(14, name: "REG_G_227_FIELD_3")
+                    .WithValueField(15, 3, name: "REG_G_227_FIELD_4")
+                    .WithValueField(18, 5, name: "REG_G_227_FIELD_5")
+                    .WithReservedBits(23, 4)
+                    .WithFlag(27, name: "REG_G_227_FIELD_6")
+                    .WithReservedBits(28, 1)
+                    .WithFlag(29, name: "REG_G_227_FIELD_7")
+                    .WithFlag(30, name: "REG_G_227_FIELD_8")
+                    .WithFlag(31, name: "REG_G_227_FIELD_9")
+                },
+                {(long)Registers_G.RegG_228, new DoubleWordRegister(this, 0x55555555)
+                    .WithValueField(0, 32, name: "REG_G_228_FIELD_1")
+                },
+                {(long)Registers_G.RegG_229, new DoubleWordRegister(this, 0x00000047)
+                    .WithValueField(0, 5, name: "REG_G_229_FIELD_1")
+                    .WithValueField(5, 3, name: "REG_G_229_FIELD_2")
+                    .WithValueField(8, 2, name: "REG_G_229_FIELD_3")
+                    .WithValueField(10, 2, name: "REG_G_229_FIELD_4")
+                    .WithReservedBits(12, 2)
+                    .WithValueField(14, 10, name: "REG_G_229_FIELD_5")
+                    .WithReservedBits(24, 1)
+                    .WithValueField(25, 5, name: "REG_G_229_FIELD_6")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "REG_G_229_FIELD_7")
+                },
+                {(long)Registers_G.RegG_230, new DoubleWordRegister(this, 0x03010004)
+                    .WithValueField(0, 4, name: "REG_G_230_FIELD_1")
+                    .WithValueField(4, 10, name: "REG_G_230_FIELD_2")
+                    .WithFlag(14, name: "REG_G_230_FIELD_3")
+                    .WithValueField(15, 8, name: "REG_G_230_FIELD_4")
+                    .WithFlag(23, name: "REG_G_230_FIELD_5")
+                    .WithValueField(24, 7, name: "REG_G_230_FIELD_6")
+                    .WithFlag(31, name: "REG_G_230_FIELD_7")
+                },
+                {(long)Registers_G.RegG_231, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "REG_G_231_FIELD_1")
+                    .WithReservedBits(10, 8)
+                    .WithValueField(18, 5, name: "REG_G_231_FIELD_2")
+                    .WithReservedBits(23, 8)
+                    .WithFlag(31, name: "REG_G_231_FIELD_3")
+                },
+                {(long)Registers_G.RegG_232, new DoubleWordRegister(this, 0x123556B7)
+                    .WithValueField(0, 32, name: "REG_G_232_FIELD_1")
+                },
+                {(long)Registers_G.RegG_233, new DoubleWordRegister(this, 0x00000011)
+                    .WithFlag(0, name: "REG_G_233_FIELD_1")
+                    .WithValueField(1, 5, name: "REG_G_233_FIELD_2")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)Registers_G.RegG_234, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "REG_G_234_FIELD_1")
+                    .WithValueField(16, 16, FieldMode.Read, name: "REG_G_234_FIELD_2")
+                },
+                {(long)Registers_G.RegG_235, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_235_FIELD_1")
+                    .WithFlag(1, name: "REG_G_235_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_G.RegG_236, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_G_236_FIELD_1")
+                    .WithValueField(1, 3, name: "REG_G_236_FIELD_2")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_G.RegG_237, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_G_237_FIELD_1")
+                },
             };
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
@@ -2436,6 +4458,115 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers_H.RegH_1, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_H_1_FIELD_1")
+                },
+                {(long)Registers_H.RegH_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_H_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_H.RegH_36, new DoubleWordRegister(this)
+                    .WithFlag(0, writeCallback: (_, value) =>
+                        {
+                            if(value)
+                            {
+                            }
+                        }, name: "REG_H_36_FIELD_1")
+                    .WithFlag(1, name: "REG_H_36_FIELD_2")
+                    .WithValueField(2, 8, name: "REG_H_36_FIELD_3")
+                    .WithValueField(10, 16, name: "REG_H_36_FIELD_4")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_H.RegH_51, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_H_51_FIELD_1")
+                    .WithFlag(1, name: "REG_H_51_FIELD_2")
+                    .WithFlag(2, name: "REG_H_51_FIELD_3")
+                    .WithReservedBits(3, 23)
+                    .WithFlag(26, name: "REG_H_51_FIELD_4")
+                    .WithFlag(27, name: "REG_H_51_FIELD_5")
+                    .WithFlag(28, name: "REG_H_51_FIELD_6")
+                    .WithFlag(29, name: "REG_H_51_FIELD_7")
+                    .WithFlag(30, name: "REG_H_51_FIELD_8")
+                    .WithFlag(31, name: "REG_H_51_FIELD_9")
+                },
+                {(long)Registers_H.RegH_52, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_H_52_FIELD_1")
+                    .WithFlag(1, name: "REG_H_52_FIELD_2")
+                    .WithFlag(2, name: "REG_H_52_FIELD_3")
+                    .WithReservedBits(3, 23)
+                    .WithFlag(26, name: "REG_H_52_FIELD_4")
+                    .WithFlag(27, name: "REG_H_52_FIELD_5")
+                    .WithFlag(28, name: "REG_H_52_FIELD_6")
+                    .WithFlag(29, name: "REG_H_52_FIELD_7")
+                    .WithFlag(30, name: "REG_H_52_FIELD_8")
+                    .WithFlag(31, name: "REG_H_52_FIELD_9")
+                },
+                {(long)Registers_H.RegH_53, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_H_53_FIELD_1")
+                    .WithFlag(1, name: "REG_H_53_FIELD_2")
+                    .WithFlag(2, name: "REG_H_53_FIELD_3")
+                    .WithFlag(3, name: "REG_H_53_FIELD_4")
+                    .WithFlag(4, name: "REG_H_53_FIELD_5")
+                    .WithFlag(5, name: "REG_H_53_FIELD_6")
+                    .WithFlag(6, name: "REG_H_53_FIELD_7")
+                    .WithFlag(7, name: "REG_H_53_FIELD_8")
+                    .WithFlag(8, name: "REG_H_53_FIELD_9")
+                    .WithFlag(9, name: "REG_H_53_FIELD_10")
+                    .WithFlag(10, name: "REG_H_53_FIELD_11")
+                    .WithFlag(11, name: "REG_H_53_FIELD_12")
+                    .WithFlag(12, name: "REG_H_53_FIELD_13")
+                    .WithFlag(13, name: "REG_H_53_FIELD_14")
+                    .WithFlag(14, name: "REG_H_53_FIELD_15")
+                    .WithFlag(15, name: "REG_H_53_FIELD_16")
+                    .WithFlag(16, name: "REG_H_53_FIELD_17")
+                    .WithFlag(17, name: "REG_H_53_FIELD_18")
+                    .WithFlag(18, name: "REG_H_53_FIELD_19")
+                    .WithFlag(19, name: "REG_H_53_FIELD_20")
+                    .WithFlag(20, name: "REG_H_53_FIELD_21")
+                    .WithFlag(21, name: "REG_H_53_FIELD_22")
+                    .WithFlag(22, name: "REG_H_53_FIELD_23")
+                    .WithFlag(23, name: "REG_H_53_FIELD_24")
+                    .WithFlag(24, name: "REG_H_53_FIELD_25")
+                    .WithFlag(25, name: "REG_H_53_FIELD_26")
+                    .WithFlag(26, name: "REG_H_53_FIELD_27")
+                    .WithFlag(27, name: "REG_H_53_FIELD_28")
+                    .WithFlag(28, name: "REG_H_53_FIELD_29")
+                    .WithFlag(29, name: "REG_H_53_FIELD_30")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_H.RegH_54, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_H_54_FIELD_1")
+                    .WithFlag(1, name: "REG_H_54_FIELD_2")
+                    .WithFlag(2, name: "REG_H_54_FIELD_3")
+                    .WithFlag(3, name: "REG_H_54_FIELD_4")
+                    .WithFlag(4, name: "REG_H_54_FIELD_5")
+                    .WithFlag(5, name: "REG_H_54_FIELD_6")
+                    .WithFlag(6, name: "REG_H_54_FIELD_7")
+                    .WithFlag(7, name: "REG_H_54_FIELD_8")
+                    .WithFlag(8, name: "REG_H_54_FIELD_9")
+                    .WithFlag(9, name: "REG_H_54_FIELD_10")
+                    .WithFlag(10, name: "REG_H_54_FIELD_11")
+                    .WithFlag(11, name: "REG_H_54_FIELD_12")
+                    .WithFlag(12, name: "REG_H_54_FIELD_13")
+                    .WithFlag(13, name: "REG_H_54_FIELD_14")
+                    .WithFlag(14, name: "REG_H_54_FIELD_15")
+                    .WithFlag(15, name: "REG_H_54_FIELD_16")
+                    .WithFlag(16, name: "REG_H_54_FIELD_17")
+                    .WithFlag(17, name: "REG_H_54_FIELD_18")
+                    .WithFlag(18, name: "REG_H_54_FIELD_19")
+                    .WithFlag(19, name: "REG_H_54_FIELD_20")
+                    .WithFlag(20, name: "REG_H_54_FIELD_21")
+                    .WithFlag(21, name: "REG_H_54_FIELD_22")
+                    .WithFlag(22, name: "REG_H_54_FIELD_23")
+                    .WithFlag(23, name: "REG_H_54_FIELD_24")
+                    .WithFlag(24, name: "REG_H_54_FIELD_25")
+                    .WithFlag(25, name: "REG_H_54_FIELD_26")
+                    .WithFlag(26, name: "REG_H_54_FIELD_27")
+                    .WithFlag(27, name: "REG_H_54_FIELD_28")
+                    .WithFlag(28, name: "REG_H_54_FIELD_29")
+                    .WithFlag(29, name: "REG_H_54_FIELD_30")
+                    .WithReservedBits(30, 2)
+                },
                 {(long)Registers_H.RegH_3, new DoubleWordRegister(this)
                     .WithReservedBits(0, 1)
                     .WithFlag(1, name: "REG_H_3_FIELD_1")
@@ -2593,7 +4724,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(16, 16, out field_266, name: "REG_H_14_FIELD_2")
                     .WithWriteCallback((_, __) => PROTIMER_HandleChangedParams())
                 },
-                {(long)Registers_H.RegH_15, new DoubleWordRegister(this, 0xFFFFFFFF)
+                {(long)Registers_H.RegH_15, new DoubleWordRegister(this, 0x0000FFFF)
                     .WithValueField(0, 32, out field_239, name: "REG_H_15_FIELD_1")
                     .WithWriteCallback((_, __) => PROTIMER_HandleChangedParams())
                 },
@@ -2888,9 +5019,16 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(9, 9, out field_235[7], name: "REG_H_40_FIELD_2")
                     .WithReservedBits(18, 14)
                 },
-                {(long)Registers_H.RegH_46, new DoubleWordRegister(this)
-                    .WithValueField(0, 5, name: "REG_H_46_FIELD_1")
+                {(long)Registers_H.RegH_45, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, out field_420, name: "REG_H_45_FIELD_1")
                     .WithReservedBits(5, 27)
+                },
+                {(long)Registers_H.RegH_46, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, FieldMode.Read, valueProviderCallback: _ =>
+                        {
+                            var combined = ((ulong)PROTIMER_WrapCounterValue << 32) | PROTIMER_BaseCounterValue;
+                            return (uint)(combined >> (int)field_420.Value);
+                        }, name: "REG_H_46_FIELD_1")
                 },
                 {(long)Registers_H.RegH_47, new DoubleWordRegister(this)
                     .WithValueField(0, 9, out field_267, name: "REG_H_47_FIELD_1")
@@ -3040,6 +5178,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers_I.RegI_1, new DoubleWordRegister(this, 0x00000005)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_I_1_FIELD_1")
+                },
+                {(long)Registers_I.RegI_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)Registers_I.RegI_3, new DoubleWordRegister(this)
                     .WithValueField(0, 8, out field_365, name: "REG_I_3_FIELD_1")
                     .WithFlag(8, name: "REG_I_3_FIELD_2")
@@ -3075,7 +5220,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithEnumField<DoubleWordRegister, Enumeration_AB>(12, 4, FieldMode.Read, valueProviderCallback: _ => RAC_currentRadioState, name: "REG_I_39_FIELD_4")
                     .WithReservedBits(16, 16)
                 },
-                {(long)Registers_I.RegI_6, new DoubleWordRegister(this)
+                {(long)Registers_I.RegI_6, new DoubleWordRegister(this, 0x08880010)
                     .WithFlag(0, out field_306, writeCallback: (_, value) => { if (value) {RAC_TxEnable = false; RAC_UpdateRadioStateMachine();} }, name: "REG_I_6_FIELD_1")
                     .WithFlag(1, name: "REG_I_6_FIELD_2")
                     .WithReservedBits(2, 1)
@@ -3389,6 +5534,929 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(26, 5)
                     .WithFlag(31, name: "REG_I_60_FIELD_6")
                 },
+                {(long)Registers_I.RegI_10, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_10_FIELD_1")
+                    .WithFlag(1, name: "REG_I_10_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_14, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_14_FIELD_1")
+                    .WithFlag(1, name: "REG_I_14_FIELD_2")
+                    .WithFlag(2, name: "REG_I_14_FIELD_3")
+                    .WithFlag(3, name: "REG_I_14_FIELD_4")
+                    .WithReservedBits(4, 12)
+                    .WithFlag(16, name: "REG_I_14_FIELD_5")
+                    .WithFlag(17, name: "REG_I_14_FIELD_6")
+                    .WithFlag(18, name: "REG_I_14_FIELD_7")
+                    .WithFlag(19, name: "REG_I_14_FIELD_8")
+                    .WithFlag(20, name: "REG_I_14_FIELD_9")
+                    .WithFlag(21, name: "REG_I_14_FIELD_10")
+                    .WithFlag(22, name: "REG_I_14_FIELD_11")
+                    .WithFlag(23, name: "REG_I_14_FIELD_12")
+                    .WithFlag(24, name: "REG_I_14_FIELD_13")
+                    .WithReservedBits(25, 3)
+                    .WithFlag(28, name: "REG_I_14_FIELD_14")
+                    .WithFlag(29, name: "REG_I_14_FIELD_15")
+                    .WithFlag(30, name: "REG_I_14_FIELD_16")
+                    .WithFlag(31, name: "REG_I_14_FIELD_17")
+                },
+                {(long)Registers_I.RegI_15, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_15_FIELD_1")
+                    .WithFlag(1, name: "REG_I_15_FIELD_2")
+                    .WithFlag(2, name: "REG_I_15_FIELD_3")
+                    .WithFlag(3, name: "REG_I_15_FIELD_4")
+                    .WithReservedBits(4, 12)
+                    .WithFlag(16, name: "REG_I_15_FIELD_5")
+                    .WithFlag(17, name: "REG_I_15_FIELD_6")
+                    .WithFlag(18, name: "REG_I_15_FIELD_7")
+                    .WithFlag(19, name: "REG_I_15_FIELD_8")
+                    .WithFlag(20, name: "REG_I_15_FIELD_9")
+                    .WithFlag(21, name: "REG_I_15_FIELD_10")
+                    .WithFlag(22, name: "REG_I_15_FIELD_11")
+                    .WithFlag(23, name: "REG_I_15_FIELD_12")
+                    .WithFlag(24, name: "REG_I_15_FIELD_13")
+                    .WithReservedBits(25, 3)
+                    .WithFlag(28, name: "REG_I_15_FIELD_14")
+                    .WithFlag(29, name: "REG_I_15_FIELD_15")
+                    .WithFlag(30, name: "REG_I_15_FIELD_16")
+                    .WithFlag(31, name: "REG_I_15_FIELD_17")
+                },
+                {(long)Registers_I.RegI_20, new DoubleWordRegister(this, 0x00000006)
+                    .WithFlag(0, name: "REG_I_20_FIELD_1")
+                    .WithFlag(1, name: "REG_I_20_FIELD_2")
+                    .WithFlag(2, name: "REG_I_20_FIELD_3")
+                    .WithFlag(3, name: "REG_I_20_FIELD_4")
+                    .WithFlag(4, name: "REG_I_20_FIELD_5")
+                    .WithFlag(5, name: "REG_I_20_FIELD_6")
+                    .WithFlag(6, name: "REG_I_20_FIELD_7")
+                    .WithFlag(7, name: "REG_I_20_FIELD_8")
+                    .WithFlag(8, name: "REG_I_20_FIELD_9")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_I.RegI_21, new DoubleWordRegister(this, 0x00000006)
+                    .WithFlag(0, name: "REG_I_21_FIELD_1")
+                    .WithFlag(1, name: "REG_I_21_FIELD_2")
+                    .WithFlag(2, name: "REG_I_21_FIELD_3")
+                    .WithFlag(3, name: "REG_I_21_FIELD_4")
+                    .WithFlag(4, name: "REG_I_21_FIELD_5")
+                    .WithFlag(5, name: "REG_I_21_FIELD_6")
+                    .WithFlag(6, name: "REG_I_21_FIELD_7")
+                    .WithFlag(7, name: "REG_I_21_FIELD_8")
+                    .WithFlag(8, name: "REG_I_21_FIELD_9")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_I.RegI_22, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_I_22_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_23, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_23_FIELD_1")
+                    .WithFlag(1, name: "REG_I_23_FIELD_2")
+                    .WithFlag(2, name: "REG_I_23_FIELD_3")
+                    .WithFlag(3, name: "REG_I_23_FIELD_4")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_I.RegI_24, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_24_FIELD_1")
+                    .WithFlag(1, name: "REG_I_24_FIELD_2")
+                    .WithFlag(2, name: "REG_I_24_FIELD_3")
+                    .WithFlag(3, name: "REG_I_24_FIELD_4")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_I.RegI_33, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_I_33_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_34, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_I_34_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_36, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, name: "REG_I_36_FIELD_1")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_I.RegI_40, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 19)
+                    .WithFlag(19, name: "REG_I_40_FIELD_1")
+                    .WithFlag(20, name: "REG_I_40_FIELD_2")
+                    .WithFlag(21, name: "REG_I_40_FIELD_3")
+                    .WithValueField(22, 3, name: "REG_I_40_FIELD_4")
+                    .WithValueField(25, 3, name: "REG_I_40_FIELD_5")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_I.RegI_42, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 2)
+                    .WithFlag(2, name: "REG_I_42_FIELD_1")
+                    .WithReservedBits(3, 29)
+                },
+                {(long)Registers_I.RegI_43, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 5)
+                    .WithFlag(5, name: "REG_I_43_FIELD_1")
+                    .WithReservedBits(6, 1)
+                    .WithFlag(7, name: "REG_I_43_FIELD_2")
+                    .WithFlag(8, name: "REG_I_43_FIELD_3")
+                    .WithReservedBits(9, 1)
+                    .WithValueField(10, 2, name: "REG_I_43_FIELD_4")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)Registers_I.RegI_45, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_45_FIELD_1")
+                    .WithFlag(1, name: "REG_I_45_FIELD_2")
+                    .WithFlag(2, name: "REG_I_45_FIELD_3")
+                    .WithFlag(3, name: "REG_I_45_FIELD_4")
+                    .WithFlag(4, name: "REG_I_45_FIELD_5")
+                    .WithFlag(5, name: "REG_I_45_FIELD_6")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)Registers_I.RegI_46, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "REG_I_46_FIELD_1")
+                    .WithFlag(4, name: "REG_I_46_FIELD_2")
+                    .WithFlag(5, name: "REG_I_46_FIELD_3")
+                    .WithValueField(6, 4, name: "REG_I_46_FIELD_4")
+                    .WithFlag(10, name: "REG_I_46_FIELD_5")
+                    .WithValueField(11, 4, name: "REG_I_46_FIELD_6")
+                    .WithFlag(15, name: "REG_I_46_FIELD_7")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_I.RegI_47, new DoubleWordRegister(this, 0x00400301)
+                    .WithFlag(0, name: "REG_I_47_FIELD_1")
+                    .WithFlag(1, name: "REG_I_47_FIELD_2")
+                    .WithFlag(2, name: "REG_I_47_FIELD_3")
+                    .WithFlag(3, name: "REG_I_47_FIELD_4")
+                    .WithFlag(4, name: "REG_I_47_FIELD_5")
+                    .WithFlag(5, name: "REG_I_47_FIELD_6")
+                    .WithFlag(6, name: "REG_I_47_FIELD_7")
+                    .WithFlag(7, name: "REG_I_47_FIELD_8")
+                    .WithValueField(8, 2, name: "REG_I_47_FIELD_9")
+                    .WithFlag(10, name: "REG_I_47_FIELD_10")
+                    .WithFlag(11, name: "REG_I_47_FIELD_11")
+                    .WithFlag(12, name: "REG_I_47_FIELD_12")
+                    .WithFlag(13, name: "REG_I_47_FIELD_13")
+                    .WithFlag(14, name: "REG_I_47_FIELD_14")
+                    .WithFlag(15, name: "REG_I_47_FIELD_15")
+                    .WithFlag(16, name: "REG_I_47_FIELD_16")
+                    .WithFlag(17, name: "REG_I_47_FIELD_17")
+                    .WithFlag(18, name: "REG_I_47_FIELD_18")
+                    .WithFlag(19, name: "REG_I_47_FIELD_19")
+                    .WithFlag(20, name: "REG_I_47_FIELD_20")
+                    .WithFlag(21, name: "REG_I_47_FIELD_21")
+                    .WithFlag(22, name: "REG_I_47_FIELD_22")
+                    .WithFlag(23, name: "REG_I_47_FIELD_23")
+                    .WithFlag(24, name: "REG_I_47_FIELD_24")
+                    .WithFlag(25, name: "REG_I_47_FIELD_25")
+                    .WithFlag(26, name: "REG_I_47_FIELD_26")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_I.RegI_48, new DoubleWordRegister(this, 0x016070D8)
+                    .WithValueField(0, 4, name: "REG_I_48_FIELD_1")
+                    .WithValueField(4, 2, name: "REG_I_48_FIELD_2")
+                    .WithValueField(6, 6, name: "REG_I_48_FIELD_3")
+                    .WithValueField(12, 3, name: "REG_I_48_FIELD_4")
+                    .WithValueField(15, 7, name: "REG_I_48_FIELD_5")
+                    .WithValueField(22, 2, name: "REG_I_48_FIELD_6")
+                    .WithValueField(24, 3, name: "REG_I_48_FIELD_7")
+                    .WithValueField(27, 4, name: "REG_I_48_FIELD_8")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_I.RegI_49, new DoubleWordRegister(this, 0x00002448)
+                    .WithFlag(0, name: "REG_I_49_FIELD_1")
+                    .WithFlag(1, name: "REG_I_49_FIELD_2")
+                    .WithFlag(2, name: "REG_I_49_FIELD_3")
+                    .WithValueField(3, 2, name: "REG_I_49_FIELD_4")
+                    .WithValueField(5, 3, name: "REG_I_49_FIELD_5")
+                    .WithValueField(8, 3, name: "REG_I_49_FIELD_6")
+                    .WithValueField(11, 3, name: "REG_I_49_FIELD_7")
+                    .WithReservedBits(14, 18)
+                },
+                {(long)Registers_I.RegI_50, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, FieldMode.Read, name: "REG_I_50_FIELD_1")
+                    .WithFlag(4, FieldMode.Read, name: "REG_I_50_FIELD_2")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_I.RegI_51, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "REG_I_51_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_I.RegI_52, new DoubleWordRegister(this, 0x008EF870)
+                    .WithValueField(0, 4, name: "REG_I_52_FIELD_1")
+                    .WithValueField(4, 3, name: "REG_I_52_FIELD_2")
+                    .WithFlag(7, name: "REG_I_52_FIELD_3")
+                    .WithValueField(8, 3, name: "REG_I_52_FIELD_4")
+                    .WithValueField(11, 2, name: "REG_I_52_FIELD_5")
+                    .WithValueField(13, 4, name: "REG_I_52_FIELD_6")
+                    .WithValueField(17, 4, name: "REG_I_52_FIELD_7")
+                    .WithFlag(21, name: "REG_I_52_FIELD_8")
+                    .WithValueField(22, 2, name: "REG_I_52_FIELD_9")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_I.RegI_53, new DoubleWordRegister(this, 0x00000820)
+                    .WithValueField(0, 6, name: "REG_I_53_FIELD_1")
+                    .WithValueField(6, 6, name: "REG_I_53_FIELD_2")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)Registers_I.RegI_54, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 28)
+                    .WithFlag(28, name: "REG_I_54_FIELD_1")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_I.RegI_55, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_55_FIELD_1")
+                    .WithFlag(1, name: "REG_I_55_FIELD_2")
+                    .WithFlag(2, name: "REG_I_55_FIELD_3")
+                    .WithFlag(3, name: "REG_I_55_FIELD_4")
+                    .WithFlag(4, name: "REG_I_55_FIELD_5")
+                    .WithReservedBits(5, 1)
+                    .WithFlag(6, name: "REG_I_55_FIELD_6")
+                    .WithReservedBits(7, 25)
+                },
+                {(long)Registers_I.RegI_56, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_56_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_I.RegI_57, new DoubleWordRegister(this, 0x00000001)
+                    .WithFlag(0, name: "REG_I_57_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_I.RegI_58, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_58_FIELD_1")
+                    .WithFlag(1, name: "REG_I_58_FIELD_2")
+                    .WithFlag(2, name: "REG_I_58_FIELD_3")
+                    .WithReservedBits(3, 29)
+                },
+                {(long)Registers_I.RegI_59, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 2)
+                    .WithFlag(2, name: "REG_I_59_FIELD_1")
+                    .WithReservedBits(3, 29)
+                },
+                {(long)Registers_I.RegI_61, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_61_FIELD_1")
+                    .WithFlag(1, name: "REG_I_61_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_62, new DoubleWordRegister(this, 0x00000008)
+                    .WithValueField(0, 4, name: "REG_I_62_FIELD_1")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_I.RegI_63, new DoubleWordRegister(this, 0x58AAB0D6)
+                    .WithValueField(0, 2, name: "REG_I_63_FIELD_1")
+                    .WithValueField(2, 2, name: "REG_I_63_FIELD_2")
+                    .WithValueField(4, 3, name: "REG_I_63_FIELD_3")
+                    .WithValueField(7, 2, name: "REG_I_63_FIELD_4")
+                    .WithValueField(9, 4, name: "REG_I_63_FIELD_5")
+                    .WithValueField(13, 2, name: "REG_I_63_FIELD_6")
+                    .WithValueField(15, 3, name: "REG_I_63_FIELD_7")
+                    .WithValueField(18, 3, name: "REG_I_63_FIELD_8")
+                    .WithValueField(21, 4, name: "REG_I_63_FIELD_9")
+                    .WithValueField(25, 3, name: "REG_I_63_FIELD_10")
+                    .WithValueField(28, 3, name: "REG_I_63_FIELD_11")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_I.RegI_64, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 14)
+                    .WithFlag(14, name: "REG_I_64_FIELD_1")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_I.RegI_65, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithValueField(1, 2, name: "REG_I_65_FIELD_1")
+                    .WithValueField(3, 2, name: "REG_I_65_FIELD_2")
+                    .WithFlag(5, name: "REG_I_65_FIELD_3")
+                    .WithValueField(6, 2, name: "REG_I_65_FIELD_4")
+                    .WithFlag(8, name: "REG_I_65_FIELD_5")
+                    .WithReservedBits(9, 7)
+                    .WithFlag(16, name: "REG_I_65_FIELD_6")
+                    .WithValueField(17, 2, name: "REG_I_65_FIELD_7")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_I.RegI_66, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_66_FIELD_1")
+                    .WithFlag(1, name: "REG_I_66_FIELD_2")
+                    .WithFlag(2, name: "REG_I_66_FIELD_3")
+                    .WithFlag(3, name: "REG_I_66_FIELD_4")
+                    .WithValueField(4, 3, name: "REG_I_66_FIELD_5")
+                    .WithValueField(7, 3, name: "REG_I_66_FIELD_6")
+                    .WithFlag(10, name: "REG_I_66_FIELD_7")
+                    .WithValueField(11, 4, name: "REG_I_66_FIELD_8")
+                    .WithValueField(15, 4, name: "REG_I_66_FIELD_9")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_I.RegI_67, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "REG_I_67_FIELD_1")
+                    .WithFlag(1, FieldMode.Read, name: "REG_I_67_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_68, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_68_FIELD_1")
+                    .WithFlag(1, name: "REG_I_68_FIELD_2")
+                    .WithFlag(2, name: "REG_I_68_FIELD_3")
+                    .WithValueField(3, 3, name: "REG_I_68_FIELD_4")
+                    .WithValueField(6, 3, name: "REG_I_68_FIELD_5")
+                    .WithFlag(9, name: "REG_I_68_FIELD_6")
+                    .WithValueField(10, 4, name: "REG_I_68_FIELD_7")
+                    .WithValueField(14, 4, name: "REG_I_68_FIELD_8")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_I.RegI_69, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "REG_I_69_FIELD_1")
+                    .WithFlag(1, FieldMode.Read, name: "REG_I_69_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_70, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_70_FIELD_1")
+                    .WithFlag(1, name: "REG_I_70_FIELD_2")
+                    .WithFlag(2, name: "REG_I_70_FIELD_3")
+                    .WithFlag(3, name: "REG_I_70_FIELD_4")
+                    .WithValueField(4, 6, name: "REG_I_70_FIELD_5")
+                    .WithValueField(10, 6, name: "REG_I_70_FIELD_6")
+                    .WithFlag(16, name: "REG_I_70_FIELD_7")
+                    .WithValueField(17, 3, name: "REG_I_70_FIELD_8")
+                    .WithValueField(20, 4, name: "REG_I_70_FIELD_9")
+                    .WithValueField(24, 2, name: "REG_I_70_FIELD_10")
+                    .WithFlag(26, name: "REG_I_70_FIELD_11")
+                    .WithFlag(27, name: "REG_I_70_FIELD_12")
+                    .WithFlag(28, name: "REG_I_70_FIELD_13")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_I.RegI_71, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "REG_I_71_FIELD_1")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 14, name: "REG_I_71_FIELD_2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_I.RegI_72, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_72_FIELD_1")
+                    .WithValueField(1, 2, name: "REG_I_72_FIELD_2")
+                    .WithValueField(3, 2, name: "REG_I_72_FIELD_3")
+                    .WithValueField(5, 2, name: "REG_I_72_FIELD_4")
+                    .WithFlag(7, name: "REG_I_72_FIELD_5")
+                    .WithValueField(8, 2, name: "REG_I_72_FIELD_6")
+                    .WithFlag(10, name: "REG_I_72_FIELD_7")
+                    .WithReservedBits(11, 4)
+                    .WithValueField(15, 4, name: "REG_I_72_FIELD_8")
+                    .WithValueField(19, 4, name: "REG_I_72_FIELD_9")
+                    .WithValueField(23, 2, name: "REG_I_72_FIELD_10")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_I.RegI_73, new DoubleWordRegister(this, 0x00005B8C)
+                    .WithValueField(0, 2, name: "REG_I_73_FIELD_1")
+                    .WithValueField(2, 3, name: "REG_I_73_FIELD_2")
+                    .WithValueField(5, 3, name: "REG_I_73_FIELD_3")
+                    .WithValueField(8, 3, name: "REG_I_73_FIELD_4")
+                    .WithValueField(11, 3, name: "REG_I_73_FIELD_5")
+                    .WithValueField(14, 2, name: "REG_I_73_FIELD_6")
+                    .WithValueField(16, 3, name: "REG_I_73_FIELD_7")
+                    .WithValueField(19, 3, name: "REG_I_73_FIELD_8")
+                    .WithValueField(22, 3, name: "REG_I_73_FIELD_9")
+                    .WithValueField(25, 3, name: "REG_I_73_FIELD_10")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_I.RegI_74, new DoubleWordRegister(this, 0x00006C09)
+                    .WithValueField(0, 2, name: "REG_I_74_FIELD_1")
+                    .WithReservedBits(2, 1)
+                    .WithFlag(3, name: "REG_I_74_FIELD_2")
+                    .WithValueField(4, 4, name: "REG_I_74_FIELD_3")
+                    .WithFlag(8, name: "REG_I_74_FIELD_4")
+                    .WithValueField(9, 4, name: "REG_I_74_FIELD_5")
+                    .WithValueField(13, 3, name: "REG_I_74_FIELD_6")
+                    .WithValueField(16, 3, name: "REG_I_74_FIELD_7")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_I.RegI_75, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_I_75_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_I_75_FIELD_2")
+                    .WithValueField(6, 3, name: "REG_I_75_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_I_75_FIELD_4")
+                    .WithValueField(12, 3, name: "REG_I_75_FIELD_5")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_I.RegI_76, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, FieldMode.Read, name: "REG_I_76_FIELD_1")
+                    .WithFlag(2, FieldMode.Read, name: "REG_I_76_FIELD_2")
+                    .WithFlag(3, FieldMode.Read, name: "REG_I_76_FIELD_3")
+                    .WithFlag(4, FieldMode.Read, name: "REG_I_76_FIELD_4")
+                    .WithFlag(5, FieldMode.Read, name: "REG_I_76_FIELD_5")
+                    .WithValueField(6, 10, FieldMode.Read, name: "REG_I_76_FIELD_6")
+                    .WithFlag(16, FieldMode.Read, name: "REG_I_76_FIELD_7")
+                    .WithFlag(17, FieldMode.Read, name: "REG_I_76_FIELD_8")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_I.RegI_77, new DoubleWordRegister(this, 0x0000000A)
+                    .WithValueField(0, 4, name: "REG_I_77_FIELD_1")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_I.RegI_78, new DoubleWordRegister(this, 0x000000C8)
+                    .WithValueField(0, 4, name: "REG_I_78_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_I_78_FIELD_2")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_79, new DoubleWordRegister(this, 0x00000008)
+                    .WithFlag(0, name: "REG_I_79_FIELD_1")
+                    .WithValueField(1, 3, name: "REG_I_79_FIELD_2")
+                    .WithFlag(4, name: "REG_I_79_FIELD_3")
+                    .WithFlag(5, name: "REG_I_79_FIELD_4")
+                    .WithFlag(6, name: "REG_I_79_FIELD_5")
+                    .WithFlag(7, name: "REG_I_79_FIELD_6")
+                    .WithFlag(8, name: "REG_I_79_FIELD_7")
+                    .WithReservedBits(9, 4)
+                    .WithFlag(13, name: "REG_I_79_FIELD_8")
+                    .WithFlag(14, name: "REG_I_79_FIELD_9")
+                    .WithReservedBits(15, 12)
+                    .WithFlag(27, name: "REG_I_79_FIELD_10")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)Registers_I.RegI_80, new DoubleWordRegister(this, 0x00000028)
+                    .WithFlag(0, name: "REG_I_80_FIELD_1")
+                    .WithFlag(1, name: "REG_I_80_FIELD_2")
+                    .WithFlag(2, name: "REG_I_80_FIELD_3")
+                    .WithFlag(3, name: "REG_I_80_FIELD_4")
+                    .WithFlag(4, name: "REG_I_80_FIELD_5")
+                    .WithFlag(5, name: "REG_I_80_FIELD_6")
+                    .WithReservedBits(6, 1)
+                    .WithFlag(7, name: "REG_I_80_FIELD_7")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_81, new DoubleWordRegister(this, 0x00000040)
+                    .WithValueField(0, 5, name: "REG_I_81_FIELD_1")
+                    .WithValueField(5, 2, name: "REG_I_81_FIELD_2")
+                    .WithReservedBits(7, 25)
+                },
+                {(long)Registers_I.RegI_82, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_82_FIELD_1")
+                    .WithReservedBits(1, 1)
+                    .WithFlag(2, name: "REG_I_82_FIELD_2")
+                    .WithFlag(3, name: "REG_I_82_FIELD_3")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_I.RegI_83, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_83_FIELD_1")
+                    .WithFlag(1, name: "REG_I_83_FIELD_2")
+                    .WithReservedBits(2, 4)
+                    .WithFlag(6, name: "REG_I_83_FIELD_3")
+                    .WithFlag(7, name: "REG_I_83_FIELD_4")
+                    .WithFlag(8, name: "REG_I_83_FIELD_5")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_I.RegI_84, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_84_FIELD_1")
+                    .WithFlag(1, name: "REG_I_84_FIELD_2")
+                    .WithFlag(2, name: "REG_I_84_FIELD_3")
+                    .WithFlag(3, name: "REG_I_84_FIELD_4")
+                    .WithFlag(4, name: "REG_I_84_FIELD_5")
+                    .WithFlag(5, name: "REG_I_84_FIELD_6")
+                    .WithFlag(6, name: "REG_I_84_FIELD_7")
+                    .WithFlag(7, name: "REG_I_84_FIELD_8")
+                    .WithFlag(8, name: "REG_I_84_FIELD_9")
+                    .WithFlag(9, name: "REG_I_84_FIELD_10")
+                    .WithFlag(10, name: "REG_I_84_FIELD_11")
+                    .WithFlag(11, name: "REG_I_84_FIELD_12")
+                    .WithFlag(12, name: "REG_I_84_FIELD_13")
+                    .WithFlag(13, name: "REG_I_84_FIELD_14")
+                    .WithReservedBits(14, 2)
+                    .WithFlag(16, name: "REG_I_84_FIELD_15")
+                    .WithFlag(17, name: "REG_I_84_FIELD_16")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_I.RegI_86, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_86_FIELD_1")
+                    .WithFlag(1, name: "REG_I_86_FIELD_2")
+                    .WithFlag(2, name: "REG_I_86_FIELD_3")
+                    .WithFlag(3, name: "REG_I_86_FIELD_4")
+                    .WithFlag(4, name: "REG_I_86_FIELD_5")
+                    .WithFlag(5, name: "REG_I_86_FIELD_6")
+                    .WithFlag(6, name: "REG_I_86_FIELD_7")
+                    .WithFlag(7, name: "REG_I_86_FIELD_8")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_87, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 5)
+                    .WithFlag(5, name: "REG_I_87_FIELD_1")
+                    .WithFlag(6, name: "REG_I_87_FIELD_2")
+                    .WithReservedBits(7, 25)
+                },
+                {(long)Registers_I.RegI_88, new DoubleWordRegister(this, 0x04020770)
+                    .WithValueField(0, 4, name: "REG_I_88_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_I_88_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_I_88_FIELD_3")
+                    .WithValueField(12, 2, name: "REG_I_88_FIELD_4")
+                    .WithValueField(14, 4, name: "REG_I_88_FIELD_5")
+                    .WithFlag(18, name: "REG_I_88_FIELD_6")
+                    .WithFlag(19, name: "REG_I_88_FIELD_7")
+                    .WithValueField(20, 4, name: "REG_I_88_FIELD_8")
+                    .WithValueField(24, 3, name: "REG_I_88_FIELD_9")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_I.RegI_89, new DoubleWordRegister(this, 0x0008080C)
+                    .WithValueField(0, 2, name: "REG_I_89_FIELD_1")
+                    .WithValueField(2, 2, name: "REG_I_89_FIELD_2")
+                    .WithValueField(4, 2, name: "REG_I_89_FIELD_3")
+                    .WithValueField(6, 3, name: "REG_I_89_FIELD_4")
+                    .WithValueField(9, 3, name: "REG_I_89_FIELD_5")
+                    .WithReservedBits(12, 4)
+                    .WithValueField(16, 4, name: "REG_I_89_FIELD_6")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)Registers_I.RegI_90, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "REG_I_90_FIELD_1")
+                    .WithFlag(2, name: "REG_I_90_FIELD_2")
+                    .WithFlag(3, name: "REG_I_90_FIELD_3")
+                    .WithFlag(4, name: "REG_I_90_FIELD_4")
+                    .WithFlag(5, name: "REG_I_90_FIELD_5")
+                    .WithFlag(6, name: "REG_I_90_FIELD_6")
+                    .WithReservedBits(7, 1)
+                    .WithFlag(8, name: "REG_I_90_FIELD_7")
+                    .WithFlag(9, name: "REG_I_90_FIELD_8")
+                    .WithFlag(10, name: "REG_I_90_FIELD_9")
+                    .WithReservedBits(11, 5)
+                    .WithFlag(16, name: "REG_I_90_FIELD_10")
+                    .WithFlag(17, name: "REG_I_90_FIELD_11")
+                    .WithFlag(18, name: "REG_I_90_FIELD_12")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_I.RegI_91, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, name: "REG_I_91_FIELD_1")
+                    .WithReservedBits(7, 4)
+                    .WithFlag(11, name: "REG_I_91_FIELD_2")
+                    .WithFlag(12, name: "REG_I_91_FIELD_3")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)Registers_I.RegI_92, new DoubleWordRegister(this, 0x002022AD)
+                    .WithValueField(0, 3, name: "REG_I_92_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_I_92_FIELD_2")
+                    .WithValueField(6, 2, name: "REG_I_92_FIELD_3")
+                    .WithValueField(8, 2, name: "REG_I_92_FIELD_4")
+                    .WithValueField(10, 4, name: "REG_I_92_FIELD_5")
+                    .WithValueField(14, 4, name: "REG_I_92_FIELD_6")
+                    .WithValueField(18, 4, name: "REG_I_92_FIELD_7")
+                    .WithValueField(22, 4, name: "REG_I_92_FIELD_8")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_I.RegI_93, new DoubleWordRegister(this, 0x00B2EE14)
+                    .WithValueField(0, 2, name: "REG_I_93_FIELD_1")
+                    .WithValueField(2, 2, name: "REG_I_93_FIELD_2")
+                    .WithFlag(4, name: "REG_I_93_FIELD_3")
+                    .WithValueField(5, 2, name: "REG_I_93_FIELD_4")
+                    .WithValueField(7, 2, name: "REG_I_93_FIELD_5")
+                    .WithValueField(9, 4, name: "REG_I_93_FIELD_6")
+                    .WithValueField(13, 4, name: "REG_I_93_FIELD_7")
+                    .WithFlag(17, name: "REG_I_93_FIELD_8")
+                    .WithValueField(18, 3, name: "REG_I_93_FIELD_9")
+                    .WithValueField(21, 2, name: "REG_I_93_FIELD_10")
+                    .WithFlag(23, name: "REG_I_93_FIELD_11")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_I.RegI_94, new DoubleWordRegister(this, 0x0000D5CD)
+                    .WithValueField(0, 5, name: "REG_I_94_FIELD_1")
+                    .WithValueField(5, 5, name: "REG_I_94_FIELD_2")
+                    .WithValueField(10, 3, name: "REG_I_94_FIELD_3")
+                    .WithValueField(13, 4, name: "REG_I_94_FIELD_4")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_I.RegI_95, new DoubleWordRegister(this, 0x00000002)
+                    .WithValueField(0, 2, name: "REG_I_95_FIELD_1")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_96, new DoubleWordRegister(this, 0x00000110)
+                    .WithValueField(0, 10, name: "REG_I_96_FIELD_1")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, name: "REG_I_96_FIELD_2")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)Registers_I.RegI_97, new DoubleWordRegister(this, 0x00000004)
+                    .WithValueField(0, 2, name: "REG_I_97_FIELD_1")
+                    .WithValueField(2, 2, name: "REG_I_97_FIELD_2")
+                    .WithValueField(4, 3, name: "REG_I_97_FIELD_3")
+                    .WithValueField(7, 3, name: "REG_I_97_FIELD_4")
+                    .WithValueField(10, 4, name: "REG_I_97_FIELD_5")
+                    .WithReservedBits(14, 18)
+                },
+                {(long)Registers_I.RegI_98, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "REG_I_98_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_I.RegI_99, new DoubleWordRegister(this, 0x008A7768)
+                    .WithValueField(0, 6, name: "REG_I_99_FIELD_1")
+                    .WithValueField(6, 6, name: "REG_I_99_FIELD_2")
+                    .WithValueField(12, 4, name: "REG_I_99_FIELD_3")
+                    .WithValueField(16, 3, name: "REG_I_99_FIELD_4")
+                    .WithValueField(19, 2, name: "REG_I_99_FIELD_5")
+                    .WithValueField(21, 3, name: "REG_I_99_FIELD_6")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_I.RegI_100, new DoubleWordRegister(this, 0x18CE2400)
+                    .WithFlag(0, name: "REG_I_100_FIELD_1")
+                    .WithFlag(1, name: "REG_I_100_FIELD_2")
+                    .WithFlag(2, name: "REG_I_100_FIELD_3")
+                    .WithValueField(3, 3, name: "REG_I_100_FIELD_4")
+                    .WithFlag(6, name: "REG_I_100_FIELD_5")
+                    .WithValueField(7, 3, name: "REG_I_100_FIELD_6")
+                    .WithFlag(10, name: "REG_I_100_FIELD_7")
+                    .WithValueField(11, 2, name: "REG_I_100_FIELD_8")
+                    .WithValueField(13, 2, name: "REG_I_100_FIELD_9")
+                    .WithValueField(15, 3, name: "REG_I_100_FIELD_10")
+                    .WithValueField(18, 3, name: "REG_I_100_FIELD_11")
+                    .WithFlag(21, name: "REG_I_100_FIELD_12")
+                    .WithValueField(22, 3, name: "REG_I_100_FIELD_13")
+                    .WithValueField(25, 5, name: "REG_I_100_FIELD_14")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_I.RegI_101, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_101_FIELD_1")
+                    .WithFlag(1, name: "REG_I_101_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_102, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_102_FIELD_1")
+                    .WithFlag(1, name: "REG_I_102_FIELD_2")
+                    .WithFlag(2, name: "REG_I_102_FIELD_3")
+                    .WithFlag(3, name: "REG_I_102_FIELD_4")
+                    .WithFlag(4, name: "REG_I_102_FIELD_5")
+                    .WithFlag(5, name: "REG_I_102_FIELD_6")
+                    .WithFlag(6, name: "REG_I_102_FIELD_7")
+                    .WithFlag(7, name: "REG_I_102_FIELD_8")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_103, new DoubleWordRegister(this, 0x0034521C)
+                    .WithValueField(0, 3, name: "REG_I_103_FIELD_1")
+                    .WithValueField(3, 4, name: "REG_I_103_FIELD_2")
+                    .WithValueField(7, 4, name: "REG_I_103_FIELD_3")
+                    .WithValueField(11, 3, name: "REG_I_103_FIELD_4")
+                    .WithValueField(14, 3, name: "REG_I_103_FIELD_5")
+                    .WithValueField(17, 3, name: "REG_I_103_FIELD_6")
+                    .WithValueField(20, 3, name: "REG_I_103_FIELD_7")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)Registers_I.RegI_104, new DoubleWordRegister(this, 0x0000400C)
+                    .WithValueField(0, 3, name: "REG_I_104_FIELD_1")
+                    .WithFlag(3, name: "REG_I_104_FIELD_2")
+                    .WithValueField(4, 8, name: "REG_I_104_FIELD_3")
+                    .WithFlag(12, name: "REG_I_104_FIELD_4")
+                    .WithFlag(13, name: "REG_I_104_FIELD_5")
+                    .WithFlag(14, name: "REG_I_104_FIELD_6")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_I.RegI_105, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "REG_I_105_FIELD_1")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_106, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_106_FIELD_1")
+                    .WithFlag(1, name: "REG_I_106_FIELD_2")
+                    .WithFlag(2, name: "REG_I_106_FIELD_3")
+                    .WithReservedBits(3, 29)
+                },
+                {(long)Registers_I.RegI_107, new DoubleWordRegister(this, 0x00000031)
+                    .WithValueField(0, 4, name: "REG_I_107_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_I_107_FIELD_2")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_108, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_108_FIELD_1")
+                    .WithFlag(1, name: "REG_I_108_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_109, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_109_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_I.RegI_110, new DoubleWordRegister(this, 0x00080007)
+                    .WithValueField(0, 3, name: "REG_I_110_FIELD_1")
+                    .WithValueField(3, 8, name: "REG_I_110_FIELD_2")
+                    .WithValueField(11, 3, name: "REG_I_110_FIELD_3")
+                    .WithFlag(14, name: "REG_I_110_FIELD_4")
+                    .WithFlag(15, name: "REG_I_110_FIELD_5")
+                    .WithFlag(16, name: "REG_I_110_FIELD_6")
+                    .WithValueField(17, 4, name: "REG_I_110_FIELD_7")
+                    .WithFlag(21, name: "REG_I_110_FIELD_8")
+                    .WithFlag(22, name: "REG_I_110_FIELD_9")
+                    .WithValueField(23, 3, name: "REG_I_110_FIELD_10")
+                    .WithValueField(26, 3, name: "REG_I_110_FIELD_11")
+                    .WithValueField(29, 3, name: "REG_I_110_FIELD_12")
+                },
+                {(long)Registers_I.RegI_111, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_111_FIELD_1")
+                    .WithFlag(1, name: "REG_I_111_FIELD_2")
+                    .WithReservedBits(2, 2)
+                    .WithFlag(4, name: "REG_I_111_FIELD_3")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_I.RegI_112, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_112_FIELD_1")
+                    .WithFlag(1, name: "REG_I_112_FIELD_2")
+                    .WithFlag(2, name: "REG_I_112_FIELD_3")
+                    .WithFlag(3, name: "REG_I_112_FIELD_4")
+                    .WithFlag(4, name: "REG_I_112_FIELD_5")
+                    .WithFlag(5, name: "REG_I_112_FIELD_6")
+                    .WithFlag(6, name: "REG_I_112_FIELD_7")
+                    .WithFlag(7, name: "REG_I_112_FIELD_8")
+                    .WithFlag(8, name: "REG_I_112_FIELD_9")
+                    .WithFlag(9, name: "REG_I_112_FIELD_10")
+                    .WithFlag(10, name: "REG_I_112_FIELD_11")
+                    .WithFlag(11, name: "REG_I_112_FIELD_12")
+                    .WithFlag(12, name: "REG_I_112_FIELD_13")
+                    .WithFlag(13, name: "REG_I_112_FIELD_14")
+                    .WithFlag(14, name: "REG_I_112_FIELD_15")
+                    .WithFlag(15, name: "REG_I_112_FIELD_16")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_I.RegI_113, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_113_FIELD_1")
+                    .WithFlag(1, name: "REG_I_113_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_114, new DoubleWordRegister(this, 0x0023004D)
+                    .WithValueField(0, 4, name: "REG_I_114_FIELD_1")
+                    .WithFlag(4, name: "REG_I_114_FIELD_2")
+                    .WithValueField(5, 4, name: "REG_I_114_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_I_114_FIELD_4")
+                    .WithFlag(12, name: "REG_I_114_FIELD_5")
+                    .WithValueField(13, 4, name: "REG_I_114_FIELD_6")
+                    .WithFlag(17, name: "REG_I_114_FIELD_7")
+                    .WithFlag(18, name: "REG_I_114_FIELD_8")
+                    .WithFlag(19, name: "REG_I_114_FIELD_9")
+                    .WithValueField(20, 4, name: "REG_I_114_FIELD_10")
+                    .WithValueField(24, 3, name: "REG_I_114_FIELD_11")
+                    .WithValueField(27, 3, name: "REG_I_114_FIELD_12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_I.RegI_115, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_115_FIELD_1")
+                    .WithFlag(1, name: "REG_I_115_FIELD_2")
+                    .WithFlag(2, name: "REG_I_115_FIELD_3")
+                    .WithFlag(3, name: "REG_I_115_FIELD_4")
+                    .WithReservedBits(4, 4)
+                    .WithFlag(8, name: "REG_I_115_FIELD_5")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_I.RegI_116, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_116_FIELD_1")
+                    .WithReservedBits(1, 3)
+                    .WithFlag(4, name: "REG_I_116_FIELD_2")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_I.RegI_117, new DoubleWordRegister(this, 0x01000000)
+                    .WithFlag(0, name: "REG_I_117_FIELD_1")
+                    .WithFlag(1, name: "REG_I_117_FIELD_2")
+                    .WithFlag(2, name: "REG_I_117_FIELD_3")
+                    .WithValueField(3, 4, name: "REG_I_117_FIELD_4")
+                    .WithValueField(7, 2, name: "REG_I_117_FIELD_5")
+                    .WithValueField(9, 4, name: "REG_I_117_FIELD_6")
+                    .WithFlag(13, name: "REG_I_117_FIELD_7")
+                    .WithValueField(14, 4, name: "REG_I_117_FIELD_8")
+                    .WithValueField(18, 3, name: "REG_I_117_FIELD_9")
+                    .WithValueField(21, 2, name: "REG_I_117_FIELD_10")
+                    .WithValueField(23, 3, name: "REG_I_117_FIELD_11")
+                    .WithValueField(26, 3, name: "REG_I_117_FIELD_12")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)Registers_I.RegI_118, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_118_FIELD_1")
+                    .WithFlag(1, name: "REG_I_118_FIELD_2")
+                    .WithFlag(2, name: "REG_I_118_FIELD_3")
+                    .WithFlag(3, name: "REG_I_118_FIELD_4")
+                    .WithFlag(4, name: "REG_I_118_FIELD_5")
+                    .WithFlag(5, name: "REG_I_118_FIELD_6")
+                    .WithFlag(6, name: "REG_I_118_FIELD_7")
+                    .WithFlag(7, name: "REG_I_118_FIELD_8")
+                    .WithFlag(8, name: "REG_I_118_FIELD_9")
+                    .WithFlag(9, name: "REG_I_118_FIELD_10")
+                    .WithFlag(10, name: "REG_I_118_FIELD_11")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)Registers_I.RegI_119, new DoubleWordRegister(this, 0x00000001)
+                    .WithValueField(0, 2, name: "REG_I_119_FIELD_1")
+                    .WithValueField(2, 3, name: "REG_I_119_FIELD_2")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_I.RegI_120, new DoubleWordRegister(this, 0x669856D9)
+                    .WithValueField(0, 4, name: "REG_I_120_FIELD_1")
+                    .WithValueField(4, 6, name: "REG_I_120_FIELD_2")
+                    .WithValueField(10, 2, name: "REG_I_120_FIELD_3")
+                    .WithValueField(12, 2, name: "REG_I_120_FIELD_4")
+                    .WithValueField(14, 2, name: "REG_I_120_FIELD_5")
+                    .WithValueField(16, 2, name: "REG_I_120_FIELD_6")
+                    .WithValueField(18, 6, name: "REG_I_120_FIELD_7")
+                    .WithValueField(24, 6, name: "REG_I_120_FIELD_8")
+                    .WithValueField(30, 2, name: "REG_I_120_FIELD_9")
+                },
+                {(long)Registers_I.RegI_121, new DoubleWordRegister(this, 0x000077DF)
+                    .WithValueField(0, 6, name: "REG_I_121_FIELD_1")
+                    .WithValueField(6, 6, name: "REG_I_121_FIELD_2")
+                    .WithValueField(12, 4, name: "REG_I_121_FIELD_3")
+                    .WithValueField(16, 4, name: "REG_I_121_FIELD_4")
+                    .WithValueField(20, 4, name: "REG_I_121_FIELD_5")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_I.RegI_122, new DoubleWordRegister(this, 0x000000AA)
+                    .WithValueField(0, 4, name: "REG_I_122_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_I_122_FIELD_2")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_I.RegI_123, new DoubleWordRegister(this, 0x0020004D)
+                    .WithValueField(0, 4, name: "REG_I_123_FIELD_1")
+                    .WithFlag(4, name: "REG_I_123_FIELD_2")
+                    .WithValueField(5, 4, name: "REG_I_123_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_I_123_FIELD_4")
+                    .WithFlag(12, name: "REG_I_123_FIELD_5")
+                    .WithReservedBits(13, 6)
+                    .WithFlag(19, name: "REG_I_123_FIELD_6")
+                    .WithValueField(20, 4, name: "REG_I_123_FIELD_7")
+                    .WithValueField(24, 3, name: "REG_I_123_FIELD_8")
+                    .WithValueField(27, 3, name: "REG_I_123_FIELD_9")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_I.RegI_124, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_124_FIELD_1")
+                    .WithFlag(1, name: "REG_I_124_FIELD_2")
+                    .WithReservedBits(2, 1)
+                    .WithValueField(3, 4, name: "REG_I_124_FIELD_3")
+                    .WithValueField(7, 2, name: "REG_I_124_FIELD_4")
+                    .WithReservedBits(9, 4)
+                    .WithFlag(13, name: "REG_I_124_FIELD_5")
+                    .WithValueField(14, 4, name: "REG_I_124_FIELD_6")
+                    .WithValueField(18, 3, name: "REG_I_124_FIELD_7")
+                    .WithValueField(21, 2, name: "REG_I_124_FIELD_8")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)Registers_I.RegI_125, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_125_FIELD_1")
+                    .WithFlag(1, name: "REG_I_125_FIELD_2")
+                    .WithFlag(2, name: "REG_I_125_FIELD_3")
+                    .WithFlag(3, name: "REG_I_125_FIELD_4")
+                    .WithFlag(4, name: "REG_I_125_FIELD_5")
+                    .WithFlag(5, name: "REG_I_125_FIELD_6")
+                    .WithFlag(6, name: "REG_I_125_FIELD_7")
+                    .WithReservedBits(7, 1)
+                    .WithFlag(8, name: "REG_I_125_FIELD_8")
+                    .WithFlag(9, name: "REG_I_125_FIELD_9")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)Registers_I.RegI_126, new DoubleWordRegister(this, 0x00000180)
+                    .WithFlag(0, name: "REG_I_126_FIELD_1")
+                    .WithValueField(1, 7, name: "REG_I_126_FIELD_2")
+                    .WithValueField(8, 3, name: "REG_I_126_FIELD_3")
+                    .WithValueField(11, 4, name: "REG_I_126_FIELD_4")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_I.RegI_127, new DoubleWordRegister(this, 0x00000099)
+                    .WithFlag(0, name: "REG_I_127_FIELD_1")
+                    .WithFlag(1, name: "REG_I_127_FIELD_2")
+                    .WithFlag(2, name: "REG_I_127_FIELD_3")
+                    .WithValueField(3, 3, name: "REG_I_127_FIELD_4")
+                    .WithValueField(6, 2, name: "REG_I_127_FIELD_5")
+                    .WithFlag(8, name: "REG_I_127_FIELD_6")
+                    .WithFlag(9, name: "REG_I_127_FIELD_7")
+                    .WithFlag(10, name: "REG_I_127_FIELD_8")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)Registers_I.RegI_128, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_128_FIELD_1")
+                    .WithFlag(1, name: "REG_I_128_FIELD_2")
+                    .WithFlag(2, name: "REG_I_128_FIELD_3")
+                    .WithValueField(3, 3, name: "REG_I_128_FIELD_4")
+                    .WithValueField(6, 3, name: "REG_I_128_FIELD_5")
+                    .WithFlag(9, name: "REG_I_128_FIELD_6")
+                    .WithValueField(10, 4, name: "REG_I_128_FIELD_7")
+                    .WithValueField(14, 4, name: "REG_I_128_FIELD_8")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_I.RegI_129, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "REG_I_129_FIELD_1")
+                    .WithFlag(1, FieldMode.Read, name: "REG_I_129_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_130, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_130_FIELD_1")
+                    .WithValueField(1, 8, name: "REG_I_130_FIELD_2")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)Registers_I.RegI_139, new DoubleWordRegister(this, 0x00000001)
+                    .WithFlag(0, name: "REG_I_139_FIELD_1")
+                    .WithFlag(1, name: "REG_I_139_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_140, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_I_140_FIELD_1")
+                    .WithFlag(1, name: "REG_I_140_FIELD_2")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_141, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "REG_I_141_FIELD_1")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers_I.RegI_142, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, name: "REG_I_142_FIELD_1")
+                    .WithReservedBits(6, 2)
+                    .WithValueField(8, 7, name: "REG_I_142_FIELD_2")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_I.RegI_143, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 5)
+                    .WithFlag(5, name: "REG_I_143_FIELD_1")
+                    .WithReservedBits(6, 26)
+                },
             };
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
@@ -3397,6 +6465,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers_K.RegK_1, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_K_1_FIELD_1")
+                },
+                {(long)Registers_K.RegK_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_K_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)Registers_K.RegK_3, new DoubleWordRegister(this)
                     .WithFlag(0, name: "REG_K_3_FIELD_1")
                     .WithFlag(1, name: "REG_K_3_FIELD_2")
@@ -3480,6 +6555,277 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(0, 18, out field_379, name: "REG_K_17_FIELD_1")
                     .WithReservedBits(18, 14)
                 },
+                {(long)Registers_K.RegK_7, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_K_7_FIELD_1")
+                    .WithFlag(1, name: "REG_K_7_FIELD_2")
+                    .WithFlag(2, name: "REG_K_7_FIELD_3")
+                    .WithReservedBits(3, 1)
+                    .WithFlag(4, name: "REG_K_7_FIELD_4")
+                    .WithFlag(5, name: "REG_K_7_FIELD_5")
+                    .WithReservedBits(6, 3)
+                    .WithFlag(9, name: "REG_K_7_FIELD_6")
+                    .WithFlag(10, name: "REG_K_7_FIELD_7")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)Registers_K.RegK_8, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_K_8_FIELD_1")
+                    .WithFlag(1, name: "REG_K_8_FIELD_2")
+                    .WithFlag(2, name: "REG_K_8_FIELD_3")
+                    .WithReservedBits(3, 1)
+                    .WithFlag(4, name: "REG_K_8_FIELD_4")
+                    .WithFlag(5, name: "REG_K_8_FIELD_5")
+                    .WithReservedBits(6, 3)
+                    .WithFlag(9, name: "REG_K_8_FIELD_6")
+                    .WithFlag(10, name: "REG_K_8_FIELD_7")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)Registers_K.RegK_11, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 3, name: "REG_K_11_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_K_11_FIELD_2")
+                    .WithValueField(6, 3, name: "REG_K_11_FIELD_3")
+                    .WithFlag(9, name: "REG_K_11_FIELD_4")
+                    .WithFlag(10, name: "REG_K_11_FIELD_5")
+                    .WithFlag(11, name: "REG_K_11_FIELD_6")
+                    .WithFlag(12, name: "REG_K_11_FIELD_7")
+                    .WithFlag(13, name: "REG_K_11_FIELD_8")
+                    .WithFlag(14, name: "REG_K_11_FIELD_9")
+                    .WithFlag(15, name: "REG_K_11_FIELD_10")
+                    .WithValueField(16, 13, name: "REG_K_11_FIELD_11")
+                    .WithFlag(29, name: "REG_K_11_FIELD_12")
+                    .WithFlag(30, name: "REG_K_11_FIELD_13")
+                    .WithFlag(31, name: "REG_K_11_FIELD_14")
+                },
+                {(long)Registers_K.RegK_12, new DoubleWordRegister(this, 0x00000021)
+                    .WithValueField(0, 7, name: "REG_K_12_FIELD_1")
+                    .WithFlag(7, name: "REG_K_12_FIELD_2")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_K.RegK_14, new DoubleWordRegister(this)
+                    .WithValueField(0, 20, name: "REG_K_14_FIELD_1")
+                    .WithFlag(20, name: "REG_K_14_FIELD_2")
+                    .WithReservedBits(21, 11)
+                },
+                {(long)Registers_K.RegK_16, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, name: "REG_K_16_FIELD_1")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)Registers_K.RegK_18, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "REG_K_18_FIELD_1")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_K.RegK_19, new DoubleWordRegister(this, 0x00004400)
+                    .WithValueField(0, 11, name: "REG_K_19_FIELD_1")
+                    .WithValueField(11, 4, name: "REG_K_19_FIELD_2")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_K.RegK_20, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_K_20_FIELD_1")
+                    .WithFlag(2, name: "REG_K_20_FIELD_2")
+                    .WithValueField(3, 3, name: "REG_K_20_FIELD_3")
+                    .WithValueField(6, 3, name: "REG_K_20_FIELD_4")
+                    .WithFlag(9, name: "REG_K_20_FIELD_5")
+                    .WithFlag(10, name: "REG_K_20_FIELD_6")
+                    .WithFlag(11, name: "REG_K_20_FIELD_7")
+                    .WithFlag(12, name: "REG_K_20_FIELD_8")
+                    .WithFlag(13, name: "REG_K_20_FIELD_9")
+                    .WithFlag(14, name: "REG_K_20_FIELD_10")
+                    .WithValueField(15, 3, name: "REG_K_20_FIELD_11")
+                    .WithFlag(18, name: "REG_K_20_FIELD_12")
+                    .WithFlag(19, name: "REG_K_20_FIELD_13")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)Registers_K.RegK_21, new DoubleWordRegister(this, 0x000001F7)
+                    .WithValueField(0, 4, name: "REG_K_21_FIELD_1")
+                    .WithValueField(4, 10, name: "REG_K_21_FIELD_2")
+                    .WithReservedBits(14, 18)
+                },
+                {(long)Registers_K.RegK_22, new DoubleWordRegister(this, 0x00800000)
+                    .WithValueField(0, 3, name: "REG_K_22_FIELD_1")
+                    .WithValueField(3, 19, name: "REG_K_22_FIELD_2")
+                    .WithFlag(22, name: "REG_K_22_FIELD_3")
+                    .WithValueField(23, 2, name: "REG_K_22_FIELD_4")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_K.RegK_23, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, name: "REG_K_23_FIELD_1")
+                    .WithFlag(9, name: "REG_K_23_FIELD_2")
+                    .WithValueField(10, 13, name: "REG_K_23_FIELD_3")
+                    .WithValueField(23, 7, name: "REG_K_23_FIELD_4")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_K.RegK_24, new DoubleWordRegister(this, 0x01FF0FFF)
+                    .WithValueField(0, 14, name: "REG_K_24_FIELD_1")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 14, name: "REG_K_24_FIELD_2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_K.RegK_25, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_K_25_FIELD_1")
+                    .WithFlag(1, name: "REG_K_25_FIELD_2")
+                    .WithFlag(2, name: "REG_K_25_FIELD_3")
+                    .WithFlag(3, name: "REG_K_25_FIELD_4")
+                    .WithFlag(4, name: "REG_K_25_FIELD_5")
+                    .WithFlag(5, name: "REG_K_25_FIELD_6")
+                    .WithFlag(6, name: "REG_K_25_FIELD_7")
+                    .WithFlag(7, name: "REG_K_25_FIELD_8")
+                    .WithValueField(8, 4, name: "REG_K_25_FIELD_9")
+                    .WithValueField(12, 4, name: "REG_K_25_FIELD_10")
+                    .WithValueField(16, 4, name: "REG_K_25_FIELD_11")
+                    .WithValueField(20, 4, name: "REG_K_25_FIELD_12")
+                    .WithValueField(24, 4, name: "REG_K_25_FIELD_13")
+                    .WithValueField(28, 4, name: "REG_K_25_FIELD_14")
+                },
+                {(long)Registers_K.RegK_26, new DoubleWordRegister(this)
+                    .WithValueField(0, 22, FieldMode.Read, name: "REG_K_26_FIELD_1")
+                    .WithFlag(22, FieldMode.Read, name: "REG_K_26_FIELD_2")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)Registers_K.RegK_27, new DoubleWordRegister(this)
+                    .WithValueField(0, 22, FieldMode.Read, name: "REG_K_27_FIELD_1")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_K.RegK_28, new DoubleWordRegister(this, 0x00008040)
+                    .WithValueField(0, 9, name: "REG_K_28_FIELD_1")
+                    .WithValueField(9, 9, name: "REG_K_28_FIELD_2")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_K.RegK_29, new DoubleWordRegister(this, 0x00000002)
+                    .WithValueField(0, 3, name: "REG_K_29_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_K_29_FIELD_2")
+                    .WithValueField(6, 5, name: "REG_K_29_FIELD_3")
+                    .WithValueField(11, 5, name: "REG_K_29_FIELD_4")
+                    .WithValueField(16, 5, name: "REG_K_29_FIELD_5")
+                    .WithValueField(21, 5, name: "REG_K_29_FIELD_6")
+                    .WithValueField(26, 5, name: "REG_K_29_FIELD_7")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_K.RegK_30, new DoubleWordRegister(this, 0x00000004)
+                    .WithValueField(0, 3, name: "REG_K_30_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_K_30_FIELD_2")
+                    .WithValueField(6, 5, name: "REG_K_30_FIELD_3")
+                    .WithValueField(11, 5, name: "REG_K_30_FIELD_4")
+                    .WithValueField(16, 5, name: "REG_K_30_FIELD_5")
+                    .WithValueField(21, 5, name: "REG_K_30_FIELD_6")
+                    .WithValueField(26, 5, name: "REG_K_30_FIELD_7")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_K.RegK_31, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_K_31_FIELD_1")
+                    .WithFlag(1, name: "REG_K_31_FIELD_2")
+                    .WithValueField(2, 17, name: "REG_K_31_FIELD_3")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_K.RegK_32, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "REG_K_32_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_K_32_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_K_32_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_K_32_FIELD_4")
+                    .WithValueField(16, 4, name: "REG_K_32_FIELD_5")
+                    .WithValueField(20, 4, name: "REG_K_32_FIELD_6")
+                    .WithValueField(24, 4, name: "REG_K_32_FIELD_7")
+                    .WithValueField(28, 4, name: "REG_K_32_FIELD_8")
+                },
+                {(long)Registers_K.RegK_33, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "REG_K_33_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_K_33_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_K_33_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_K_33_FIELD_4")
+                    .WithValueField(16, 4, name: "REG_K_33_FIELD_5")
+                    .WithValueField(20, 4, name: "REG_K_33_FIELD_6")
+                    .WithValueField(24, 4, name: "REG_K_33_FIELD_7")
+                    .WithValueField(28, 4, name: "REG_K_33_FIELD_8")
+                },
+                {(long)Registers_K.RegK_34, new DoubleWordRegister(this, 0x000F0000)
+                    .WithValueField(0, 4, name: "REG_K_34_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_K_34_FIELD_2")
+                    .WithValueField(8, 3, name: "REG_K_34_FIELD_3")
+                    .WithValueField(11, 3, name: "REG_K_34_FIELD_4")
+                    .WithFlag(14, name: "REG_K_34_FIELD_5")
+                    .WithFlag(15, name: "REG_K_34_FIELD_6")
+                    .WithValueField(16, 4, name: "REG_K_34_FIELD_7")
+                    .WithValueField(20, 4, name: "REG_K_34_FIELD_8")
+                    .WithFlag(24, name: "REG_K_34_FIELD_9")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_K.RegK_35, new DoubleWordRegister(this)
+                    .WithValueField(0, 22, name: "REG_K_35_FIELD_1")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_K.RegK_36, new DoubleWordRegister(this)
+                    .WithValueField(0, 19, name: "REG_K_36_FIELD_1")
+                    .WithValueField(19, 11, name: "REG_K_36_FIELD_2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_K.RegK_37, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_K_37_FIELD_1")
+                    .WithFlag(3, name: "REG_K_37_FIELD_2")
+                    .WithFlag(4, name: "REG_K_37_FIELD_3")
+                    .WithFlag(5, name: "REG_K_37_FIELD_4")
+                    .WithFlag(6, name: "REG_K_37_FIELD_5")
+                    .WithValueField(7, 2, name: "REG_K_37_FIELD_6")
+                    .WithValueField(9, 13, name: "REG_K_37_FIELD_7")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_K.RegK_38, new DoubleWordRegister(this, 0x00000010)
+                    .WithValueField(0, 3, name: "REG_K_38_FIELD_1")
+                    .WithFlag(3, name: "REG_K_38_FIELD_2")
+                    .WithFlag(4, name: "REG_K_38_FIELD_3")
+                    .WithFlag(5, name: "REG_K_38_FIELD_4")
+                    .WithFlag(6, name: "REG_K_38_FIELD_5")
+                    .WithValueField(7, 2, name: "REG_K_38_FIELD_6")
+                    .WithValueField(9, 13, name: "REG_K_38_FIELD_7")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_K.RegK_39, new DoubleWordRegister(this, 0x00000040)
+                    .WithFlag(0, name: "REG_K_39_FIELD_1")
+                    .WithValueField(1, 6, name: "REG_K_39_FIELD_2")
+                    .WithValueField(7, 4, name: "REG_K_39_FIELD_3")
+                    .WithValueField(11, 3, name: "REG_K_39_FIELD_4")
+                    .WithValueField(14, 2, name: "REG_K_39_FIELD_5")
+                    .WithFlag(16, name: "REG_K_39_FIELD_6")
+                    .WithFlag(17, name: "REG_K_39_FIELD_7")
+                    .WithFlag(18, name: "REG_K_39_FIELD_8")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)Registers_K.RegK_40, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_K_40_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_K_40_FIELD_2")
+                    .WithValueField(6, 3, name: "REG_K_40_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_K_40_FIELD_4")
+                    .WithValueField(12, 3, name: "REG_K_40_FIELD_5")
+                    .WithValueField(15, 3, name: "REG_K_40_FIELD_6")
+                    .WithValueField(18, 3, name: "REG_K_40_FIELD_7")
+                    .WithValueField(21, 3, name: "REG_K_40_FIELD_8")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_K.RegK_41, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "REG_K_41_FIELD_1")
+                    .WithValueField(4, 4, name: "REG_K_41_FIELD_2")
+                    .WithValueField(8, 4, name: "REG_K_41_FIELD_3")
+                    .WithValueField(12, 4, name: "REG_K_41_FIELD_4")
+                    .WithValueField(16, 4, name: "REG_K_41_FIELD_5")
+                    .WithValueField(20, 3, name: "REG_K_41_FIELD_6")
+                    .WithFlag(23, name: "REG_K_41_FIELD_7")
+                    .WithFlag(24, name: "REG_K_41_FIELD_8")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)Registers_K.RegK_42, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_K_42_FIELD_1")
+                    .WithValueField(3, 3, name: "REG_K_42_FIELD_2")
+                    .WithValueField(6, 3, name: "REG_K_42_FIELD_3")
+                    .WithValueField(9, 3, name: "REG_K_42_FIELD_4")
+                    .WithValueField(12, 3, name: "REG_K_42_FIELD_5")
+                    .WithValueField(15, 3, name: "REG_K_42_FIELD_6")
+                    .WithValueField(18, 3, name: "REG_K_42_FIELD_7")
+                    .WithValueField(21, 3, name: "REG_K_42_FIELD_8")
+                    .WithValueField(24, 3, name: "REG_K_42_FIELD_9")
+                    .WithValueField(27, 3, name: "REG_K_42_FIELD_10")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)Registers_K.RegK_43, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_K_43_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
             };
 
             return new DoubleWordRegisterCollection(this, registerDictionary);
@@ -3489,7 +6835,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
-                {(long)Registers_B.RegB_3, new DoubleWordRegister(this)
+                {(long)Registers_B.RegB_1, new DoubleWordRegister(this, 0x00000000)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_B_1_FIELD_1")
+                },
+                {(long)Registers_B.RegB_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_B_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_B.RegB_3, new DoubleWordRegister(this, 0x00000704)
                     .WithFlag(0, name: "REG_B_3_FIELD_1")
                     .WithFlag(1, name: "REG_B_3_FIELD_2")
                     .WithEnumField<DoubleWordRegister, Enumeration_D>(2, 2, out field_47, name: "REG_B_3_FIELD_3")
@@ -3501,6 +6854,27 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(12, name: "REG_B_3_FIELD_8")
                     .WithReservedBits(13, 19)
                 },
+                {(long)Registers_B.RegB_4, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "REG_B_4_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_B.RegB_5, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_B_5_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_B.RegB_6, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_B_6_FIELD_1")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_B.RegB_7, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_B_7_FIELD_1")
+                },
+                {(long)Registers_B.RegB_8, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_B_8_FIELD_1")
+                },
+                {(long)Registers_B.RegB_9, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_B_9_FIELD_1")
+                },
             };
 
             return new DoubleWordRegisterCollection(this, registerDictionary);
@@ -3510,13 +6884,20 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers_C.RegC_1, new DoubleWordRegister(this, 0x00000007)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_C_1_FIELD_1")
+                },
+                {(long)Registers_C.RegC_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_C_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)Registers_C.RegC_3, new DoubleWordRegister(this)
                     .WithValueField(0, 5, name: "REG_C_3_FIELD_1")
                     .WithFlag(5, out field_59, FieldMode.Read, name: "REG_C_3_FIELD_2")
                     .WithFlag(6, out field_58, FieldMode.Read, name: "REG_C_3_FIELD_3")
                     .WithFlag(7, name: "REG_C_3_FIELD_4")
                     .WithFlag(8, out field_109, FieldMode.Read, name: "REG_C_3_FIELD_5")
-                    .WithFlag(9, FieldMode.Read, valueProviderCallback: _ => true, name: "REG_C_3_FIELD_6")
+                    .WithFlag(9, FieldMode.Read, valueProviderCallback: _ => FRC_frameOk, name: "REG_C_3_FIELD_6")
                     .WithFlag(10, FieldMode.Read, valueProviderCallback: _ => FRC_rxAbortInProgress, name: "REG_C_3_FIELD_7")
                     .WithFlag(11, name: "REG_C_3_FIELD_8")
                     .WithFlag(12, name: "REG_C_3_FIELD_9")
@@ -3525,11 +6906,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(15, name: "REG_C_3_FIELD_12")
                     .WithFlag(16, name: "REG_C_3_FIELD_13")
                     .WithFlag(17, name: "REG_C_3_FIELD_14")
-                    .WithFlag(18, name: "REG_C_3_FIELD_15")
+                    .WithFlag(18, FieldMode.Read, valueProviderCallback: _ => FRC_frameLengthError, name: "REG_C_3_FIELD_15")
                     .WithFlag(19, name: "REG_C_3_FIELD_16")
                     .WithValueField(20, 5, out field_71, name: "REG_C_3_FIELD_17")
                     .WithFlag(25, name: "REG_C_3_FIELD_18")
-                    .WithFlag(26, name: "REG_C_3_FIELD_19")
+                    .WithFlag(26, FieldMode.Read, valueProviderCallback: _ => FRC_crcErrorTolerated, name: "REG_C_3_FIELD_19")
                     .WithReservedBits(27, 5)
                 },
                 {(long)Registers_C.RegC_4, new DoubleWordRegister(this)
@@ -3544,7 +6925,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(21, 4, name: "REG_C_4_FIELD_8")
                     .WithReservedBits(25, 7)
                 },
-                {(long)Registers_C.RegC_5, new DoubleWordRegister(this)
+                {(long)Registers_C.RegC_5, new DoubleWordRegister(this, 0x00004FFF)
                     .WithValueField(0, 12, out field_74, name: "REG_C_5_FIELD_1")
                     .WithValueField(12, 4, out field_72, name: "REG_C_5_FIELD_2")
                     .WithReservedBits(16, 16)
@@ -3589,7 +6970,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(13, name: "REG_C_12_FIELD_14")
                     .WithReservedBits(14, 18)
                 },
-                {(long)Registers_C.RegC_19, new DoubleWordRegister(this)
+                {(long)Registers_C.RegC_19, new DoubleWordRegister(this, 0x0B008700)
                     .WithFlag(0, name: "REG_C_19_FIELD_1")
                     .WithFlag(1, name: "REG_C_19_FIELD_2")
                     .WithFlag(2, name: "REG_C_19_FIELD_3")
@@ -3642,7 +7023,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)Registers_C.RegC_27, new DoubleWordRegister(this)
                     .WithFlag(0, out field_139, name: "REG_C_27_FIELD_1")
                     .WithFlag(1, out field_137, name: "REG_C_27_FIELD_2")
-                    .WithFlag(2, name: "REG_C_27_FIELD_3")
+                    .WithFlag(2, out field_418, name: "REG_C_27_FIELD_3")
                     .WithFlag(3, out field_144, name: "REG_C_27_FIELD_4")
                     .WithFlag(4, out field_104, name: "REG_C_27_FIELD_5")
                     .WithFlag(5, out field_92, name: "REG_C_27_FIELD_6")
@@ -3677,7 +7058,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)Registers_C.RegC_28, new DoubleWordRegister(this)
                     .WithFlag(0, out field_140, name: "REG_C_28_FIELD_1")
                     .WithFlag(1, out field_138, name: "REG_C_28_FIELD_2")
-                    .WithFlag(2, name: "REG_C_28_FIELD_3")
+                    .WithFlag(2, out field_419, name: "REG_C_28_FIELD_3")
                     .WithFlag(3, out field_145, name: "REG_C_28_FIELD_4")
                     .WithFlag(4, out field_105, name: "REG_C_28_FIELD_5")
                     .WithFlag(5, out field_93, name: "REG_C_28_FIELD_6")
@@ -3712,7 +7093,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)Registers_C.RegC_42, new DoubleWordRegister(this)
                     .WithFlag(0, out field_131, name: "REG_C_42_FIELD_1")
                     .WithFlag(1, out field_129, name: "REG_C_42_FIELD_2")
-                    .WithFlag(2, name: "REG_C_42_FIELD_3")
+                    .WithFlag(2, out field_416, name: "REG_C_42_FIELD_3")
                     .WithFlag(3, out field_135, name: "REG_C_42_FIELD_4")
                     .WithFlag(4, out field_123, name: "REG_C_42_FIELD_5")
                     .WithFlag(5, out field_121, name: "REG_C_42_FIELD_6")
@@ -3747,7 +7128,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)Registers_C.RegC_43, new DoubleWordRegister(this)
                     .WithFlag(0, out field_132, name: "REG_C_43_FIELD_1")
                     .WithFlag(1, out field_130, name: "REG_C_43_FIELD_2")
-                    .WithFlag(2, name: "REG_C_43_FIELD_3")
+                    .WithFlag(2, out field_417, name: "REG_C_43_FIELD_3")
                     .WithFlag(3, out field_136, name: "REG_C_43_FIELD_4")
                     .WithFlag(4, out field_124, name: "REG_C_43_FIELD_5")
                     .WithFlag(5, out field_122, name: "REG_C_43_FIELD_6")
@@ -3836,7 +7217,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(0, 6, out field_76, FieldMode.Read, name: "REG_C_50_FIELD_1")
                     .WithReservedBits(6, 24)
                 },
-                {(long)Registers_C.RegC_31, new DoubleWordRegister(this)
+                {(long)Registers_C.RegC_31, new DoubleWordRegister(this, 0x070000FC)
                     .WithValueField(0, 2, name: "REG_C_31_FIELD_1")
                     .WithFlag(2, name: "REG_C_31_FIELD_2")
                     .WithFlag(3, out field_87, name: "REG_C_31_FIELD_3")
@@ -3868,6 +7249,308 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(9, 23)
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
+                {(long)Registers_C.RegC_6, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_C_6_FIELD_1")
+                    .WithFlag(1, name: "REG_C_6_FIELD_2")
+                    .WithFlag(2, name: "REG_C_6_FIELD_3")
+                    .WithReservedBits(3, 5)
+                    .WithValueField(8, 8, name: "REG_C_6_FIELD_4")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_C.RegC_7, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_C_7_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_13, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "REG_C_13_FIELD_1")
+                    .WithValueField(5, 2, name: "REG_C_13_FIELD_2")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 4, name: "REG_C_13_FIELD_3")
+                    .WithFlag(12, name: "REG_C_13_FIELD_4")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)Registers_C.RegC_14, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_C_14_FIELD_1")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_C.RegC_15, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_C_15_FIELD_1")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_C.RegC_16, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_C_16_FIELD_1")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 2, name: "REG_C_16_FIELD_2")
+                    .WithFlag(6, name: "REG_C_16_FIELD_3")
+                    .WithFlag(7, name: "REG_C_16_FIELD_4")
+                    .WithValueField(8, 2, name: "REG_C_16_FIELD_5")
+                    .WithValueField(10, 2, name: "REG_C_16_FIELD_6")
+                    .WithValueField(12, 4, name: "REG_C_16_FIELD_7")
+                    .WithFlag(16, name: "REG_C_16_FIELD_8")
+                    .WithFlag(17, name: "REG_C_16_FIELD_9")
+                    .WithFlag(18, name: "REG_C_16_FIELD_10")
+                    .WithFlag(19, name: "REG_C_16_FIELD_11")
+                    .WithFlag(20, name: "REG_C_16_FIELD_12")
+                    .WithFlag(21, name: "REG_C_16_FIELD_13")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)Registers_C.RegC_17, new DoubleWordRegister(this, 0x00004000)
+                    .WithReservedBits(0, 2)
+                    .WithValueField(2, 30, name: "REG_C_17_FIELD_1")
+                },
+                {(long)Registers_C.RegC_18, new DoubleWordRegister(this, 0x00004000)
+                    .WithReservedBits(0, 2)
+                    .WithValueField(2, 30, name: "REG_C_18_FIELD_1")
+                },
+                {(long)Registers_C.RegC_21, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "REG_C_21_FIELD_1")
+                    .WithValueField(8, 3, name: "REG_C_21_FIELD_2")
+                    .WithFlag(11, name: "REG_C_21_FIELD_3")
+                    .WithValueField(12, 10, name: "REG_C_21_FIELD_4")
+                    .WithFlag(22, name: "REG_C_21_FIELD_5")
+                    .WithFlag(23, name: "REG_C_21_FIELD_6")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)Registers_C.RegC_23, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_23_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_24, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, name: "REG_C_24_FIELD_1")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 7, name: "REG_C_24_FIELD_2")
+                    .WithReservedBits(15, 1)
+                    .WithFlag(16, name: "REG_C_24_FIELD_3")
+                    .WithFlag(17, name: "REG_C_24_FIELD_4")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)Registers_C.RegC_25, new DoubleWordRegister(this, 0x00000101)
+                    .WithValueField(0, 7, name: "REG_C_25_FIELD_1")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 7, name: "REG_C_25_FIELD_2")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)Registers_C.RegC_26, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_C_26_FIELD_1")
+                    .WithFlag(1, name: "REG_C_26_FIELD_2")
+                    .WithFlag(2, name: "REG_C_26_FIELD_3")
+                    .WithFlag(3, name: "REG_C_26_FIELD_4")
+                    .WithFlag(4, name: "REG_C_26_FIELD_5")
+                    .WithFlag(5, name: "REG_C_26_FIELD_6")
+                    .WithReservedBits(6, 5)
+                    .WithValueField(11, 6, name: "REG_C_26_FIELD_7")
+                    .WithValueField(17, 5, name: "REG_C_26_FIELD_8")
+                    .WithValueField(22, 5, name: "REG_C_26_FIELD_9")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)Registers_C.RegC_29, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "REG_C_29_FIELD_1")
+                    .WithValueField(16, 16, FieldMode.Read, name: "REG_C_29_FIELD_2")
+                },
+                {(long)Registers_C.RegC_30, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_C_30_FIELD_1")
+                    .WithValueField(1, 2, name: "REG_C_30_FIELD_2")
+                    .WithFlag(3, name: "REG_C_30_FIELD_3")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)Registers_C.RegC_35, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_C_35_FIELD_1")
+                },
+                {(long)Registers_C.RegC_36, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, FieldMode.Read, name: "REG_C_36_FIELD_1")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)Registers_C.RegC_37, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_37_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_38, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "REG_C_38_FIELD_1")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_C.RegC_39, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "REG_C_39_FIELD_1")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)Registers_C.RegC_40, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_C_40_FIELD_1")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_C.RegC_41, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "REG_C_41_FIELD_1")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)Registers_C.RegC_44, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "REG_C_44_FIELD_1")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)Registers_C.RegC_45, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_C_45_FIELD_1")
+                    .WithValueField(1, 12, name: "REG_C_45_FIELD_2")
+                    .WithValueField(13, 3, name: "REG_C_45_FIELD_3")
+                    .WithFlag(16, name: "REG_C_45_FIELD_4")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)Registers_C.RegC_46, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "REG_C_46_FIELD_1")
+                    .WithFlag(3, name: "REG_C_46_FIELD_2")
+                    .WithValueField(4, 3, name: "REG_C_46_FIELD_3")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 8, name: "REG_C_46_FIELD_4")
+                    .WithValueField(16, 4, name: "REG_C_46_FIELD_5")
+                    .WithValueField(20, 4, name: "REG_C_46_FIELD_6")
+                    .WithValueField(24, 3, name: "REG_C_46_FIELD_7")
+                    .WithFlag(27, name: "REG_C_46_FIELD_8")
+                    .WithValueField(28, 3, name: "REG_C_46_FIELD_9")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)Registers_C.RegC_47, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "REG_C_47_FIELD_1")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)Registers_C.RegC_48, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "REG_C_48_FIELD_1")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)Registers_C.RegC_63, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_C_63_FIELD_1")
+                    .WithFlag(1, name: "REG_C_63_FIELD_2")
+                    .WithFlag(2, name: "REG_C_63_FIELD_3")
+                    .WithFlag(3, name: "REG_C_63_FIELD_4")
+                    .WithFlag(4, name: "REG_C_63_FIELD_5")
+                    .WithFlag(5, name: "REG_C_63_FIELD_6")
+                    .WithFlag(6, name: "REG_C_63_FIELD_7")
+                    .WithFlag(7, name: "REG_C_63_FIELD_8")
+                    .WithFlag(8, name: "REG_C_63_FIELD_9")
+                    .WithFlag(9, name: "REG_C_63_FIELD_10")
+                    .WithFlag(10, name: "REG_C_63_FIELD_11")
+                    .WithFlag(11, name: "REG_C_63_FIELD_12")
+                    .WithFlag(12, name: "REG_C_63_FIELD_13")
+                    .WithFlag(13, name: "REG_C_63_FIELD_14")
+                    .WithFlag(14, name: "REG_C_63_FIELD_15")
+                    .WithFlag(15, name: "REG_C_63_FIELD_16")
+                    .WithFlag(16, name: "REG_C_63_FIELD_17")
+                    .WithFlag(17, name: "REG_C_63_FIELD_18")
+                    .WithFlag(18, name: "REG_C_63_FIELD_19")
+                    .WithFlag(19, name: "REG_C_63_FIELD_20")
+                    .WithFlag(20, name: "REG_C_63_FIELD_21")
+                    .WithFlag(21, name: "REG_C_63_FIELD_22")
+                    .WithFlag(22, name: "REG_C_63_FIELD_23")
+                    .WithFlag(23, name: "REG_C_63_FIELD_24")
+                    .WithFlag(24, name: "REG_C_63_FIELD_25")
+                    .WithFlag(25, name: "REG_C_63_FIELD_26")
+                    .WithFlag(26, name: "REG_C_63_FIELD_27")
+                    .WithFlag(27, name: "REG_C_63_FIELD_28")
+                    .WithFlag(28, name: "REG_C_63_FIELD_29")
+                    .WithFlag(29, name: "REG_C_63_FIELD_30")
+                    .WithFlag(30, name: "REG_C_63_FIELD_31")
+                    .WithFlag(31, name: "REG_C_63_FIELD_32")
+                },
+                {(long)Registers_C.RegC_64, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_C_64_FIELD_1")
+                    .WithFlag(1, name: "REG_C_64_FIELD_2")
+                    .WithFlag(2, name: "REG_C_64_FIELD_3")
+                    .WithFlag(3, name: "REG_C_64_FIELD_4")
+                    .WithFlag(4, name: "REG_C_64_FIELD_5")
+                    .WithFlag(5, name: "REG_C_64_FIELD_6")
+                    .WithFlag(6, name: "REG_C_64_FIELD_7")
+                    .WithFlag(7, name: "REG_C_64_FIELD_8")
+                    .WithFlag(8, name: "REG_C_64_FIELD_9")
+                    .WithFlag(9, name: "REG_C_64_FIELD_10")
+                    .WithFlag(10, name: "REG_C_64_FIELD_11")
+                    .WithFlag(11, name: "REG_C_64_FIELD_12")
+                    .WithFlag(12, name: "REG_C_64_FIELD_13")
+                    .WithFlag(13, name: "REG_C_64_FIELD_14")
+                    .WithFlag(14, name: "REG_C_64_FIELD_15")
+                    .WithFlag(15, name: "REG_C_64_FIELD_16")
+                    .WithFlag(16, name: "REG_C_64_FIELD_17")
+                    .WithFlag(17, name: "REG_C_64_FIELD_18")
+                    .WithFlag(18, name: "REG_C_64_FIELD_19")
+                    .WithFlag(19, name: "REG_C_64_FIELD_20")
+                    .WithFlag(20, name: "REG_C_64_FIELD_21")
+                    .WithFlag(21, name: "REG_C_64_FIELD_22")
+                    .WithFlag(22, name: "REG_C_64_FIELD_23")
+                    .WithFlag(23, name: "REG_C_64_FIELD_24")
+                    .WithFlag(24, name: "REG_C_64_FIELD_25")
+                    .WithFlag(25, name: "REG_C_64_FIELD_26")
+                    .WithFlag(26, name: "REG_C_64_FIELD_27")
+                    .WithFlag(27, name: "REG_C_64_FIELD_28")
+                    .WithFlag(28, name: "REG_C_64_FIELD_29")
+                    .WithFlag(29, name: "REG_C_64_FIELD_30")
+                    .WithFlag(30, name: "REG_C_64_FIELD_31")
+                    .WithFlag(31, name: "REG_C_64_FIELD_32")
+                },
+                {(long)Registers_C.RegC_69, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_69_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_70, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_70_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_71, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_71_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_72, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_72_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_73, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_73_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_74, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_74_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_75, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_75_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_76, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_76_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_77, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_77_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_78, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_78_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_79, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_79_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_80, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_80_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_81, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_81_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_82, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_82_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_83, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_83_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_84, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "REG_C_84_FIELD_1")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)Registers_C.RegC_85, new DoubleWordRegister(this, 0x00000001)
+                    .WithFlag(0, name: "REG_C_85_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers_C.RegC_86, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "REG_C_86_FIELD_1")
+                },
             };
 
             var startOffset = (long)Registers_C.RegC_65;
@@ -3877,15 +7560,15 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 var i = index;
 
                 registerDictionary.Add(startOffset + blockSize * i,
-                    new DoubleWordRegister(this)
-                        .WithValueField(0, 8, out FRC_frameDescriptor[i].Field_403, name: "REG_C_32_FIELD_2")
-                        .WithValueField(8, 2, out FRC_frameDescriptor[i].Field_45, name: "REG_C_32_FIELD_3")
-                        .WithFlag(10, out FRC_frameDescriptor[i].Field_153, name: "REG_C_32_FIELD_4")
-                        .WithFlag(11, out FRC_frameDescriptor[i].Field_49, name: "REG_C_32_FIELD_5")
-                        .WithValueField(12, 2, out FRC_frameDescriptor[i].Field_55, name: "REG_C_32_FIELD_6")
-                        .WithFlag(14, out FRC_frameDescriptor[i].Field_397, name: "REG_C_32_FIELD_7")
-                        .WithFlag(15, out FRC_frameDescriptor[i].Field_40, name: "REG_C_32_FIELD_8")
-                        .WithFlag(16, out FRC_frameDescriptor[i].Field_57, name: "REG_C_32_FIELD_9")
+                    new DoubleWordRegister(this, 0x000000FF)
+                        .WithValueField(0, 8, out FRC_frameDescriptor[i].Field_403, name: "REG_C_86_FIELD_2")
+                        .WithValueField(8, 2, out FRC_frameDescriptor[i].Field_45, name: "REG_C_86_FIELD_3")
+                        .WithFlag(10, out FRC_frameDescriptor[i].Field_153, name: "REG_C_86_FIELD_4")
+                        .WithFlag(11, out FRC_frameDescriptor[i].Field_49, name: "REG_C_86_FIELD_5")
+                        .WithValueField(12, 2, out FRC_frameDescriptor[i].Field_55, name: "REG_C_86_FIELD_6")
+                        .WithFlag(14, out FRC_frameDescriptor[i].Field_397, name: "REG_C_86_FIELD_7")
+                        .WithFlag(15, out FRC_frameDescriptor[i].Field_40, name: "REG_C_86_FIELD_8")
+                        .WithFlag(16, out FRC_frameDescriptor[i].Field_57, name: "REG_C_86_FIELD_9")
                         .WithReservedBits(17, 15)
                 );
             }
@@ -3903,7 +7586,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         .WithValueField(16, 8, FieldMode.Read, valueProviderCallback: _ => FRC_packetBufferCapture[i * 4 + 2], writeCallback: (_, value) => FRC_packetBufferCapture[i * 4 + 2] = (byte)value, name: $"PKTBUF{i * 4 + 2}")
                         .WithValueField(24, 8, FieldMode.Read, valueProviderCallback: _ => FRC_packetBufferCapture[i * 4 + 3], writeCallback: (_, value) => FRC_packetBufferCapture[i * 4 + 3] = (byte)value, name: $"PKTBUF{i * 4 + 3}")
                 );
-            };
+            }
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
 
@@ -3929,7 +7612,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket, bool syncTime = true)
         {
-            TimeInterval txStartTime = InterferenceQueue.GetTxStartTime(sender);
+            var txStartTime = InterferenceQueue.GetTxStartTime(sender);
             if(txStartTime == TimeInterval.Empty)
             {
                 this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}): Dropping (TX was aborted)",
@@ -5216,7 +8899,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             FRC_UpdateWordCounterCompareInterrupts(previous + 1, previous + words);
         }
 
-        private void FRC_UpdateWordCounterCompareInterrupts(uint firstWordReached, uint lastWordReached)
+        private void FRC_UpdateWordCounterCompareInterrupts(uint firstWordReached, uint lastWordReached, bool includeFrameLengthCompares = true)
         {
             var compareValues = new uint[]
             {
@@ -5228,6 +8911,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             var raised = false;
             for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
             {
+                if(channel == 0 && !includeFrameLengthCompares)
+                {
+                    continue;
+                }
                 if(compareValues[channel] < firstWordReached || compareValues[channel] > lastWordReached)
                 {
                     continue;
@@ -5344,6 +9031,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
             FRC_ResolveLeadingTransmitFrameDescriptor();
 
+            FRC_frameOk = true;
+            FRC_frameLengthError = false;
             var descriptor = FRC_frameDescriptor[FRC_ActiveTransmitFrameDescriptor];
             var frameLength = 0u;
             var dynamicFrameLength = true;
@@ -5369,7 +9058,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return new byte[0];
             }
 
-            if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength))
+            if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength, receiving: false))
             {
                 this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.ToArray()));
                 return new byte[0];
@@ -5396,6 +9085,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.Concat(payload).ToArray()));
                     field_144.Value = true;
+                    field_135.Value = true;
+                    FRC_frameOk = false;
                     return new byte[0];
                 }
                 frame = frame.Concat(payload);
@@ -5480,8 +9171,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
             var endOffset = Math.Min(startOffset + numBytes, (uint)currentFrame.Length);
             var isFrameEnd = (endOffset >= (uint)currentFrame.Length);
 
+            if(!isFrameStart && FRC_rxFrameDiscarded)
+            {
+                currentFrameOffset = endOffset;
+                return;
+            }
+
             if(isFrameStart)
             {
+                FRC_frameOk = true;
+                FRC_frameLengthError = false;
+                FRC_rxFrameDiscarded = false;
+                FRC_crcErrorTolerated = false;
                 var frameLength = 0u;
                 switch(field_65.Value)
                 {
@@ -5500,9 +9201,16 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     this.Log(LogLevel.Error, "Unimplemented DFL mode.");
                     return;
                 }
-                if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength))
+                if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength, receiving: true))
                 {
                     this.Log(LogLevel.Error, "DisassembleFrame FRAMEERROR");
+                    var lengthFieldLastWord = (uint)field_73.Value
+                                              + ((field_65.Value == Enumeration_F.EnumerationFValue3
+                                                  || field_65.Value == Enumeration_F.EnumerationFValue4) ? 1u : 0u);
+                    field_146.Value = lengthFieldLastWord;
+                    FRC_UpdateWordCounterCompareInterrupts(0, lengthFieldLastWord, includeFrameLengthCompares: false);
+                    FRC_rxFrameDiscarded = true;
+                    currentFrameOffset = endOffset;
                     return;
                 }
 
@@ -5660,7 +9368,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
             bufferController.RestoreWriteOffset(FRC_frameDescriptor[FRC_ActiveReceiveFrameDescriptor].BufferIndex);
         }
 
-        private bool FRC_TrySetFrameLength(uint frameLength)
+        private bool FRC_TrySetFrameLength(uint frameLength, bool receiving)
         {
             switch(field_65.Value)
             {
@@ -5677,19 +9385,35 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             frameLength >>= (byte)field_63.Value;
             frameLength &= (1u << (byte)field_64.Value) - 1;
-            int offset = (field_66.Value & 0x8) != 0
-                ? (int)(field_66.Value | unchecked((uint)~0xF))
-                : (int)field_66.Value;
-            frameLength += (uint)offset;
-            if(frameLength < field_75.Value || field_74.Value < frameLength)
+
+            var offset = (int)field_66.Value;
+            if(offset >= 8)
             {
-                field_68.Value = true;
-                field_115.Value = true;
+                offset -= 16;
+            }
+            var decodedLength = (long)frameLength + offset;
+
+            FRC_frameLengthError = decodedLength < 0
+                                   || decodedLength < (long)field_75.Value
+                                   || decodedLength > (long)field_74.Value;
+            if(FRC_frameLengthError)
+            {
+                FRC_frameOk = false;
+                if(receiving)
+                {
+                    field_68.Value = true;
+                    field_115.Value = true;
+                }
+                else
+                {
+                    field_418.Value = true;
+                    field_416.Value = true;
+                }
                 UpdateInterrupts();
                 return false;
             }
 
-            field_70.Value = frameLength;
+            field_70.Value = (ulong)decodedLength;
             return true;
         }
 
@@ -5909,6 +9633,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
                         if(signal == Enumeration_AC.EnumerationACValue16
                             || signal == Enumeration_AC.EnumerationACValue7)
                         {
+                            if(signal == Enumeration_AC.EnumerationACValue16)
+                            {
+                                field_418.Value = true;
+                                field_416.Value = true;
+                                FRC_frameOk = false;
+                            }
                             RAC_ClearOngoingTx();
                             RAC_ChangeRadioState(Enumeration_AB.EnumerationABValue7);
                         }
@@ -6206,22 +9936,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             Emu?.SetEm1pHostClockRequest(this, RAC_Em1pHostClockRequest);
         }
 
-        private bool RAC_Em1pHardwareRequest => (RAC_sequencerReleased && !RAC_sequencerInWfi)
-                                                || RAC_currentRadioState != Enumeration_AB.EnumerationABValue0;
-
-        private bool RAC_sequencerReleased => sequencer != null && !sequencer.IsHalted && !RAC_sequencerPoweredDown;
-
-        private bool RAC_Em1pRequest => (field_415.Value && !field_414.Value)
-                                        || RAC_Em1pHardwareRequest;
-
-        private bool RAC_Em1pHostClockRequest => field_413.Value && !field_412.Value;
-
         private void RAC_UpdateQChannel()
         {
             Emu?.SetQChannelBusy(this, RAC_QChannelBusy);
         }
-
-        private bool RAC_QChannelBusy => RAC_sequencerReleased && !RAC_sequencerInWfi;
 
         private void RAC_StartSequencer()
         {
@@ -6381,8 +10099,17 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 FRC_DisassembleCurrentFrame(currentFrameOffset, (uint)currentFrame.Length - currentFrameOffset);
 
-                field_104.Value = true;
-                field_123.Value = true;
+                if(!FRC_rxFrameDiscarded)
+                {
+                    field_104.Value = true;
+                    field_123.Value = true;
+                }
+            }
+
+            if(RAC_RxWillFail)
+            {
+                FRC_frameOk = false;
+                FRC_crcErrorTolerated = field_94.Value && !FRC_rxFrameDiscarded;
             }
 
             UpdateInterrupts();
@@ -6850,6 +10577,18 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
         }
 
+        private bool RAC_Em1pHardwareRequest => (RAC_sequencerReleased && !RAC_sequencerInWfi)
+                                                || RAC_currentRadioState != Enumeration_AB.EnumerationABValue0;
+
+        private bool RAC_sequencerReleased => sequencer != null && !sequencer.IsHalted && !RAC_sequencerPoweredDown;
+
+        private bool RAC_Em1pRequest => (field_415.Value && !field_414.Value)
+                                        || RAC_Em1pHardwareRequest;
+
+        private bool RAC_Em1pHostClockRequest => field_413.Value && !field_412.Value;
+
+        private bool RAC_QChannelBusy => RAC_sequencerReleased && !RAC_sequencerInWfi;
+
         private IFlagRegisterField field_191;
         private IFlagRegisterField field_181;
         private IFlagRegisterField field_204;
@@ -6983,6 +10722,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private bool PROTIMER_txEnable = false;
         private IFlagRegisterField field_299;
         private IValueRegisterField field_298;
+        private IValueRegisterField field_420;
         private IValueRegisterField field_239;
         private IValueRegisterField field_265;
         private IValueRegisterField field_266;
@@ -7102,6 +10842,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField field_78;
         private bool FRC_rxFrameExitPending = false;
         private bool FRC_rxAbortInProgress = false;
+        private bool FRC_frameOk = false;
+        private bool FRC_frameLengthError = false;
+        private bool FRC_rxFrameDiscarded = false;
+        private bool FRC_crcErrorTolerated = false;
         private IFlagRegisterField field_118;
         private IFlagRegisterField field_134;
         private IFlagRegisterField field_126;
@@ -7143,6 +10887,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField field_92;
         private IFlagRegisterField field_104;
         private IFlagRegisterField field_144;
+        private IFlagRegisterField field_418;
+        private IFlagRegisterField field_419;
+        private IFlagRegisterField field_416;
+        private IFlagRegisterField field_417;
         private IFlagRegisterField field_137;
         private IFlagRegisterField field_139;
         private IValueRegisterField field_76;
@@ -7285,7 +11033,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly Machine machine;
         private readonly CV32E40P sequencer;
         private readonly ISiLabs_RvConfig sequencerConfig;
-        private static readonly PseudorandomNumberGenerator random = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
+        private readonly PseudorandomNumberGenerator random;
         private readonly SiLabs_BUFC_5 bufferController;
         private readonly LimitTimer proTimer;
         private readonly LimitTimer paRampingTimer;
@@ -8546,6 +12294,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegG_235              = 0x0580,
             RegG_236              = 0x0584,
             RegG_237              = 0x0588,
+            RegG_949              = 0x00DC,
+            RegG_950              = 0x012C,
+            RegG_951              = 0x0130,
+            RegG_952              = 0x029C,
             RegG_238              = 0x1000,
             RegG_239              = 0x1004,
             RegG_240              = 0x1008,
@@ -8783,6 +12535,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegG_472              = 0x1580,
             RegG_473              = 0x1584,
             RegG_474              = 0x1588,
+            RegG_953              = 0x10DC,
+            RegG_954              = 0x112C,
+            RegG_955              = 0x1130,
+            RegG_956              = 0x129C,
             RegG_475              = 0x2000,
             RegG_476              = 0x2004,
             RegG_477              = 0x2008,
@@ -9020,6 +12776,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegG_709              = 0x2580,
             RegG_710              = 0x2584,
             RegG_711              = 0x2588,
+            RegG_957              = 0x20DC,
+            RegG_958              = 0x212C,
+            RegG_959              = 0x2130,
+            RegG_960              = 0x229C,
+            RegG_961              = 0x30DC,
+            RegG_962              = 0x312C,
+            RegG_963              = 0x3130,
+            RegG_964              = 0x329C,
             RegG_712              = 0x3000,
             RegG_713              = 0x3004,
             RegG_714              = 0x3008,
@@ -10997,26 +14761,26 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegD_2                = 0x0004,
             RegD_3                = 0x0008,
             RegD_4                = 0x000C,
-            RegD_5                = 0x0040,
-            RegD_6                = 0x0044,
+            RegD_5                = 0x0080,
+            RegD_6                = 0x0084,
             RegD_7                = 0x1000,
             RegD_8                = 0x1004,
             RegD_9                = 0x1008,
             RegD_10               = 0x100C,
-            RegD_11               = 0x1040,
-            RegD_12               = 0x1044,
+            RegD_11               = 0x1080,
+            RegD_12               = 0x1084,
             RegD_13               = 0x2000,
             RegD_14               = 0x2004,
             RegD_15               = 0x2008,
             RegD_16               = 0x200C,
-            RegD_17               = 0x2040,
-            RegD_18               = 0x2044,
+            RegD_17               = 0x2080,
+            RegD_18               = 0x2084,
             RegD_19               = 0x3000,
             RegD_20               = 0x3004,
             RegD_21               = 0x3008,
             RegD_22               = 0x300C,
-            RegD_23               = 0x3040,
-            RegD_24               = 0x3044,
+            RegD_23               = 0x3080,
+            RegD_24               = 0x3084,
         }
 
         private enum Registers_J : long
@@ -11025,26 +14789,26 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RegJ_2                = 0x0004,
             RegJ_3                = 0x0008,
             RegJ_4                = 0x000C,
-            RegJ_5                = 0x0040,
-            RegJ_6                = 0x0044,
+            RegJ_5                = 0x0080,
+            RegJ_6                = 0x0084,
             RegJ_7                = 0x1000,
             RegJ_8                = 0x1004,
             RegJ_9                = 0x1008,
             RegJ_10               = 0x100C,
-            RegJ_11               = 0x1040,
-            RegJ_12               = 0x1044,
+            RegJ_11               = 0x1080,
+            RegJ_12               = 0x1084,
             RegJ_13               = 0x2000,
             RegJ_14               = 0x2004,
             RegJ_15               = 0x2008,
             RegJ_16               = 0x200C,
-            RegJ_17               = 0x2040,
-            RegJ_18               = 0x2044,
+            RegJ_17               = 0x2080,
+            RegJ_18               = 0x2084,
             RegJ_19               = 0x3000,
             RegJ_20               = 0x3004,
             RegJ_21               = 0x3008,
             RegJ_22               = 0x300C,
-            RegJ_23               = 0x3040,
-            RegJ_24               = 0x3044,
+            RegJ_23               = 0x3080,
+            RegJ_24               = 0x3084,
         }
 
         private enum Registers_E : long

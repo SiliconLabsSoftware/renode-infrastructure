@@ -58,8 +58,7 @@ namespace Antmicro.Renode.UserInterface
                         MachineChanged?.Invoke(null);
                     }
                 };
-
-                monitorContext = new MonitorContext(startingCurrentDirectory, oldOrigin);
+                MonitorContext = new MonitorContext(startingCurrentDirectory, oldOrigin);
             };
 
             EmulationManager.Instance.EmulationChanged += handleEmulationChange;
@@ -101,7 +100,7 @@ namespace Antmicro.Renode.UserInterface
         public bool SetPeripheralMacro(IPeripheral peripheral, string macroName, string contents, IMachine machine = null) =>
             MonitorContext.SetPeripheralMacro(peripheral, macroName, contents, machine);
 
-        public bool Parse(string cmd, ICommandInteraction writer = null)
+        public bool Parse(string cmd, ICommandInteraction writer = null, bool isInteractive = false)
         {
             writer = writer ?? Interaction;
 
@@ -137,7 +136,7 @@ namespace Antmicro.Renode.UserInterface
 
             if(string.IsNullOrWhiteSpace(cmd))
             {
-                if(RepeatLastCommand && TokensOfLastExecutedCommand != null)
+                if(isInteractive && RepeatLastCommand && TokensOfLastExecutedCommand != null)
                 {
                     return ExecuteCommand(TokensOfLastExecutedCommand, writer);
                 }
@@ -185,39 +184,14 @@ namespace Antmicro.Renode.UserInterface
                 var pathToken = token as PathToken;
                 if(pathToken != null)
                 {
-                    string fileName;
-                    if(PathHelpers.TryGetFilenameFromAvailablePaths(pathToken.Value, MonitorContext.MonitorPath.PathElements, out fileName))
+                    if(PathHelpers.TryGetFilenameFromAvailablePaths(pathToken.Path, MonitorContext.MonitorPath.PathElements, out var fileName))
                     {
                         resultToken = new PathToken("@" + fileName);
                     }
                     else
                     {
-                        Uri uri;
-                        string filename;
-                        string fname = pathToken.Value;
-                        try
-                        {
-                            uri = new Uri(fname);
-                            if(uri.IsFile)
-                            {
-                                throw new UriFormatException();
-                            }
-                            var success = Emulation.FileFetcher.TryFetchFromUri(uri, out filename);
-                            if(!success)
-                            {
-                                writer.WriteError("Failed to download {0}, see log for details.".FormatWith(fname));
-                                filename = null;
-                                if(breakOnException)
-                                {
-                                    return false;
-                                }
-                            }
-                            resultToken = new PathToken("@" + filename);
-                        }
-                        catch(UriFormatException)
-                        {
-                            //Not a proper uri, so probably a nonexisting local path
-                        }
+                        pathToken.Update(EmulationManager.Instance.CurrentEmulation.FileFetcher);
+                        resultToken = pathToken;
                     }
                 }
 
@@ -430,7 +404,7 @@ namespace Antmicro.Renode.UserInterface
 
         public ICommandInteraction HandleCommand(string cmd, ICommandInteraction ci)
         {
-            Parse(cmd, ci);
+            Parse(cmd, ci, isInteractive: true);
             return ci;
         }
 
@@ -515,11 +489,10 @@ namespace Antmicro.Renode.UserInterface
                 }
                 else
                 {
-                    if(monitorContext.CurrentMachine != value.CurrentMachine)
+                    if(monitorContext?.CurrentMachine != value.CurrentMachine)
                     {
                         MachineChanged?.Invoke(value.MachineName);
                     }
-
                     monitorContext = value;
                 }
             }

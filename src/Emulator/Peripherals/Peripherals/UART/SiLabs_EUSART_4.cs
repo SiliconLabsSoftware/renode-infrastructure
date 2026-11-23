@@ -507,6 +507,9 @@ namespace Antmicro.Renode.Peripherals.UART
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                    {(long)Registers.IpVersion, new DoubleWordRegister(this, 0x00000004)
+                        .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                    },
                     {(long)Registers.InterruptFlag, new DoubleWordRegister(this)
                     .WithFlag(0, out txCompleteInterrupt, name: "TXCIF")
                     .WithFlag(1, out txBufferLevelInterrupt, name: "TXFLIF")

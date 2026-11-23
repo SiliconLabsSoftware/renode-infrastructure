@@ -49,6 +49,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers.IpVersion, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
                 {(long)Registers.ReadControl, new DoubleWordRegister(this)
                     .WithReservedBits(0, 20)
                     .WithEnumField<DoubleWordRegister, ReadMode>(20, 2, out readMode, name: "MODE")

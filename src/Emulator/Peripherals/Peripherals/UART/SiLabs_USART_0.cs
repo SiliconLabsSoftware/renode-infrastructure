@@ -352,6 +352,8 @@ namespace Antmicro.Renode.Peripherals.UART
             }
         }
 
+        protected override bool IsReceiveEnabled => receiverEnableFlag.Value;
+
         // The USART belongs to the HostAll clock domain: it is clocked in EM0 and EM1 only,
         // so the time compare counter, which runs at the baud rate, stops in EM1P and EM2.
         // The defer timer is not a hardware counter, it only releases the TX request lines.
@@ -604,6 +606,9 @@ namespace Antmicro.Renode.Peripherals.UART
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers.IpVersion, new DoubleWordRegister(this, 0x00000000)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
                 {(long)Registers.InterruptFlag, new DoubleWordRegister(this)
                     // RENODE-80: without this workaround, the RX flow in sl_iostream_usart breaks.
                     // It is unclear if this is the result of a bug in this model or a race condition
@@ -901,8 +906,6 @@ namespace Antmicro.Renode.Peripherals.UART
             };
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
-
-        protected override bool IsReceiveEnabled => receiverEnableFlag.Value;
 
         private TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
 

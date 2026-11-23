@@ -34,8 +34,8 @@ namespace Antmicro.Renode.Peripherals.CPU
             cpu.RegisterCSRStub((ushort)CustomCSR.MachineCacheControlBeginAddress, "MCCTLBEGINADDR");
             cpu.RegisterCSRStub((ushort)CustomCSR.MachineCacheControlCommand, "MCCTLCOMMAND");
             cpu.RegisterCSRStub((ushort)CustomCSR.MachineCacheControlData, "MCCTLDATA");
-            cpu.RegisterCSR((ushort)CustomCSR.InstructionCacheAndMemoryConfiguration, () => 0x0, value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc0) is not supported"); });
-            cpu.RegisterCSR((ushort)CustomCSR.DataCacheAndMemoryConfiguration, () => 0x0, value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc1) is not supported"); });
+            cpu.RegisterCSR((ushort)CustomCSR.InstructionCacheAndMemoryConfiguration, () => InstructionMemoryConfiguration, value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc0) is not supported"); });
+            cpu.RegisterCSR((ushort)CustomCSR.DataCacheAndMemoryConfiguration, () => DataMemoryConfiguration, value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc1) is not supported"); });
             // Bit 16 is checked by Zephyr driver to see if CCTL is supported
             cpu.RegisterCSR((ushort)CustomCSR.MachineMiscellaneousConfiguration, () => ReadMiscellaneousConfiguration(), value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc2) is not supported"); });
             cpu.RegisterCSR((ushort)CustomCSR.MachineMiscellaneousConfigurationRV32, () => ReadMiscellaneousConfiguration(upperWord: true), value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc3) is not supported"); });
@@ -46,6 +46,17 @@ namespace Antmicro.Renode.Peripherals.CPU
             cpu.RegisterCSR((ushort)CustomCSR.ArchitectureRV32, () => ReadArchitectureConfiguration(upperWord: true), value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfcb) is not supported"); });
             cpu.RegisterCSR((ushort)CustomCSR.CurrentStateSaveForCrashDebugging, () => 0x0, value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc8) is not supported"); });
             cpu.RegisterCSR((ushort)CustomCSR.MstatusStateSaveForCrashDebugging, () => 0x0, value => { cpu.Log(LogLevel.Warning, "Writing to the Machine Custom read-only CSR (0xfc9) is not supported"); });
+            cpu.RegisterCSR((ushort)CustomCSR.MachineHardwareStackProtectionControl, () => stackProtectionControl, value =>
+            {
+                stackProtectionControl = value & 0x3f; // OVF_EN, UDF_EN, SCHM, U, S, M
+                if(stackProtectionControl != 0 && !stackSafeWarningLogged)
+                {
+                    cpu.WarningLog("StackSafe is a stub, stack protection is not implemented");
+                    stackSafeWarningLogged = true;
+                }
+            }, "mhsp_ctl");
+            cpu.RegisterCSR((ushort)CustomCSR.MachineStackPointerBound, () => stackPointerBound, value => stackPointerBound = MaskAddress(value), "msp_bound");
+            cpu.RegisterCSR((ushort)CustomCSR.MachineStackPointerBase, () => stackPointerBase, value => stackPointerBase = MaskAddress(value), "msp_base");
 
             cpu.RegisterCSRStub((ushort)CustomCSR.UserITB, "UITB");
             cpu.RegisterCSRStub((ushort)CustomCSR.UserCODE, "UCODE");
@@ -73,6 +84,8 @@ namespace Antmicro.Renode.Peripherals.CPU
             cpu.RegisterCSRStub((ushort)CustomCSR.PMAAddress13, "PMAADDR13");
             cpu.RegisterCSRStub((ushort)CustomCSR.PMAAddress14, "PMAADDR14");
             cpu.RegisterCSRStub((ushort)CustomCSR.PMAAddress15, "PMAADDR15");
+
+            Reset();
         }
 
         public void RegisterPerformanceInstructions()
@@ -121,6 +134,18 @@ namespace Antmicro.Renode.Peripherals.CPU
 
             // TODO: CoDense extension (NDS.EXEC.IT/NDS.NEXEC.IT), and set mmsc_cfg (0xfc2) ECD (bit[3]).
         }
+
+        public void Reset()
+        {
+            stackProtectionControl = 0;
+            stackPointerBound = MaskAddress(ulong.MaxValue);
+            stackPointerBase = MaskAddress(ulong.MaxValue);
+            stackSafeWarningLogged = false;
+        }
+
+        public ulong InstructionMemoryConfiguration { get; set; }
+
+        public ulong DataMemoryConfiguration { get; set; }
 
         private static ulong LoadExtractorByte(ulong opcode)
         {
@@ -177,10 +202,14 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         private ulong ReadMiscellaneousConfiguration(bool upperWord = false)
         {
-            var value = 1ul << 16; // CCTL
+            var value = 1ul << 16 | 1ul << 5; // CCTL | HSP
             if(cpu.SupportsInstructionSet(BaseRiscV.InstructionSet.V))
             {
                 value |= 1ul << 36; // VECCFG
+            }
+            if(BitHelper.GetValue(InstructionMemoryConfiguration | DataMemoryConfiguration, 21, 2) != 0)
+            {
+                value |= 1ul; // ECC (ILM_ECC or DLM_ECC)
             }
             if(bfloat16Registered)
             {
@@ -460,6 +489,11 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         private ulong machineMiscellaneousControlValue;
 
+        private ulong stackProtectionControl;
+        private ulong stackPointerBound;
+        private ulong stackPointerBase;
+        private bool stackSafeWarningLogged;
+
         private bool bfloat16Registered;
         private bool packedInt4Registered;
         private bool packedFloat16Registered;
@@ -485,6 +519,9 @@ namespace Antmicro.Renode.Peripherals.CPU
         private enum CustomCSR : ulong
         {
             MachineExtendedStatus = 0x7c4,
+            MachineHardwareStackProtectionControl = 0x7c6,
+            MachineStackPointerBound = 0x7c7,
+            MachineStackPointerBase = 0x7c8,
             MachineCacheControl = 0x7ca,
             MachineCacheControlBeginAddress = 0x7cb,
             MachineCacheControlCommand = 0x7cc,

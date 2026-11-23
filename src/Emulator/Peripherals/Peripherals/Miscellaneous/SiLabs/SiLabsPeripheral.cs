@@ -43,7 +43,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             return result;
         }
 
-        public uint ReadDoubleWord(long offset)
+        public virtual uint ReadDoubleWord(long offset)
         {
             if(!VerifyPeripheralAccess(isWrite: false, offset))
             {
@@ -61,7 +61,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             }
         }
 
-        public void WriteDoubleWord(long offset, uint value)
+        public virtual void WriteDoubleWord(long offset, uint value)
         {
             machine.ClockSource.ExecuteInLock(delegate
             {
@@ -160,7 +160,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 TriggerBusFault(currentAbsoluteAddress);
                 return false;
             }
-            if(CurrentCpu is CortexM cortexM && Smu != null && Smu.PeripheralSecurityEnabled && Smu.GetPeripheralSecurityLevel(this) != IsSecureAccess)
+            if(CurrentCpu is CortexM && Smu != null && Smu.PeripheralSecurityEnabled && Smu.GetPeripheralSecurityLevel(this) != IsSecureAccess)
             {
                 this.Log(LogLevel.Error, "Accessing a {0} peripheral while peripheral security level is {1}",
                     IsSecureAccess ? "secure" : "non-secure",

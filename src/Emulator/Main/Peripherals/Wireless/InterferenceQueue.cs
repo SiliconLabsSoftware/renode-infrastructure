@@ -126,8 +126,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             {
                 var entry = PacketLookup(sender);
 
-                // An aborted transmission never fully went on air, so there is no start time to hand out: a
-                // receiver asking about it is trying to start a reception that must be dropped.
+                // An aborted transmission's start time is not handed out: a receiver asking about it is
+                // trying to start a reception that must be dropped.
                 if(entry == null || entry.PacketWasAborted)
                 {
                     return TimeInterval.Empty;
@@ -298,10 +298,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
             InterferenceQueueChanged?.Invoke(changeTime);
         }
 
+        private static bool forceBusyRssi;
+
         private const int RssiBusyChannelHardCodedValueDbm = 20;
         private const int RssiClearChannelHardCodedValueDbm = -120;
 
-        private static bool forceBusyRssi;
         private static readonly object sync = new object();
         private static readonly List<PacketInfo> overTheAirPackets = new List<PacketInfo>();
 
@@ -324,6 +325,19 @@ namespace Antmicro.Renode.Peripherals.Wireless
         }
 
         // Methods
+        // True if this transmission is on the air at time `at`: it has started and, once retired, has
+        // not ended yet. Called with the queue lock held.
+        public bool IsOnAirAt(TimeInterval at)
+        {
+            return IsOnAirDuring(at, at);
+        }
+
+        // True if this transmission is on the air at some point in [from, to].
+        public bool IsOnAirDuring(TimeInterval from, TimeInterval to)
+        {
+            return startTx <= to && (!packetIsStale || EndTxTimestamp > from);
+        }
+
         public IRadio Sender => sender;
 
         public PhySignature Signature => signature;
@@ -349,46 +363,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         // Set when the transmission was cut short instead of completing. Only meaningful once the
         // packet is stale, i.e. once the sender has retired it.
-        public bool PacketWasAborted
-        {
-            set
-            {
-                packetWasAborted = value;
-            }
-
-            get
-            {
-                return packetWasAborted;
-            }
-        }
-
-        // True if this transmission is on the air at time `at`: it has started and, once retired, has
-        // not ended yet. Called with the queue lock held.
-        public bool IsOnAirAt(TimeInterval at)
-        {
-            return IsOnAirDuring(at, at);
-        }
-
-        // True if this transmission is on the air at some point in [from, to].
-        public bool IsOnAirDuring(TimeInterval from, TimeInterval to)
-        {
-            return startTx <= to && (!packetIsStale || endTx > from);
-        }
+        public bool PacketWasAborted { get; set; }
 
         // When the sender retired the transmission, completed or aborted. Only meaningful once the
         // packet is stale.
-        public TimeInterval EndTxTimestamp
-        {
-            set
-            {
-                endTx = value;
-            }
-
-            get
-            {
-                return endTx;
-            }
-        }
+        public TimeInterval EndTxTimestamp { get; set; }
 
         public TimeInterval StartTxTimestamp
         {
@@ -404,9 +383,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         }
 
         private TimeInterval startTx;
-        private TimeInterval endTx;
         private bool packetIsStale;
-        private bool packetWasAborted;
         // Fields
         private readonly byte[] packetContent;
         private readonly IRadio sender;

@@ -26,6 +26,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers.Reg_1, new DoubleWordRegister(this, 0x00000001)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_1_FIELD_1")
+                },
                 {(long)Registers.Reg_2, new DoubleWordRegister(this)
                     .WithFlag(0, out field_18, name: "REG_2_FIELD_1")
                     .WithFlag(1, name: "REG_2_FIELD_2")

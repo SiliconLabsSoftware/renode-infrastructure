@@ -354,22 +354,6 @@ public partial class ARM_EthosU85
         return true;
     }
 
-    private void StopAndRaiseIrq(ushort irqMask = 0)
-    {
-        isRunning.Value = false;
-        irqHistoryMask.Value |= irqMask;
-        irqRaised.Value = true;
-        UpdateInterrupts();
-    }
-
-    private void ParseError(string reason)
-    {
-        // The NPU stops, sets cmd_parse_error and raises an IRQ (U85 TRM 3.3.1.2).
-        commandParseError.Value = true;
-        this.ErrorLog("U85 command parse error at +0x{0:X}: {1}", queueReadOffset.Value, reason);
-        StopAndRaiseIrq();
-    }
-
     private Place? GetDmaPlace(int region, ulong offset, string description, bool allowLut)
     {
         if(region == -1)
@@ -394,14 +378,9 @@ public partial class ARM_EthosU85
         return null;
     }
 
-    private const uint MaximumCommandBytes = 0x1000000; // 16 MB
-
     // Model safeguard, not from the TRM: a branch loop runs inside the CMD write,
     // so an endless loop would otherwise hang the emulation.
     private const ulong MaximumExecutedCommands = 10_000_000;
-
-    private const uint Cmd0Encoding = 0b000000;
-    private const uint Cmd1Encoding = 0b010000;
 
     private enum DmaStride
     {

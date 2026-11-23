@@ -114,7 +114,7 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
             machine.ClockSource.ExecuteInLock(delegate
             {
                 // Each external interrupt selects its own pin through EXTIPSEL/EXTIPINSEL. Several external
-                // interrupts can select the same pin (e.g. all of them do out of reset), so the pin is looked
+                // interrupts can select the same pin (e.g. each group of four does out of reset), so the pin is looked
                 // up per external interrupt rather than the other way around.
                 for(var i = 0; i < NumberOfExternalInterrupts; ++i)
                 {
@@ -275,6 +275,9 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers.IpVersion, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
                 {(long)Registers.ExternalInterruptPortSelectLow, new DoubleWordRegister(this)
                     .WithEnumField<DoubleWordRegister, Port>(0, 2, out externalInterruptPortSelect[0], name: "EXTIPSEL0")
                     .WithReservedBits(2, 2)

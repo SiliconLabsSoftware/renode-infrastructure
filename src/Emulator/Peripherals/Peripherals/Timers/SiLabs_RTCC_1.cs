@@ -157,6 +157,9 @@ namespace Antmicro.Renode.Peripherals.Timers
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers.IpVersion, new DoubleWordRegister(this, 0x00000001)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
                 {(long)Registers.Enable, new DoubleWordRegister(this)
                     .WithFlag(0, out enable, name: "EN")
                     .WithReservedBits(1, 31)

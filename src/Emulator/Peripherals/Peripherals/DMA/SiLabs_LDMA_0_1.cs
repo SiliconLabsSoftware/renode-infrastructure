@@ -215,6 +215,9 @@ namespace Antmicro.Renode.Peripherals.DMA
         {
             var c =  new DoubleWordRegisterCollection(this, new Dictionary<long, DoubleWordRegister>
             {
+                {(long)LdmaRegisters.IPVERSION, new DoubleWordRegister(this, 0x00000000)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
                 {(long)LdmaRegisters.CTRL, new DoubleWordRegister(this, 0x1E000000)
                     .WithReservedBits(0, 24)
                     .WithValueField(24, 5, name: "NUMFIXED")
@@ -450,6 +453,8 @@ namespace Antmicro.Renode.Peripherals.DMA
             });
         }
 
+        private TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
+
         // The LDMA is a bus master on the Host EM1P clock domain. A request that arrives while
         // that domain is gated is held and run once the clocks start again.
         private bool HostClocksGated
@@ -460,8 +465,6 @@ namespace Antmicro.Renode.Peripherals.DMA
                 return hostClocksGated;
             }
         }
-
-        private TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
 
         private byte syncTrigger;
         private bool inSyncNotification;

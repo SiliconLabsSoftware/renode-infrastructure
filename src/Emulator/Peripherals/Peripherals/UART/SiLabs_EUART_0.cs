@@ -316,15 +316,6 @@ namespace Antmicro.Renode.Peripherals.UART
             return result;
         }
 
-        // EUART0 is the EM2 capable UART. It asks for EM1P while a DMA request is pending and its
-        // DMA wake-up enable is set: the receive FIFO holds RXFIW + 1 frames, or the transmitter
-        // is enabled. TXFL stays set once the FIFO has space, so the transmit wake-up is gated
-        // on the transmitter instead, and CLEARTX drops it until the next TXEN.
-        private bool TxDmaWakeupActive => isEnabled && transmitterEnableFlag.Value && !txWakeupCleared && TxFifoLevel.IsSet;
-
-        private bool Em1pRequestActive => (rxDmaWakeUp.Value && Count >= (int)rxWatermark.Value + 1)
-            || (txDmaWakeUp.Value && TxDmaWakeupActive);
-
         private void UpdateEm1pRequest()
         {
             machine.ClockSource.ExecuteInLock(delegate
@@ -481,6 +472,9 @@ namespace Antmicro.Renode.Peripherals.UART
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                    {(long)Registers.IpVersion, new DoubleWordRegister(this, 0x00000000)
+                        .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                    },
                     {(long)Registers.InterruptFlag, new DoubleWordRegister(this)
                     .WithFlag(0, out txCompleteInterrupt, name: "TXCIF")
                     .WithFlag(1, out txBufferLevelInterrupt, name: "TXFLIF")
@@ -704,6 +698,15 @@ namespace Antmicro.Renode.Peripherals.UART
             };
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
+
+        // EUART0 is the EM2 capable UART. It asks for EM1P while a DMA request is pending and its
+        // DMA wake-up enable is set: the receive FIFO holds RXFIW + 1 frames, or the transmitter
+        // is enabled. TXFL stays set once the FIFO has space, so the transmit wake-up is gated
+        // on the transmitter instead, and CLEARTX drops it until the next TXEN.
+        private bool TxDmaWakeupActive => isEnabled && transmitterEnableFlag.Value && !txWakeupCleared && TxFifoLevel.IsSet;
+
+        private bool Em1pRequestActive => (rxDmaWakeUp.Value && Count >= (int)rxWatermark.Value + 1)
+            || (txDmaWakeUp.Value && TxDmaWakeupActive);
 
         private ulong HfxoFrequency
         {

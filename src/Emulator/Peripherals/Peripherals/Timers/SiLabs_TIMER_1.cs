@@ -321,18 +321,15 @@ namespace Antmicro.Renode.Peripherals.Timers
         {
             switch(index)
             {
-                case 0:
-                    if_cc0_bit.Value = true;
-                    break;
-                case 1:
-                    if_cc1_bit.Value = true;
-                    break;
-                case 2:
-                    if_cc2_bit.Value = true;
-                    break;
-                default:
-                    this.Log(LogLevel.Error, "Compare channel {0} is outside 0..2", index);
-                    return;
+            case 0:
+                if_cc0_bit.Value = true;
+                break;
+            case 1:
+                if_cc1_bit.Value = true;
+                break;
+            case 2:
+                if_cc2_bit.Value = true;
+                break;
             }
             UpdateInterrupts();
         }
@@ -363,8 +360,6 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
             return frequency;
         }
-
-        private bool CountingUp => cfg_mode_field.Value != CFG_MODE.DOWN;
 
         private void EnsureHostAllClockHooks()
         {
@@ -432,6 +427,8 @@ namespace Antmicro.Renode.Peripherals.Timers
             }
             return false;
         }
+
+        private bool CountingUp => cfg_mode_field.Value != CFG_MODE.DOWN;
 
         private LimitTimer timer;
         private CompareChannel[] channels;

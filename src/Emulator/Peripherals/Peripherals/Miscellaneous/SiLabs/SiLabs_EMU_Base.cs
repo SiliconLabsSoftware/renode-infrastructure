@@ -37,7 +37,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             this.parent = parent;
 
             isWFIHookAdded = false;
-            energyMode = SiLabs_EnergyMode.EM0;
+            CurrentEnergyMode = SiLabs_EnergyMode.EM0;
             pd1PoweredDownSinceEm0 = false;
             Em2CoreRetentionEnabled = true;
             noRetain = new List<IPeripheral>();
@@ -46,8 +46,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             em1pHostClockRequesters = new HashSet<object>();
             qChannelBusyPeripherals = new HashSet<object>();
             radioSequencerCpus = new HashSet<CortexM>();
-            hostClocksEnabled = true;
-            hostAllClocksEnabled = true;
+            HostClocksEnabled = true;
+            HostAllClocksEnabled = true;
         }
 
         public void AddWFIHook()
@@ -230,16 +230,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         public bool Em2CoreRetentionEnabled { get; set; }
 
-        public SiLabs_EnergyMode CurrentEnergyMode => energyMode;
+        public SiLabs_EnergyMode CurrentEnergyMode { get; private set; }
 
         // Host EM1P clock domain: bus, memories, EUSART0, iADC, SYSRTC, LDMA, PRS, GPIO,
         // VDAC, HFXO, CMU. Runs in EM0 and EM1, and in EM1P while a host-clock requester is set.
-        public bool HostClocksEnabled => hostClocksEnabled;
+        public bool HostClocksEnabled { get; private set; }
 
         // HostAll clock domain: the entire HCLK tree, including the general-purpose timers,
         // USART and SysTick. Runs in EM0 and EM1 only, never in EM1P (except for a debugger
         // wake-up, which is not modeled) and never in EM2.
-        public bool HostAllClocksEnabled => hostAllClocksEnabled;
+        public bool HostAllClocksEnabled { get; private set; }
 
         public bool Em1pRequested => em1pRequesters.Count > 0;
 
@@ -320,7 +320,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 {
                     energyModeUpdatePending = false;
                     var target = ComputeTargetEnergyMode();
-                    if(target != energyMode)
+                    if(target != CurrentEnergyMode)
                     {
                         TransitionTo(target);
                     }
@@ -339,7 +339,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         private void TransitionTo(SiLabs_EnergyMode target)
         {
-            var source = energyMode;
+            var source = CurrentEnergyMode;
             this.Log(LogLevel.Noisy, "Energy mode transition {0} -> {1}", source, target);
 
             switch(source)
@@ -384,7 +384,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 pd1PoweredDownSinceEm0 = false;
             }
 
-            energyMode = target;
+            CurrentEnergyMode = target;
 
             switch(target)
             {
@@ -403,11 +403,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
 
         // EM0 and EM1 run the host clock domain. EM2 powers PD1 down, so the domain is
-        // gated. EM1P keeps PD1 powered but gates host clocks unless a requester (the
-        // RAC MCUEM1PMODE software request on xG24) asks for them.
+        // gated. EM1P keeps PD1 powered but gates host clocks unless a requester (the RAC
+        // MCUEM1PMODE software request, or an EM2-capable EUSART/EUART with a pending DMA
+        // request) asks for them.
         private bool ComputeHostClocksEnabled()
         {
-            switch(energyMode)
+            switch(CurrentEnergyMode)
             {
             case SiLabs_EnergyMode.EM0:
             case SiLabs_EnergyMode.EM1:
@@ -417,13 +418,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             case SiLabs_EnergyMode.EM2:
                 return false;
             default:
-                throw new ArgumentOutOfRangeException(nameof(energyMode), energyMode, "Unhandled energy mode");
+                throw new ArgumentOutOfRangeException(nameof(CurrentEnergyMode), CurrentEnergyMode, "Unhandled energy mode");
             }
         }
 
         private bool ComputeHostAllClocksEnabled()
         {
-            return energyMode == SiLabs_EnergyMode.EM0 || energyMode == SiLabs_EnergyMode.EM1;
+            return CurrentEnergyMode == SiLabs_EnergyMode.EM0 || CurrentEnergyMode == SiLabs_EnergyMode.EM1;
         }
 
         private void UpdateHostClocks()
@@ -442,17 +443,17 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     hostClockUpdatePending = false;
 
                     var enabled = ComputeHostClocksEnabled();
-                    if(enabled != hostClocksEnabled)
+                    if(enabled != HostClocksEnabled)
                     {
-                        hostClocksEnabled = enabled;
+                        HostClocksEnabled = enabled;
                         this.Log(LogLevel.Noisy, "Host clocks {0}", enabled ? "enabled" : "gated");
                         (enabled ? ExitHostClockGate : EnterHostClockGate)?.Invoke();
                     }
 
                     var allEnabled = ComputeHostAllClocksEnabled();
-                    if(allEnabled != hostAllClocksEnabled)
+                    if(allEnabled != HostAllClocksEnabled)
                     {
-                        hostAllClocksEnabled = allEnabled;
+                        HostAllClocksEnabled = allEnabled;
                         this.Log(LogLevel.Noisy, "HostAll clocks {0}", allEnabled ? "enabled" : "gated");
                         (allEnabled ? ExitHostAllClockGate : EnterHostAllClockGate)?.Invoke();
                     }
@@ -619,14 +620,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 }
 
                 cpu.CpuWaitSignal.Set(false);
-
-                // Releasing CpuWait only queues the exit from reset for the next synced state,
-                // which is never reached while the CPUs driving virtual time are halted.
-                if(cpu.EmulationState == EmulationCPUState.InReset)
-                {
-                    cpu.IsHalted = false;
-                    cpu.Resume();
-                }
             }
         }
 
@@ -644,7 +637,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         }
 
         private bool isWFIHookAdded;
-        private SiLabs_EnergyMode energyMode;
         // Set once PD1 has been powered down (EM2) since the last EM0, so that the
         // non-retained core state is dropped when the host finally wakes up.
         private bool pd1PoweredDownSinceEm0;
@@ -652,8 +644,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         private bool energyModeUpdatePending;
         private bool isUpdatingHostClocks;
         private bool hostClockUpdatePending;
-        private bool hostClocksEnabled;
-        private bool hostAllClocksEnabled;
         private List<IPeripheral> noRetain;
         private IDictionary<CortexM, bool> cpuWfiState;
         private readonly HashSet<object> em1pRequesters;

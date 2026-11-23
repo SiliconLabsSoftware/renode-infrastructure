@@ -125,6 +125,9 @@ namespace Antmicro.Renode.Peripherals.Timers
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers.IpVersion, new DoubleWordRegister(this, 0x00000000)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
                 {(long)Registers.Config, new DoubleWordRegister(this)
                     .WithEnumField<DoubleWordRegister, TimerMode>(0, 2, out timerMode, name: "MODE", changeCallback: (_, value) =>
                     {

@@ -6,7 +6,6 @@
 //
 
 using Antmicro.Renode.Logging;
-using Antmicro.Renode.Utilities;
 
 #nullable enable
 
@@ -14,15 +13,7 @@ namespace Antmicro.Renode.Peripherals.ARM_Ethos;
 
 public partial class ARM_EthosU85
 {
-    private static ulong Extend40(ushort parameter, uint payload)
-    {
-        return ((ulong)(parameter & 0xFF) << 32) | payload;
-    }
-
-    private static long SignExtend40(ushort parameter, uint payload)
-    {
-        return unchecked((long)BitHelper.SignExtend(Extend40(parameter, payload), 40));
-    }
+    protected override SharedCommandRegisterState CommonRegisters => commandRegisters;
 
     private bool SetRegister(CommandOpcode opcode, ushort parameter)
     {
@@ -197,55 +188,55 @@ public partial class ARM_EthosU85
         switch(opcode)
         {
         case PayloadCommandOpcode.SetIfmBase0:
-            commandRegisters.IfmBase0 = Extend40(parameter, payload);
+            commandRegisters.IfmBase0 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfmBase1:
-            commandRegisters.IfmBase1 = Extend40(parameter, payload);
+            commandRegisters.IfmBase1 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfmBase2:
-            commandRegisters.IfmBase2 = Extend40(parameter, payload);
+            commandRegisters.IfmBase2 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfmBase3:
-            commandRegisters.IfmBase3 = Extend40(parameter, payload);
+            commandRegisters.IfmBase3 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfmStrideX:
-            commandRegisters.IfmStrideX = SignExtend40(parameter, payload);
+            commandRegisters.IfmStrideX = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfmStrideY:
-            commandRegisters.IfmStrideY = SignExtend40(parameter, payload);
+            commandRegisters.IfmStrideY = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfmStrideC:
-            commandRegisters.IfmStrideC = SignExtend40(parameter, payload);
+            commandRegisters.IfmStrideC = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetOfmBase0:
-            commandRegisters.OfmBase0 = Extend40(parameter, payload);
+            commandRegisters.OfmBase0 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetOfmBase1:
-            commandRegisters.OfmBase1 = Extend40(parameter, payload);
+            commandRegisters.OfmBase1 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetOfmBase2:
-            commandRegisters.OfmBase2 = Extend40(parameter, payload);
+            commandRegisters.OfmBase2 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetOfmBase3:
-            commandRegisters.OfmBase3 = Extend40(parameter, payload);
+            commandRegisters.OfmBase3 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetOfmStrideX:
-            commandRegisters.OfmStrideX = SignExtend40(parameter, payload);
+            commandRegisters.OfmStrideX = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetOfmStrideY:
-            commandRegisters.OfmStrideY = SignExtend40(parameter, payload);
+            commandRegisters.OfmStrideY = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetOfmStrideC:
-            commandRegisters.OfmStrideC = SignExtend40(parameter, payload);
+            commandRegisters.OfmStrideC = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetWeightBase:
-            commandRegisters.WeightBase = Extend40(parameter, payload);
+            commandRegisters.WeightBase = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetWeightLength:
             commandRegisters.WeightLength = payload;
             break;
         case PayloadCommandOpcode.SetScaleBase:
-            commandRegisters.ScaleBase = Extend40(parameter, payload);
+            commandRegisters.ScaleBase = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetScaleLength:
             commandRegisters.ScaleLength = payload & 0xFFFFF; // length is bits 51:32 (20 bits)
@@ -272,70 +263,70 @@ public partial class ARM_EthosU85
             commandRegisters.OpScalar = unchecked((int)payload); // signed 32-bit
             break;
         case PayloadCommandOpcode.SetDma0Src:
-            commandRegisters.Dma0Src = Extend40(parameter, payload);
+            commandRegisters.Dma0Src = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0Dst:
-            commandRegisters.Dma0Dst = Extend40(parameter, payload);
+            commandRegisters.Dma0Dst = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0Len:
-            commandRegisters.Dma0Len = Extend40(parameter, payload);
+            commandRegisters.Dma0Len = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0SrcStride0:
-            commandRegisters.Dma0SrcStride0 = SignExtend40(parameter, payload);
+            commandRegisters.Dma0SrcStride0 = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0SrcStride1:
-            commandRegisters.Dma0SrcStride1 = SignExtend40(parameter, payload);
+            commandRegisters.Dma0SrcStride1 = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0DstStride0:
-            commandRegisters.Dma0DstStride0 = SignExtend40(parameter, payload);
+            commandRegisters.Dma0DstStride0 = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0DstStride1:
-            commandRegisters.Dma0DstStride1 = SignExtend40(parameter, payload);
+            commandRegisters.Dma0DstStride1 = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0Idx:
-            commandRegisters.Dma0Idx = Extend40(parameter, payload);
+            commandRegisters.Dma0Idx = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetDma0IdxMax:
             commandRegisters.Dma0IdxMax = payload & 0x7FFFFFFF; // idx_max is bits 62:32
             break;
         case PayloadCommandOpcode.SetDma0IdxSkip1:
-            commandRegisters.Dma0IdxSkip1 = SignExtend40(parameter, payload);
+            commandRegisters.Dma0IdxSkip1 = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfm2Base0:
-            commandRegisters.Ifm2Base0 = Extend40(parameter, payload);
+            commandRegisters.Ifm2Base0 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfm2Base1:
-            commandRegisters.Ifm2Base1 = Extend40(parameter, payload);
+            commandRegisters.Ifm2Base1 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfm2Base2:
-            commandRegisters.Ifm2Base2 = Extend40(parameter, payload);
+            commandRegisters.Ifm2Base2 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfm2Base3:
-            commandRegisters.Ifm2Base3 = Extend40(parameter, payload);
+            commandRegisters.Ifm2Base3 = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfm2StrideX:
-            commandRegisters.Ifm2StrideX = SignExtend40(parameter, payload);
+            commandRegisters.Ifm2StrideX = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfm2StrideY:
-            commandRegisters.Ifm2StrideY = SignExtend40(parameter, payload);
+            commandRegisters.Ifm2StrideY = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetIfm2StrideC:
-            commandRegisters.Ifm2StrideC = SignExtend40(parameter, payload);
+            commandRegisters.Ifm2StrideC = SignExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetWeight1Base:
-            commandRegisters.Weight1Base = Extend40(parameter, payload);
+            commandRegisters.Weight1Base = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetWeight1Length:
             commandRegisters.Weight1Length = payload;
             break;
         case PayloadCommandOpcode.SetWeight2Base:
-            commandRegisters.Weight2Base = Extend40(parameter, payload);
+            commandRegisters.Weight2Base = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetWeight2Length:
             commandRegisters.Weight2Length = payload;
             break;
         case PayloadCommandOpcode.SetWeight3Base:
-            commandRegisters.Weight3Base = Extend40(parameter, payload);
+            commandRegisters.Weight3Base = ExtendAddress(parameter, payload, AddressBits);
             break;
         case PayloadCommandOpcode.SetWeight3Length:
             commandRegisters.Weight3Length = payload;
@@ -360,85 +351,20 @@ public partial class ARM_EthosU85
         return true;
     }
 
-    private CommandRegisterState commandRegisters = new CommandRegisterState();
+    private U85CommandRegisterState commandRegisters = new U85CommandRegisterState();
+    private const int AddressBits = 40;
 
-    private sealed class CommandRegisterState
+    private class U85CommandRegisterState : SharedCommandRegisterState
     {
-        // One-word commands: raw 16-bit parameter, decoded when the operation runs
-        public ushort IfmPadTop;
-        public ushort IfmPadLeft;
-        public ushort IfmPadRight;
-        public ushort IfmPadBottom;
-        public ushort IfmDepthM1;
-        public ushort IfmPrecision;
-        public ushort IfmUpscale;
         public ushort IfmBroadcast;
-        public ushort IfmZeroPoint;
-        public ushort IfmWidth0M1;
-        public ushort IfmHeight0M1;
-        public ushort IfmHeight1M1;
-        public ushort IfmRegion;
-        public ushort OfmWidthM1;
-        public ushort OfmHeightM1;
-        public ushort OfmDepthM1;
-        public ushort OfmPrecision;
-        public ushort OfmBlkWidthM1;
-        public ushort OfmBlkHeightM1;
-        public ushort OfmBlkDepthM1;
-        public ushort OfmZeroPoint;
-        public ushort OfmWidth0M1;
-        public ushort OfmHeight0M1;
-        public ushort OfmHeight1M1;
-        public ushort OfmRegion;
-        public ushort KernelWidthM1;
-        public ushort KernelHeightM1;
-        public ushort KernelStride;
-        public ushort AccFormat;
-        public ushort Activation;
-        public ushort ActivationMin;
-        public ushort ActivationMax;
-        public ushort WeightRegion;
-        public ushort ScaleRegion;
         public ushort ResizeXScaleNM1;
         public ushort ResizeYScaleNM1;
         public ushort ResizeXOffset;
         public ushort ResizeYOffset;
         public ushort WeightFormat;
-        public ushort Blockdep;
-        public ushort Dma0SrcRegion;
-        public ushort Dma0DstRegion;
         public ushort Dma0Size0;
         public ushort Dma0Size1;
         public ushort Dma0IdxRegion;
-        public ushort Ifm2Broadcast;
-        public ushort Ifm2Precision;
-        public ushort Ifm2ZeroPoint;
-        public ushort Ifm2Width0M1;
-        public ushort Ifm2Height0M1;
-        public ushort Ifm2Height1M1;
-        public ushort Ifm2Region;
-
-        // Two-word commands
-        public ulong IfmBase0;
-        public ulong IfmBase1;
-        public ulong IfmBase2;
-        public ulong IfmBase3;
-        public long IfmStrideX;
-        public long IfmStrideY;
-        public long IfmStrideC;
-        public ulong OfmBase0;
-        public ulong OfmBase1;
-        public ulong OfmBase2;
-        public ulong OfmBase3;
-        public long OfmStrideX;
-        public long OfmStrideY;
-        public long OfmStrideC;
-        public ulong WeightBase;
-        public uint WeightLength;
-        public ulong ScaleBase;
-        public uint ScaleLength;
-        public uint OfmScale;
-        public byte OfmScaleShift;
         public byte OfmScaleDoubleRound;
         public byte OfmScaleRoundMode;
         public uint IfmScale;
@@ -450,9 +376,6 @@ public partial class ARM_EthosU85
         public byte Ifm2ScaleDoubleRound;
         public byte Ifm2ScaleRoundMode;
         public int OpScalar;
-        public ulong Dma0Src;
-        public ulong Dma0Dst;
-        public ulong Dma0Len;
         public long Dma0SrcStride0;
         public long Dma0SrcStride1;
         public long Dma0DstStride0;
@@ -460,15 +383,6 @@ public partial class ARM_EthosU85
         public ulong Dma0Idx;
         public uint Dma0IdxMax;
         public long Dma0IdxSkip1;
-        public ulong Ifm2Base0;
-        public ulong Ifm2Base1;
-        public ulong Ifm2Base2;
-        public ulong Ifm2Base3;
-        public long Ifm2StrideX;
-        public long Ifm2StrideY;
-        public long Ifm2StrideC;
-        public ulong Weight1Base;
-        public uint Weight1Length;
         public ulong Weight2Base;
         public uint Weight2Length;
         public ulong Weight3Base;

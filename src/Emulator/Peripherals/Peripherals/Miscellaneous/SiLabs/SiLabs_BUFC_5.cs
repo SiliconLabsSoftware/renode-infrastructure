@@ -17,7 +17,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
     public class SiLabs_BUFC_5 : SiLabs_BUFC_Base
     {
-        public SiLabs_BUFC_5(Machine machine) : base(machine, NumberOfBuffers)
+        public SiLabs_BUFC_5(Machine machine) : base(machine, NumberOfBuffers, BufferAddressReset)
         {
         }
 
@@ -25,6 +25,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)Registers.Reg_1, new DoubleWordRegister(this, 0x00000005)
+                    .WithValueField(0, 32, FieldMode.Read, name: "REG_1_FIELD_1")
+                },
+                {(long)Registers.Reg_2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "REG_2_FIELD_1")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)Registers.Reg_3, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "REG_3_FIELD_1")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)Registers.Reg_66, BuildEventRegister("FSWIF")},
+                {(long)Registers.Reg_67, BuildEventRegister("FSWIEN")},
                 {(long)Registers.Reg_60, new DoubleWordRegister(this)
                     .WithFlag(0, out buffer[0].Field_6, name: "REG_60_FIELD_1")
                     .WithFlag(1, out buffer[0].Field_23, name: "REG_60_FIELD_2")
@@ -50,7 +63,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     .WithFlag(27, out buffer[3].Field_2, name: "REG_60_FIELD_19")
                     .WithFlag(28, out buffer[3].Field_4, name: "REG_60_FIELD_20")
                     .WithReservedBits(29, 2)
-                    .WithFlag(31, name: "REG_60_FIELD_21")
+                    .WithFlag(31, out field_26, name: "REG_60_FIELD_21")
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
                 {(long)Registers.Reg_61, new DoubleWordRegister(this)
@@ -78,7 +91,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     .WithFlag(27, out buffer[3].Field_1, name: "REG_61_FIELD_19")
                     .WithFlag(28, out buffer[3].Field_3, name: "REG_61_FIELD_20")
                     .WithReservedBits(29, 2)
-                    .WithFlag(31, name: "REG_61_FIELD_21")
+                    .WithFlag(31, out field_25, name: "REG_61_FIELD_21")
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
                 {(long)Registers.Reg_62, new DoubleWordRegister(this)
@@ -106,7 +119,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     .WithFlag(27, out buffer[3].Field_8, name: "REG_62_FIELD_19")
                     .WithFlag(28, out buffer[3].Field_10, name: "REG_62_FIELD_20")
                     .WithReservedBits(29, 2)
-                    .WithFlag(31, name: "REG_62_FIELD_21")
+                    .WithFlag(31, out field_28, name: "REG_62_FIELD_21")
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
                 {(long)Registers.Reg_63, new DoubleWordRegister(this)
@@ -134,7 +147,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     .WithFlag(27, out buffer[3].Field_7, name: "REG_63_FIELD_19")
                     .WithFlag(28, out buffer[3].Field_9, name: "REG_63_FIELD_20")
                     .WithReservedBits(29, 2)
-                    .WithFlag(31, name: "REG_63_FIELD_21")
+                    .WithFlag(31, out field_27, name: "REG_63_FIELD_21")
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
             };
@@ -163,7 +176,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                         .WithEnumField<DoubleWordRegister, BUFC_SizeMode>(0, 3, out buffer[i].Field_17, name: "REG_63_FIELD_22")
                         .WithReservedBits(3, 29));
                 registerDictionary.Add(startOffset + blockSize * i + addrOffset,
-                    new DoubleWordRegister(this, 0x8000000)
+                    new DoubleWordRegister(this, BufferAddressReset)
                         .WithValueField(0, 32, valueProviderCallback: _ => buffer[i].Address, writeCallback: (_, value) => buffer[i].Address = (uint)(value & 0xFFFFFFFC), name: "REG_63_FIELD_23"));
                 registerDictionary.Add(startOffset + blockSize * i + wOffOffset,
                     new DoubleWordRegister(this)
@@ -230,7 +243,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             machine.ClockSource.ExecuteInLock(delegate
             {
-                bool irq = false;
+                var irq = BusErrorInterrupt;
                 Array.ForEach(buffer, x => irq |= x.Interrupt);
                 if(irq)
                 {
@@ -241,7 +254,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 }
                 IRQ.Set(irq);
 
-                irq = false;
+                irq = SeqBusErrorInterrupt;
                 Array.ForEach(buffer, x => irq |= x.SeqInterrupt);
                 if(irq)
                 {
@@ -257,6 +270,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         protected override Type RegistersType => typeof(Registers);
 
         private const uint NumberOfBuffers = 4;
+        private const uint BufferAddressReset = 0x20000000;
 
         private enum Registers
         {

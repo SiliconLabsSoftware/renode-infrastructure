@@ -596,6 +596,18 @@ namespace Antmicro.Renode.UserInterface
             }
         }
 
+        public void UpdateTokens()
+        {
+            foreach(var symbol in Variables.Keys)
+            {
+                var token = Variables[symbol];
+                if(token is PathToken pathToken)
+                {
+                    pathToken.Update(EmulationManager.Instance.CurrentEmulation.FileFetcher);
+                }
+            }
+        }
+
         public string MachineName => EmulationManager.Instance.CurrentEmulation.TryGetMachineName(CurrentMachine, out var name) ? name : null;
 
         public string MachineNameNormalized => NormalizeMachineName(MachineName);
@@ -685,7 +697,6 @@ namespace Antmicro.Renode.UserInterface
             InitializeBindings();
             currentMachineOverride = new ThreadLocal<IMachine>();
             isMachineOverriden = new ThreadLocal<bool>();
-
             // Right after deserialization the EmulationManager is not yet fully set up thus
             // currentMachine can't be retrieved here.
         }

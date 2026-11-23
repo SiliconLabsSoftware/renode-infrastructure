@@ -113,12 +113,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             emuBase.SetQChannelBusy(peripheral, busy);
         }
 
-        public SiLabs_EnergyMode CurrentEnergyMode => emuBase.CurrentEnergyMode;
-
-        public bool HostClocksEnabled => emuBase.HostClocksEnabled;
-
-        public bool HostAllClocksEnabled => emuBase.HostAllClocksEnabled;
-
         public void UpdatePeripheralEnabledStatus(IPeripheral peripheral, bool enabled)
         {
         }
@@ -127,6 +121,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
         {
             return emuBase.GetNoRetainPeripherals();
         }
+
+        public SiLabs_EnergyMode CurrentEnergyMode => emuBase.CurrentEnergyMode;
+
+        public bool HostClocksEnabled => emuBase.HostClocksEnabled;
+
+        public bool HostAllClocksEnabled => emuBase.HostAllClocksEnabled;
 
         private readonly SiLabs_EMU_Base emuBase;
     }

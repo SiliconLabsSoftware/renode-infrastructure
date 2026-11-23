@@ -29,6 +29,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
     {
         public SiLabs_xG24_LPW(Machine machine, MappedMemory ram, CortexM sequencer, SiLabs_BUFC_4 bufferController, SiLabs_SYSRTC_1 sysrtc = null, bool pa0DbmSupport = false, bool pa10DbmSupport = false, bool pa20DbmSupport = false)
         {
+            random = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
             this.machine = machine;
             this.ram = ram;
             this.sequencer = sequencer;
@@ -645,6 +646,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             FRC_rxDonePending = false;
             FRC_rxFrameIrqClearedPending = false;
             FRC_rxAbortInProgress = false;
+            FRC_frameOk = false;
+            FRC_frameLengthError = false;
+            FRC_rxFrameDiscarded = false;
+            FRC_crcErrorTolerated = false;
 
             // Reset RAC variables
             RAC_rxFailReason = RAC_RxFailReason.None;
@@ -777,6 +782,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 // FRC interrupt
                 irq = ((FRC_txDoneInterrupt.Value && FRC_txDoneInterruptEnable.Value)
                        || (FRC_txAfterFrameDoneInterrupt.Value && FRC_txAfterFrameDoneInterruptEnable.Value)
+                       || (FRC_txAbortedInterrupt.Value && FRC_txAbortedInterruptEnable.Value)
                        || (FRC_txUnderflowInterrupt.Value && FRC_txUnderflowInterruptEnable.Value)
                        || (FRC_rxDoneInterrupt.Value && FRC_rxDoneInterruptEnable.Value)
                        || (FRC_rxAbortedInterrupt.Value && FRC_rxAbortedInterruptEnable.Value)
@@ -897,6 +903,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 // FRC interrupt
                 irq = ((FRC_seqTxDoneInterrupt.Value && FRC_seqTxDoneInterruptEnable.Value)
                        || (FRC_seqTxAfterFrameDoneInterrupt.Value && FRC_seqTxAfterFrameDoneInterruptEnable.Value)
+                       || (FRC_seqTxAbortedInterrupt.Value && FRC_seqTxAbortedInterruptEnable.Value)
                        || (FRC_seqTxUnderflowInterrupt.Value && FRC_seqTxUnderflowInterruptEnable.Value)
                        || (FRC_seqRxDoneInterrupt.Value && FRC_seqRxDoneInterruptEnable.Value)
                        || (FRC_seqRxAbortedInterrupt.Value && FRC_seqRxAbortedInterruptEnable.Value)
@@ -1440,6 +1447,28 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
 
+        // #region agent log
+        private static readonly Dictionary<string, string> DbgNewRegs = System.IO.File.Exists("/tmp/new_regs.txt")
+            ? System.IO.File.ReadAllLines("/tmp/new_regs.txt").Select(l => l.Split(' ')).ToDictionary(p => p[0], p => p.Length > 1 && p[1] != "" ? p[1] : "0x0")
+            : new Dictionary<string, string>();
+        private readonly HashSet<string> dbgSeen = new HashSet<string>();
+        private static readonly HashSet<string> DbgZeroRegs = new HashSet<string>((Environment.GetEnvironmentVariable("DBG_ZERO_REGS") ?? "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries));
+        private static readonly string DbgRunId = Environment.GetEnvironmentVariable("DBG_RUN_ID") ?? "pre-fix";
+        private void DbgLog<T>(string hyp, string kind, long offset, uint value)
+        {
+            var key = typeof(T).Name + "." + Enum.GetName(typeof(T), offset);
+            if(!DbgNewRegs.TryGetValue(key, out var reset)) { return; }
+            if(kind == "read" && value == 0) { return; }
+            var cpuName = "?"; ulong pc = 0;
+            if(machine.SystemBus.TryGetCurrentCPU(out var c)) { cpuName = c.GetName(); pc = c.PC.RawValue; }
+            var dedup = kind + "|" + key + "|" + value + "|" + cpuName;
+            if(!dbgSeen.Add(dedup)) { return; }
+            EmulationManager.Instance.CurrentEmulation.TryGetMachineName(machine, out var mname);
+            var line = $"{{\"sessionId\":\"11fa6e\",\"runId\":\"{DbgRunId}\",\"hypothesisId\":\"{hyp}\",\"location\":\"SiLabs_xG24_LPW.cs:{kind}\",\"message\":\"new-reg {kind}\",\"data\":{{\"node\":\"{mname}\",\"cpu\":\"{cpuName}\",\"pc\":\"0x{pc:X}\",\"reg\":\"{key}\",\"value\":\"0x{value:X8}\",\"reset\":\"{reset}\",\"vtime\":\"{GetTime()}\"}},\"timestamp\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}}}";
+            lock(DbgNewRegs) { System.IO.File.AppendAllText("/Users/mananni/SilabsWorkspace/renode_work/.cursor/debug-11fa6e.log", line + "\n"); }
+        }
+        // #endregion
+
         private bool TrySyncTime()
         {
             if(machine.SystemBus.TryGetCurrentCPU(out var cpu))
@@ -1493,6 +1522,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
                 this.Log(LogLevel.Debug, "{0}: Write to {1} at offset 0x{2:X} ({3}), value 0x{4:X}",
                         this.GetTime(), regionName, internal_offset, Enum.Format(typeof(T), internal_offset, "G"), internal_value);
+                // #region agent log
+                DbgLog<T>("B", "write", internal_offset, internal_value);
+                // #endregion
 
                 if(!registersCollection.TryWrite(internal_offset, internal_value))
                 {
@@ -1558,6 +1590,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {
                     this.Log(LogLevel.Debug, "{0}: Read from {1} at offset 0x{2:X} ({3}), returned 0x{4:X}",
                              this.GetTime(), regionName, internal_offset, Enum.Format(typeof(T), internal_offset, "G"), result);
+                    // #region agent log
+                    DbgLog<T>("A", "read", internal_offset, result);
+                    if(DbgZeroRegs.Contains(typeof(T).Name + "." + Enum.GetName(typeof(T), internal_offset))) { result = 0; }
+                    // #endregion
                 }
             }
 
@@ -1615,6 +1651,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)AutomaticGainControlRegisters.IpVersion, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
+                {(long)AutomaticGainControlRegisters.Enable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)AutomaticGainControlRegisters.Status0, new DoubleWordRegister(this)
                     .WithValueField(0, 6, name: "GAININDEX")
                     .WithFlag(6, name: "RFPKDLOWLAT")
@@ -1772,6 +1815,640 @@ namespace Antmicro.Renode.Peripherals.Wireless
                   .WithValueField(16, 8, name: "SIRSSIHIGHTHR")
                   .WithValueField(24, 8, name: "SIRSSINEGSTEPTHR")
                 },
+                {(long)AutomaticGainControlRegisters.Status2, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, FieldMode.Read, name: "RFPKDHILATCNT")
+                    .WithReservedBits(12, 2)
+                    .WithFlag(14, FieldMode.Read, name: "PNDWNUP")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 16, FieldMode.Read, name: "RFPKDPRDCNT")
+                },
+                {(long)AutomaticGainControlRegisters.Control2, new DoubleWordRegister(this, 0x0000610A)
+                    .WithFlag(0, name: "DMASEL")
+                    .WithFlag(1, name: "SAFEMODE")
+                    .WithValueField(2, 3, name: "SAFEMODETHD")
+                    .WithValueField(5, 8, name: "REHICNTTHD")
+                    .WithValueField(13, 3, name: "RELOTHD")
+                    .WithValueField(16, 2, name: "RELBYCHPWR")
+                    .WithValueField(18, 8, name: "RELTARGETPWR")
+                    .WithValueField(26, 3, name: "RSSICCASUB")
+                    .WithFlag(29, name: "DEBCNTRST")
+                    .WithFlag(30, name: "PRSDEBUGEN")
+                    .WithFlag(31, name: "DISRFPKD")
+                },
+                {(long)AutomaticGainControlRegisters.Control3, new DoubleWordRegister(this, 0x5140A800)
+                    .WithFlag(0, name: "IFPKDDEB")
+                    .WithValueField(1, 2, name: "IFPKDDEBTHD")
+                    .WithValueField(3, 6, name: "IFPKDDEBPRD")
+                    .WithValueField(9, 4, name: "IFPKDDEBRST")
+                    .WithFlag(13, name: "RFPKDDEB")
+                    .WithValueField(14, 5, name: "RFPKDDEBTHD")
+                    .WithValueField(19, 8, name: "RFPKDDEBPRD")
+                    .WithValueField(27, 5, name: "RFPKDDEBRST")
+                },
+                {(long)AutomaticGainControlRegisters.Control4, new DoubleWordRegister(this, 0x0000000E)
+                    .WithValueField(0, 16, name: "PERIODRFPKD")
+                    .WithReservedBits(16, 7)
+                    .WithFlag(23, name: "DISRFPKDCNTRST")
+                    .WithFlag(24, name: "DISRSTCONDI")
+                    .WithValueField(25, 3, name: "RFPKDPRDGEAR")
+                    .WithFlag(28, name: "RFPKDSYNCSEL")
+                    .WithFlag(29, name: "RFPKDSEL")
+                    .WithFlag(30, name: "FRZPKDEN")
+                    .WithFlag(31, name: "RFPKDCNTEN")
+                },
+                {(long)AutomaticGainControlRegisters.Control5, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "PNUPDISTHD")
+                    .WithValueField(12, 12, name: "PNUPRELTHD")
+                    .WithReservedBits(24, 6)
+                    .WithFlag(30, name: "SEQPNUPALLOW")
+                    .WithFlag(31, name: "SEQRFPKDEN")
+                },
+                {(long)AutomaticGainControlRegisters.Control6, new DoubleWordRegister(this, 0x0003AAA8)
+                    .WithValueField(0, 18, name: "DUALRFPKDDEC")
+                    .WithFlag(18, name: "ENDUALRFPKD")
+                    .WithValueField(19, 12, name: "GAINDETTHD")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)AutomaticGainControlRegisters.ReceivedSignalStrengthIndicatorStepThreshold, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "POSSTEPTHR")
+                    .WithValueField(8, 8, name: "NEGSTEPTHR")
+                    .WithFlag(16, name: "STEPPER")
+                    .WithValueField(17, 4, name: "DEMODRESTARTPER")
+                    .WithValueField(21, 8, name: "DEMODRESTARTTHR")
+                    .WithFlag(29, name: "RSSIFAST")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.ManualGain, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "MANGAINEN")
+                    .WithValueField(1, 4, name: "MANGAINIFPGA")
+                    .WithValueField(5, 4, name: "MANGAINLNA")
+                    .WithValueField(9, 5, name: "MANGAINPN")
+                    .WithFlag(14, name: "MANRFLATRST")
+                    .WithFlag(15, name: "MANIFLOLATRST")
+                    .WithFlag(16, name: "MANIFHILATRST")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)AutomaticGainControlRegisters.RxGainRange, new DoubleWordRegister(this, 0x00813187)
+                    .WithValueField(0, 4, name: "LNAINDEXBORDER")
+                    .WithValueField(4, 4, name: "PGAINDEXBORDER")
+                    .WithValueField(8, 4, name: "GAININCSTEP")
+                    .WithValueField(12, 4, name: "PNGAINSTEP")
+                    .WithValueField(16, 4, name: "LATCHEDHISTEP")
+                    .WithValueField(20, 6, name: "HIPWRTHD")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)AutomaticGainControlRegisters.AutomaticGainControlPeriod0, new DoubleWordRegister(this, 0xD607000E)
+                    .WithValueField(0, 9, name: "PERIODHI")
+                    .WithReservedBits(9, 7)
+                    .WithValueField(16, 8, name: "MAXHICNTTHD")
+                    .WithValueField(24, 4, name: "SETTLETIMEIF")
+                    .WithValueField(28, 4, name: "SETTLETIMERF")
+                },
+                {(long)AutomaticGainControlRegisters.AutomaticGainControlPeriod1, new DoubleWordRegister(this, 0x00000037)
+                    .WithValueField(0, 32, name: "PERIODLOW")
+                },
+                {(long)AutomaticGainControlRegisters.HiCounterRegion0, new DoubleWordRegister(this, 0x06050403)
+                    .WithValueField(0, 8, name: "HICNTREGION0")
+                    .WithValueField(8, 8, name: "HICNTREGION1")
+                    .WithValueField(16, 8, name: "HICNTREGION2")
+                    .WithValueField(24, 8, name: "HICNTREGION3")
+                },
+                {(long)AutomaticGainControlRegisters.HiCounterRegion1, new DoubleWordRegister(this, 0x00000008)
+                    .WithValueField(0, 8, name: "HICNTREGION4")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)AutomaticGainControlRegisters.HiCounterRegion2, new DoubleWordRegister(this, 0x00036D11)
+                    .WithValueField(0, 3, name: "STEPDWN0")
+                    .WithValueField(3, 3, name: "STEPDWN1")
+                    .WithValueField(6, 3, name: "STEPDWN2")
+                    .WithValueField(9, 3, name: "STEPDWN3")
+                    .WithValueField(12, 3, name: "STEPDWN4")
+                    .WithValueField(15, 3, name: "STEPDWN5")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)AutomaticGainControlRegisters.GainStepsLimits0, new DoubleWordRegister(this, 0x00003144)
+                    .WithValueField(0, 5, name: "CFLOOPSTEPMAX")
+                    .WithValueField(5, 7, name: "CFLOOPDEL")
+                    .WithValueField(12, 4, name: "HYST")
+                    .WithValueField(16, 8, name: "MAXPWRVAR")
+                    .WithFlag(24, name: "TRANRSTAGC")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)AutomaticGainControlRegisters.GainStepsLimits1, new DoubleWordRegister(this, 0x000011BA)
+                    .WithValueField(0, 4, name: "LNAINDEXMAX")
+                    .WithValueField(4, 4, name: "PGAINDEXMAX")
+                    .WithValueField(8, 5, name: "PNINDEXMAX")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup0, new DoubleWordRegister(this, 0x00200400)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT1")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT2")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup1, new DoubleWordRegister(this, 0x00801804)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT4")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT5")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT6")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup2, new DoubleWordRegister(this, 0x01203C0B)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT7")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT8")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT9")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup3, new DoubleWordRegister(this, 0x02107C18)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT10")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT11")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup4, new DoubleWordRegister(this, 0x06E0FC2F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT13")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT14")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT15")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup5, new DoubleWordRegister(this, 0x0180480F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT16")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT17")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT18")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup6, new DoubleWordRegister(this, 0x02F0841F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT19")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT20")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT21")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroup7, new DoubleWordRegister(this, 0x07F1B83F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT22")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT23")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT24")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfAttenuationCodeGroupAlternate, new DoubleWordRegister(this, 0x0000007F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATTALT")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)AutomaticGainControlRegisters.LnaMixSliceCodeGroup0, new DoubleWordRegister(this, 0x15724BBD)
+                    .WithValueField(0, 6, name: "LNAMIXSLICE1")
+                    .WithValueField(6, 6, name: "LNAMIXSLICE2")
+                    .WithValueField(12, 6, name: "LNAMIXSLICE3")
+                    .WithValueField(18, 6, name: "LNAMIXSLICE4")
+                    .WithValueField(24, 6, name: "LNAMIXSLICE5")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.LnaMixSliceCodeGroup1, new DoubleWordRegister(this, 0x0518A311)
+                    .WithValueField(0, 6, name: "LNAMIXSLICE6")
+                    .WithValueField(6, 6, name: "LNAMIXSLICE7")
+                    .WithValueField(12, 6, name: "LNAMIXSLICE8")
+                    .WithValueField(18, 6, name: "LNAMIXSLICE9")
+                    .WithValueField(24, 6, name: "LNAMIXSLICE10")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.ProgrammableGainAmplifierGainCodeGroup0, new DoubleWordRegister(this, 0x76543210)
+                    .WithValueField(0, 4, name: "PGAGAIN1")
+                    .WithValueField(4, 4, name: "PGAGAIN2")
+                    .WithValueField(8, 4, name: "PGAGAIN3")
+                    .WithValueField(12, 4, name: "PGAGAIN4")
+                    .WithValueField(16, 4, name: "PGAGAIN5")
+                    .WithValueField(20, 4, name: "PGAGAIN6")
+                    .WithValueField(24, 4, name: "PGAGAIN7")
+                    .WithValueField(28, 4, name: "PGAGAIN8")
+                },
+                {(long)AutomaticGainControlRegisters.ProgrammableGainAmplifierGainCodeGroup1, new DoubleWordRegister(this, 0x00000A98)
+                    .WithValueField(0, 4, name: "PGAGAIN9")
+                    .WithValueField(4, 4, name: "PGAGAIN10")
+                    .WithValueField(8, 4, name: "PGAGAIN11")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)AutomaticGainControlRegisters.MirrorInterruptFlags, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "RSSIPOSSTEPM")
+                    .WithFlag(1, name: "RSSINEGSTEPM")
+                    .WithFlag(2, name: "SHORTRSSIPOSSTEPM")
+                    .WithFlag(3, name: "IFMIRRORCLEAR")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)AutomaticGainControlRegisters.LnaBoostControl, new DoubleWordRegister(this, 0x000001FE)
+                    .WithFlag(0, name: "BOOSTLNA")
+                    .WithValueField(1, 4, name: "LNABWADJ")
+                    .WithValueField(5, 4, name: "LNABWADJBOOST")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)AutomaticGainControlRegisters.AntennaDiversity, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "GAINMODE")
+                    .WithValueField(2, 7, name: "DEBOUNCECNTTHD")
+                    .WithValueField(9, 2, name: "DISRSSIANTDIVFIX")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)AutomaticGainControlRegisters.DualRfpkdThreshold0, new DoubleWordRegister(this, 0x000A0001)
+                    .WithValueField(0, 12, name: "RFPKDLOWTHD0")
+                    .WithReservedBits(12, 4)
+                    .WithValueField(16, 12, name: "RFPKDLOWTHD1")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)AutomaticGainControlRegisters.DualRfpkdThreshold1, new DoubleWordRegister(this, 0x00280001)
+                    .WithValueField(0, 12, name: "RFPKDHITHD0")
+                    .WithReservedBits(12, 4)
+                    .WithValueField(16, 12, name: "RFPKDHITHD1")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)AutomaticGainControlRegisters.Spare, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "SPAREREG")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup0, new DoubleWordRegister(this, 0x00200400)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT1")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT2")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT3")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup1, new DoubleWordRegister(this, 0x00801804)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT4")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT5")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT6")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup2, new DoubleWordRegister(this, 0x01203C0B)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT7")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT8")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT9")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup3, new DoubleWordRegister(this, 0x02107C18)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT10")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT11")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup4, new DoubleWordRegister(this, 0x06E0FC2F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT13")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT14")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT15")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup5, new DoubleWordRegister(this, 0x0180480F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT16")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT17")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT18")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup6, new DoubleWordRegister(this, 0x02F0841F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT19")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT20")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT21")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.PnRfFilterCodeGroup7, new DoubleWordRegister(this, 0x07F1B83F)
+                    .WithValueField(0, 10, name: "LNAMIXRFATT22")
+                    .WithValueField(10, 10, name: "LNAMIXRFATT23")
+                    .WithValueField(20, 10, name: "LNAMIXRFATT24")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup0, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL1")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE1")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE1")
+                    .WithFlag(12, name: "FENOTCHRATTNEN1")
+                    .WithFlag(13, name: "FENOTCHEN1")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL2")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE2")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE2")
+                    .WithFlag(28, name: "FENOTCHRATTNEN2")
+                    .WithFlag(29, name: "FENOTCHEN2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup1, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL3")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE3")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE3")
+                    .WithFlag(12, name: "FENOTCHRATTNEN3")
+                    .WithFlag(13, name: "FENOTCHEN3")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL4")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE4")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE4")
+                    .WithFlag(28, name: "FENOTCHRATTNEN4")
+                    .WithFlag(29, name: "FENOTCHEN4")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup2, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL5")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE5")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE5")
+                    .WithFlag(12, name: "FENOTCHRATTNEN5")
+                    .WithFlag(13, name: "FENOTCHEN5")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL6")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE6")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE6")
+                    .WithFlag(28, name: "FENOTCHRATTNEN6")
+                    .WithFlag(29, name: "FENOTCHEN6")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup3, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL7")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE7")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE7")
+                    .WithFlag(12, name: "FENOTCHRATTNEN7")
+                    .WithFlag(13, name: "FENOTCHEN7")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL8")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE8")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE8")
+                    .WithFlag(28, name: "FENOTCHRATTNEN8")
+                    .WithFlag(29, name: "FENOTCHEN8")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup4, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL9")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE9")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE9")
+                    .WithFlag(12, name: "FENOTCHRATTNEN9")
+                    .WithFlag(13, name: "FENOTCHEN9")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL10")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE10")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE10")
+                    .WithFlag(28, name: "FENOTCHRATTNEN10")
+                    .WithFlag(29, name: "FENOTCHEN10")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup5, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL11")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE11")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE11")
+                    .WithFlag(12, name: "FENOTCHRATTNEN11")
+                    .WithFlag(13, name: "FENOTCHEN11")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL12")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE12")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE12")
+                    .WithFlag(28, name: "FENOTCHRATTNEN12")
+                    .WithFlag(29, name: "FENOTCHEN12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup6, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL13")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE13")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE13")
+                    .WithFlag(12, name: "FENOTCHRATTNEN13")
+                    .WithFlag(13, name: "FENOTCHEN13")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL14")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE14")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE14")
+                    .WithFlag(28, name: "FENOTCHRATTNEN14")
+                    .WithFlag(29, name: "FENOTCHEN14")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup7, new DoubleWordRegister(this, 0x20080000)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL15")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE15")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE15")
+                    .WithFlag(12, name: "FENOTCHRATTNEN15")
+                    .WithFlag(13, name: "FENOTCHEN15")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL16")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE16")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE16")
+                    .WithFlag(28, name: "FENOTCHRATTNEN16")
+                    .WithFlag(29, name: "FENOTCHEN16")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup8, new DoubleWordRegister(this, 0x200B200A)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL17")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE17")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE17")
+                    .WithFlag(12, name: "FENOTCHRATTNEN17")
+                    .WithFlag(13, name: "FENOTCHEN17")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL18")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE18")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE18")
+                    .WithFlag(28, name: "FENOTCHRATTNEN18")
+                    .WithFlag(29, name: "FENOTCHEN18")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup9, new DoubleWordRegister(this, 0x200B200B)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL19")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE19")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE19")
+                    .WithFlag(12, name: "FENOTCHRATTNEN19")
+                    .WithFlag(13, name: "FENOTCHEN19")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL20")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE20")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE20")
+                    .WithFlag(28, name: "FENOTCHRATTNEN20")
+                    .WithFlag(29, name: "FENOTCHEN20")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup10, new DoubleWordRegister(this, 0x200B200B)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL21")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE21")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE21")
+                    .WithFlag(12, name: "FENOTCHRATTNEN21")
+                    .WithFlag(13, name: "FENOTCHEN21")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL22")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE22")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE22")
+                    .WithFlag(28, name: "FENOTCHRATTNEN22")
+                    .WithFlag(29, name: "FENOTCHEN22")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchAttenuationCodeGroup11, new DoubleWordRegister(this, 0x200B200B)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL23")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE23")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE23")
+                    .WithFlag(12, name: "FENOTCHRATTNEN23")
+                    .WithFlag(13, name: "FENOTCHEN23")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL24")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE24")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE24")
+                    .WithFlag(28, name: "FENOTCHRATTNEN24")
+                    .WithFlag(29, name: "FENOTCHEN24")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup0, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL1")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE1")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE1")
+                    .WithFlag(12, name: "FENOTCHRATTNEN1")
+                    .WithFlag(13, name: "FENOTCHEN1")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL2")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE2")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE2")
+                    .WithFlag(28, name: "FENOTCHRATTNEN2")
+                    .WithFlag(29, name: "FENOTCHEN2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup1, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL3")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE3")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE3")
+                    .WithFlag(12, name: "FENOTCHRATTNEN3")
+                    .WithFlag(13, name: "FENOTCHEN3")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL4")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE4")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE4")
+                    .WithFlag(28, name: "FENOTCHRATTNEN4")
+                    .WithFlag(29, name: "FENOTCHEN4")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup2, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL5")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE5")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE5")
+                    .WithFlag(12, name: "FENOTCHRATTNEN5")
+                    .WithFlag(13, name: "FENOTCHEN5")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL6")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE6")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE6")
+                    .WithFlag(28, name: "FENOTCHRATTNEN6")
+                    .WithFlag(29, name: "FENOTCHEN6")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup3, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL7")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE7")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE7")
+                    .WithFlag(12, name: "FENOTCHRATTNEN7")
+                    .WithFlag(13, name: "FENOTCHEN7")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL8")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE8")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE8")
+                    .WithFlag(28, name: "FENOTCHRATTNEN8")
+                    .WithFlag(29, name: "FENOTCHEN8")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup4, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL9")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE9")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE9")
+                    .WithFlag(12, name: "FENOTCHRATTNEN9")
+                    .WithFlag(13, name: "FENOTCHEN9")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL10")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE10")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE10")
+                    .WithFlag(28, name: "FENOTCHRATTNEN10")
+                    .WithFlag(29, name: "FENOTCHEN10")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup5, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL11")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE11")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE11")
+                    .WithFlag(12, name: "FENOTCHRATTNEN11")
+                    .WithFlag(13, name: "FENOTCHEN11")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL12")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE12")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE12")
+                    .WithFlag(28, name: "FENOTCHRATTNEN12")
+                    .WithFlag(29, name: "FENOTCHEN12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup6, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL13")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE13")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE13")
+                    .WithFlag(12, name: "FENOTCHRATTNEN13")
+                    .WithFlag(13, name: "FENOTCHEN13")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL14")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE14")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE14")
+                    .WithFlag(28, name: "FENOTCHRATTNEN14")
+                    .WithFlag(29, name: "FENOTCHEN14")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup7, new DoubleWordRegister(this, 0x20080000)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL15")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE15")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE15")
+                    .WithFlag(12, name: "FENOTCHRATTNEN15")
+                    .WithFlag(13, name: "FENOTCHEN15")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL16")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE16")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE16")
+                    .WithFlag(28, name: "FENOTCHRATTNEN16")
+                    .WithFlag(29, name: "FENOTCHEN16")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup8, new DoubleWordRegister(this, 0x200B200A)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL17")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE17")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE17")
+                    .WithFlag(12, name: "FENOTCHRATTNEN17")
+                    .WithFlag(13, name: "FENOTCHEN17")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL18")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE18")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE18")
+                    .WithFlag(28, name: "FENOTCHRATTNEN18")
+                    .WithFlag(29, name: "FENOTCHEN18")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup9, new DoubleWordRegister(this, 0x200B200B)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL19")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE19")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE19")
+                    .WithFlag(12, name: "FENOTCHRATTNEN19")
+                    .WithFlag(13, name: "FENOTCHEN19")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL20")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE20")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE20")
+                    .WithFlag(28, name: "FENOTCHRATTNEN20")
+                    .WithFlag(29, name: "FENOTCHEN20")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup10, new DoubleWordRegister(this, 0x200B200B)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL21")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE21")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE21")
+                    .WithFlag(12, name: "FENOTCHRATTNEN21")
+                    .WithFlag(13, name: "FENOTCHEN21")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL22")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE22")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE22")
+                    .WithFlag(28, name: "FENOTCHRATTNEN22")
+                    .WithFlag(29, name: "FENOTCHEN22")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.FeNotchFilterCodeGroup11, new DoubleWordRegister(this, 0x200B200B)
+                    .WithValueField(0, 4, name: "FENOTCHATTNSEL23")
+                    .WithValueField(4, 4, name: "FENOTCHCAPCRSE23")
+                    .WithValueField(8, 4, name: "FENOTCHCAPFINE23")
+                    .WithFlag(12, name: "FENOTCHRATTNEN23")
+                    .WithFlag(13, name: "FENOTCHEN23")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "FENOTCHATTNSEL24")
+                    .WithValueField(20, 4, name: "FENOTCHCAPCRSE24")
+                    .WithValueField(24, 4, name: "FENOTCHCAPFINE24")
+                    .WithFlag(28, name: "FENOTCHRATTNEN24")
+                    .WithFlag(29, name: "FENOTCHEN24")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)AutomaticGainControlRegisters.ClearChannelAssessmentDebug, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "DEBUGCCARSSI")
+                    .WithFlag(8, FieldMode.Read, name: "DEBUGCCAM1")
+                    .WithFlag(9, FieldMode.Read, name: "DEBUGCCASIGDET")
+                    .WithReservedBits(10, 22)
+                },
             };
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
@@ -1780,7 +2457,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
-                {(long)ModulatorAndDemodulatorRegisters.InterruptFlags, new DoubleWordRegister(this, 0x00000008)
+                {(long)ModulatorAndDemodulatorRegisters.IpVersion, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Enable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.InterruptFlags, new DoubleWordRegister(this)
                     .WithFlag(0, out MODEM_txFrameSentInterrupt, name: "TXFRAMESENTIF")
                     .WithFlag(1, out MODEM_txSyncSentInterrupt, name: "TXSYNCSENTIF")
                     .WithFlag(2, out MODEM_txPreambleSentInterrupt, name: "TXPRESENTIF")
@@ -1848,7 +2532,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(30, 2)
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
-                {(long)ModulatorAndDemodulatorRegisters.SequencerInterruptFlags, new DoubleWordRegister(this, 0x00000008)
+                {(long)ModulatorAndDemodulatorRegisters.SequencerInterruptFlags, new DoubleWordRegister(this)
                     .WithFlag(0, out MODEM_seqTxFrameSentInterrupt, name: "TXFRAMESENTSEQIF")
                     .WithFlag(1, out MODEM_seqTxSyncSentInterrupt, name: "TXSYNCSENTSEQIF")
                     .WithFlag(2, out MODEM_seqTxPreambleSentInterrupt, name: "TXPRESENTSEQIF")
@@ -2017,10 +2701,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(16, 2)
                     .WithValueField(18, 14, FieldMode.Read, name: "RTCOST")
                 },
-                {(long)ModulatorAndDemodulatorRegisters.BleLongRange, new DoubleWordRegister(this)
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRange, new DoubleWordRegister(this, 0x00FA53E8)
                     .WithValueField(0, 32, name: "LONGRANGE")
                 },
-                {(long)ModulatorAndDemodulatorRegisters.RampingControl, new DoubleWordRegister(this)
+                {(long)ModulatorAndDemodulatorRegisters.RampingControl, new DoubleWordRegister(this, 0x00000555)
                   .WithValueField(0, 4, out MODEM_rampRate0, name: "RAMPRATE0")
                   .WithValueField(4, 4, out MODEM_rampRate1, name: "RAMPRATE1")
                   .WithValueField(8, 4, out MODEM_rampRate2, name: "RAMPRATE2")
@@ -2029,7 +2713,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                   .WithValueField(16, 8, out MODEM_rampValue, name: "RAMPVAL")
                   .WithReservedBits(24, 8)
                 },
-                {(long)ModulatorAndDemodulatorRegisters.ViterbiDemodulator, new DoubleWordRegister(this)
+                {(long)ModulatorAndDemodulatorRegisters.ViterbiDemodulator, new DoubleWordRegister(this, 0x00206100)
                     .WithFlag(0, out MODEM_viterbiDemodulatorEnable, name: "VTDEMODEN")
                     .WithFlag(1, name: "HARDDECISION")
                     .WithValueField(2, 7, name: "VITERBIKSI1")
@@ -2039,6 +2723,1302 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(24, 4, name: "CORRCYCLE")
                     .WithValueField(28, 4, name: "CORRSTPSIZE")
                 },
+                {(long)ModulatorAndDemodulatorRegisters.Status3, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, FieldMode.Read, name: "BBPFOUTABS1")
+                    .WithValueField(11, 11, FieldMode.Read, name: "BBPFOUTABS")
+                    .WithFlag(22, FieldMode.Read, name: "LRDSALIVE")
+                    .WithFlag(23, FieldMode.Read, name: "COHDSALIVE")
+                    .WithFlag(24, FieldMode.Read, name: "LRDSADET")
+                    .WithFlag(25, FieldMode.Read, name: "COHDSADET")
+                    .WithFlag(26, FieldMode.Read, name: "SYNCSECPEAKABTH")
+                    .WithFlag(27, FieldMode.Read, name: "SOFTRSTDONE")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Status4, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, FieldMode.Read, name: "ANT0RSSI")
+                    .WithReservedBits(9, 7)
+                    .WithValueField(16, 9, FieldMode.Read, name: "ANT1RSSI")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Status5, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, FieldMode.Read, name: "RXRESTARTMAFLTDOUT")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Status6, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "ANT0CORR")
+                    .WithValueField(10, 10, FieldMode.Read, name: "ANT1CORR")
+                    .WithReservedBits(20, 10)
+                    .WithFlag(30, FieldMode.Read, name: "ANT0OUT")
+                    .WithFlag(31, FieldMode.Read, name: "ANT1OUT")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Status7, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, FieldMode.Read, name: "FDEVEST")
+                    .WithValueField(6, 13, FieldMode.Read, name: "DEMODSOFT")
+                    .WithValueField(19, 10, FieldMode.Read, name: "CFEPHDIFF")
+                    .WithFlag(29, FieldMode.Read, name: "MINCOSTPASS")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, FieldMode.Read, valueProviderCallback: _ => true, name: "CFEDSADET")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.TimingDetectionStatus, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "TIMDETCORR")
+                    .WithValueField(8, 8, FieldMode.Read, name: "TIMDETFREQOFFEST")
+                    .WithValueField(16, 4, FieldMode.Read, name: "TIMDETPREERRORS")
+                    .WithReservedBits(20, 4)
+                    .WithFlag(24, FieldMode.Read, name: "TIMDETPASS")
+                    .WithValueField(25, 4, FieldMode.Read, name: "TIMDETINDEX")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DemodulatorFSMStatus, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, FieldMode.Read, name: "DETSTATE")
+                    .WithValueField(7, 3, FieldMode.Read, name: "DSASTATE")
+                    .WithValueField(10, 5, FieldMode.Read, name: "LRBLESTATE")
+                    .WithValueField(15, 5, FieldMode.Read, name: "NBBLESTATE")
+                    .WithValueField(20, 4, FieldMode.Read, name: "ANTDIVSTATE")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.FrequencyOffsetEstimate, new DoubleWordRegister(this)
+                    .WithValueField(0, 13, FieldMode.Read, name: "FREQOFFEST")
+                    .WithValueField(13, 11, FieldMode.Read, name: "CORRVAL")
+                    .WithValueField(24, 8, FieldMode.Read, name: "SOFTVAL")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AutomaticFrequencyControlAdjustmentRx, new DoubleWordRegister(this)
+                    .WithValueField(0, 19, name: "AFCADJRX")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 5, name: "AFCSCALEM")
+                    .WithReservedBits(25, 3)
+                    .WithValueField(28, 4, name: "AFCSCALEE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AutomaticFrequencyControldAjustmentTx, new DoubleWordRegister(this)
+                    .WithValueField(0, 19, name: "AFCADJTX")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 5, name: "AFCSCALEM")
+                    .WithReservedBits(25, 3)
+                    .WithValueField(28, 4, name: "AFCSCALEE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AnalogMixerControl, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 4)
+                    .WithFlag(4, name: "DIGIQSWAPEN")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Control3, new DoubleWordRegister(this, 0x00008000)
+                    .WithFlag(0, name: "PRSDINEN")
+                    .WithValueField(1, 2, name: "TIMINGBASESGAIN")
+                    .WithFlag(3, name: "DEVMULBCW")
+                    .WithReservedBits(4, 3)
+                    .WithFlag(7, name: "RAMTESTEN")
+                    .WithValueField(8, 3, name: "ANTDIVMODE")
+                    .WithFlag(11, name: "ANTDIVREPEATDIS")
+                    .WithValueField(12, 2, name: "TSAMPMODE")
+                    .WithValueField(14, 2, name: "TSAMPDEL")
+                    .WithValueField(16, 16, name: "TSAMPLIM")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Control4, new DoubleWordRegister(this, 0x03000000)
+                    .WithValueField(0, 4, name: "ISICOMP")
+                    .WithFlag(4, name: "DEVOFFCOMP")
+                    .WithValueField(5, 5, name: "PREDISTGAIN")
+                    .WithValueField(10, 3, name: "PREDISTDEB")
+                    .WithFlag(13, name: "PREDISTAVG")
+                    .WithFlag(14, name: "PREDISTRST")
+                    .WithValueField(15, 7, name: "PHASECLICKFILT")
+                    .WithFlag(22, name: "SOFTDSSSMODE")
+                    .WithValueField(23, 3, name: "ADCSATLEVEL")
+                    .WithValueField(26, 2, name: "ADCSATDENS")
+                    .WithFlag(28, name: "OFFSETPHASEMASKING")
+                    .WithFlag(29, name: "OFFSETPHASESCALING")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "CLKUNDIVREQ")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Control5, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "BRCALEN")
+                    .WithValueField(2, 2, name: "BRCALMODE")
+                    .WithValueField(4, 2, name: "BRCALAVG")
+                    .WithValueField(6, 3, name: "DETDEL")
+                    .WithFlag(9, name: "TDEDGE")
+                    .WithFlag(10, name: "TREDGE")
+                    .WithFlag(11, name: "DSSSCTD")
+                    .WithValueField(12, 4, name: "BBSS")
+                    .WithValueField(16, 4, name: "POEPER")
+                    .WithValueField(20, 3, name: "DEMODRAWDATASEL2")
+                    .WithReservedBits(23, 1)
+                    .WithValueField(24, 3, name: "FOEPREAVG")
+                    .WithFlag(27, name: "LINCORR")
+                    .WithReservedBits(28, 1)
+                    .WithFlag(29, name: "RESYNCBAUDTRANS")
+                    .WithFlag(30, name: "RESYNCLIMIT")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Control6, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, name: "TDREW")
+                    .WithValueField(7, 4, name: "PREBASES")
+                    .WithFlag(11, name: "PSTIMABORT0")
+                    .WithFlag(12, name: "PSTIMABORT1")
+                    .WithFlag(13, name: "PSTIMABORT2")
+                    .WithFlag(14, name: "PSTIMABORT3")
+                    .WithValueField(15, 2, name: "ARW")
+                    .WithValueField(17, 3, name: "TIMTHRESHGAIN")
+                    .WithFlag(20, name: "CPLXCORREN")
+                    .WithFlag(21, name: "DSSS3SYMBOLSYNCEN")
+                    .WithFlag(22, name: "TXDBPSKINV")
+                    .WithFlag(23, name: "TXDBPSKRAMPEN")
+                    .WithFlag(24, name: "IFADCDIGGAINCLKSEL")
+                    .WithValueField(25, 2, name: "CODINGB")
+                    .WithFlag(27, name: "IFADCDIGGAIN")
+                    .WithFlag(28, name: "RXRESTARTUPONRSSI")
+                    .WithFlag(29, name: "RXRESTARTUPONSHORTRSSI")
+                    .WithFlag(30, name: "RXBRCALCDIS")
+                    .WithFlag(31, name: "DEMODRESTARTALL")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.RxBaudrate, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "RXBRNUM")
+                    .WithValueField(5, 5, name: "RXBRDEN")
+                    .WithValueField(10, 3, name: "RXBRINT")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilter, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "DEC0")
+                    .WithValueField(3, 14, name: "DEC1")
+                    .WithValueField(17, 6, name: "DEC2")
+                    .WithValueField(23, 3, name: "CFOSR")
+                    .WithValueField(26, 2, name: "DEC1GAIN")
+                    .WithReservedBits(28, 2)
+                    .WithFlag(30, name: "ADCBITORDERI")
+                    .WithFlag(31, name: "ADCBITORDERQ")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Timing, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "TIMTHRESH")
+                    .WithValueField(8, 4, name: "TIMINGBASES")
+                    .WithValueField(12, 4, name: "ADDTIMSEQ")
+                    .WithFlag(16, name: "TIMSEQINVEN")
+                    .WithFlag(17, name: "TIMSEQSYNC")
+                    .WithValueField(18, 3, name: "FDM0THRESH")
+                    .WithValueField(21, 4, name: "OFFSUBNUM")
+                    .WithValueField(25, 4, name: "OFFSUBDEN")
+                    .WithFlag(29, name: "TSAGCDEL")
+                    .WithValueField(30, 2, name: "FASTRESYNC")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DirectSequenceSpreadSpectrumSymbol0, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "DSSS0")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ModulationIndex, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "MODINDEXM")
+                    .WithValueField(5, 5, name: "MODINDEXE")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 3, name: "FREQGAINE")
+                    .WithValueField(19, 3, name: "FREQGAINM")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AutomaticFrequencyControl, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 10)
+                    .WithValueField(10, 3, name: "AFCRXMODE")
+                    .WithValueField(13, 2, name: "AFCTXMODE")
+                    .WithFlag(15, name: "AFCRXCLR")
+                    .WithValueField(16, 5, name: "AFCDEL")
+                    .WithValueField(21, 3, name: "AFCAVGPER")
+                    .WithFlag(24, name: "AFCLIMRESET")
+                    .WithFlag(25, name: "AFCONESHOT")
+                    .WithFlag(26, name: "AFCENINTCOMP")
+                    .WithFlag(27, name: "AFCDSAFREQOFFEST")
+                    .WithFlag(28, name: "AFCDELDET")
+                    .WithValueField(29, 2, name: "AFCGEAR")
+                    .WithFlag(31, name: "DISAFCCTE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AutomaticFrequencyControlAdjustmentLimit, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "AFCADJLIM")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients0, new DoubleWordRegister(this, 0x22130A04)
+                    .WithValueField(0, 8, name: "COEFF0")
+                    .WithValueField(8, 8, name: "COEFF1")
+                    .WithValueField(16, 8, name: "COEFF2")
+                    .WithValueField(24, 8, name: "COEFF3")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients1, new DoubleWordRegister(this, 0x4F4A4132)
+                    .WithValueField(0, 8, name: "COEFF4")
+                    .WithValueField(8, 8, name: "COEFF5")
+                    .WithValueField(16, 8, name: "COEFF6")
+                    .WithValueField(24, 8, name: "COEFF7")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients2, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF8")
+                    .WithValueField(8, 8, name: "COEFF9")
+                    .WithValueField(16, 8, name: "COEFF10")
+                    .WithValueField(24, 8, name: "COEFF11")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients3, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF12")
+                    .WithValueField(8, 8, name: "COEFF13")
+                    .WithValueField(16, 8, name: "COEFF14")
+                    .WithValueField(24, 8, name: "COEFF15")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients4, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF16")
+                    .WithValueField(8, 8, name: "COEFF17")
+                    .WithValueField(16, 8, name: "COEFF18")
+                    .WithValueField(24, 8, name: "COEFF19")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients5, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF20")
+                    .WithValueField(8, 8, name: "COEFF21")
+                    .WithValueField(16, 8, name: "COEFF22")
+                    .WithValueField(24, 8, name: "COEFF23")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients6, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF24")
+                    .WithValueField(8, 8, name: "COEFF25")
+                    .WithValueField(16, 8, name: "COEFF26")
+                    .WithValueField(24, 8, name: "COEFF27")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients7, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF28")
+                    .WithValueField(8, 8, name: "COEFF29")
+                    .WithValueField(16, 8, name: "COEFF30")
+                    .WithValueField(24, 8, name: "COEFF31")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients8, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF32")
+                    .WithValueField(8, 8, name: "COEFF33")
+                    .WithValueField(16, 8, name: "COEFF34")
+                    .WithValueField(24, 8, name: "COEFF35")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients9, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF36")
+                    .WithValueField(8, 8, name: "COEFF37")
+                    .WithValueField(16, 8, name: "COEFF38")
+                    .WithValueField(24, 8, name: "COEFF39")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients10, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF40")
+                    .WithValueField(8, 8, name: "COEFF41")
+                    .WithValueField(16, 8, name: "COEFF42")
+                    .WithValueField(24, 8, name: "COEFF43")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients11, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF44")
+                    .WithValueField(8, 8, name: "COEFF45")
+                    .WithValueField(16, 8, name: "COEFF46")
+                    .WithValueField(24, 8, name: "COEFF47")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients12, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF48")
+                    .WithValueField(8, 8, name: "COEFF49")
+                    .WithValueField(16, 8, name: "COEFF50")
+                    .WithValueField(24, 8, name: "COEFF51")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients13, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF52")
+                    .WithValueField(8, 8, name: "COEFF53")
+                    .WithValueField(16, 8, name: "COEFF54")
+                    .WithValueField(24, 8, name: "COEFF55")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients14, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF56")
+                    .WithValueField(8, 8, name: "COEFF57")
+                    .WithValueField(16, 8, name: "COEFF58")
+                    .WithValueField(24, 8, name: "COEFF59")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ShapingCoefficients15, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "COEFF60")
+                    .WithValueField(8, 8, name: "COEFF61")
+                    .WithValueField(16, 8, name: "COEFF62")
+                    .WithValueField(24, 8, name: "COEFF63")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.RampingLevels, new DoubleWordRegister(this, 0x009F9F9F)
+                    .WithValueField(0, 8, name: "RAMPLEV0")
+                    .WithValueField(8, 8, name: "RAMPLEV1")
+                    .WithValueField(16, 8, name: "RAMPLEV2")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AnalogRampingControl, new DoubleWordRegister(this, 0x00000A00)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "RAMPOVREN")
+                    .WithFlag(2, name: "RAMPOVRUPD")
+                    .WithReservedBits(3, 6)
+                    .WithValueField(9, 2, name: "VMIDCTRL")
+                    .WithValueField(11, 2, name: "MUTEDLY")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DirectCurrentOffsetCompensationFilterSettings, new DoubleWordRegister(this, 0x00000030)
+                    .WithFlag(0, name: "DCESTIEN")
+                    .WithFlag(1, name: "DCCOMPEN")
+                    .WithFlag(2, name: "DCRSTEN")
+                    .WithFlag(3, name: "DCCOMPFREEZE")
+                    .WithValueField(4, 3, name: "DCCOMPGEAR")
+                    .WithValueField(7, 2, name: "DCLIMIT")
+                    .WithFlag(9, name: "DCGAINGEAREN")
+                    .WithValueField(10, 3, name: "DCGAINGEAR")
+                    .WithValueField(13, 8, name: "DCGAINGEARSMPS")
+                    .WithReservedBits(21, 11)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DirectCurrentOffsetCompensationFilterInitialization, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "DCCOMPINITVALI")
+                    .WithValueField(15, 15, name: "DCCOMPINITVALQ")
+                    .WithFlag(30, name: "DCCOMPINIT")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DirectCurrentOffsetEstimatedValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "DCCOMPESTIVALI")
+                    .WithValueField(15, 15, FieldMode.Read, name: "DCCOMPESTIVALQ")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.SampleRateConverterRatioValuesAndChannelFilter, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 12)
+                    .WithValueField(12, 15, name: "SRCRATIO2")
+                    .WithFlag(27, name: "SRCENABLE2")
+                    .WithReservedBits(28, 3)
+                    .WithFlag(31, name: "INTOSR")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.InternalAutomaticFrequencyControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "FOEPREAVG0")
+                    .WithValueField(3, 3, name: "FOEPREAVG1")
+                    .WithValueField(6, 3, name: "FOEPREAVG2")
+                    .WithValueField(9, 3, name: "FOEPREAVG3")
+                    .WithValueField(12, 3, name: "FOEPREAVG4")
+                    .WithValueField(15, 3, name: "FOEPREAVG5")
+                    .WithValueField(18, 3, name: "FOEPREAVG6")
+                    .WithValueField(21, 3, name: "FOEPREAVG7")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DetectionOfSignalArrivalThreshold0, new DoubleWordRegister(this, 0x07830464)
+                    .WithValueField(0, 8, name: "SPIKETHD")
+                    .WithValueField(8, 6, name: "UNMODTHD")
+                    .WithValueField(14, 6, name: "FDEVMINTHD")
+                    .WithValueField(20, 12, name: "FDEVMAXTHD")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DetectionOfSignalArrivalThreshold1, new DoubleWordRegister(this, 0x3AC81388)
+                    .WithValueField(0, 16, name: "POWABSTHD")
+                    .WithValueField(16, 2, name: "POWRELTHD")
+                    .WithValueField(18, 3, name: "DSARSTCNT")
+                    .WithValueField(21, 4, name: "RSSIJMPTHD")
+                    .WithValueField(25, 2, name: "FREQLATDLY")
+                    .WithFlag(27, name: "PWRFLTBYP")
+                    .WithFlag(28, name: "AMPFLTBYP")
+                    .WithFlag(29, name: "PWRDETDIS")
+                    .WithFlag(30, name: "FREQSCALE")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DetectionOfSignalArrivalThreshold2, new DoubleWordRegister(this, 0x0C660664)
+                    .WithValueField(0, 8, name: "POWABSTHDLOG")
+                    .WithReservedBits(8, 1)
+                    .WithFlag(9, name: "JUMPDETEN")
+                    .WithValueField(10, 6, name: "FDADJTHD")
+                    .WithValueField(16, 4, name: "PMDETPASSTHD")
+                    .WithValueField(20, 5, name: "FREQESTTHD")
+                    .WithValueField(25, 5, name: "INTERFERDET")
+                    .WithFlag(30, name: "PMDETFORCE")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DetectionOfSignalArrivalThreshold3, new DoubleWordRegister(this, 0x07830464)
+                    .WithValueField(0, 8, name: "SPIKETHDLO")
+                    .WithValueField(8, 6, name: "UNMODTHDLO")
+                    .WithValueField(14, 6, name: "FDEVMINTHDLO")
+                    .WithValueField(20, 12, name: "FDEVMAXTHDLO")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DetectionOfSignalArrivalThreshold4, new DoubleWordRegister(this, 0x00821388)
+                    .WithValueField(0, 16, name: "POWABSTHDLO")
+                    .WithValueField(16, 5, name: "ARRTOLERTHD0LO")
+                    .WithValueField(21, 5, name: "ARRTOLERTHD1LO")
+                    .WithFlag(26, name: "SWTHD")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DetectionOfSignalArrivalMode, new DoubleWordRegister(this, 0x000A2090)
+                    .WithValueField(0, 2, name: "DSAMODE")
+                    .WithValueField(2, 4, name: "ARRTHD")
+                    .WithValueField(6, 5, name: "ARRTOLERTHD0")
+                    .WithValueField(11, 5, name: "ARRTOLERTHD1")
+                    .WithFlag(16, name: "SCHPRD")
+                    .WithFlag(17, name: "FREQAVGSYM")
+                    .WithFlag(18, name: "TRANRSTDSA")
+                    .WithFlag(19, name: "DSARSTON")
+                    .WithReservedBits(20, 1)
+                    .WithValueField(21, 2, name: "GAINREDUCDLY")
+                    .WithValueField(23, 3, name: "LOWDUTY")
+                    .WithFlag(26, name: "RESTORE")
+                    .WithFlag(27, name: "AGCBAUDEN")
+                    .WithValueField(28, 4, name: "AMPJUPTHD")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DigitalMixerControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 20, name: "DIGMIXFREQ")
+                    .WithFlag(20, name: "DIGMIXMODE")
+                    .WithFlag(21, name: "MIXERCONJ")
+                    .WithFlag(22, name: "DIGMIXFB")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ViterbiDemodulatorCorrelationConfiguration0, new DoubleWordRegister(this, 0x123556B7)
+                    .WithValueField(0, 32, name: "EXPECTPATT")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ViterbiDemodulatorCorrelationConfiguration1, new DoubleWordRegister(this, 0x5020C000)
+                    .WithValueField(0, 7, name: "VITERBIKSI3WB")
+                    .WithFlag(7, name: "KSI3SWENABLE")
+                    .WithValueField(8, 9, name: "VTFRQLIM")
+                    .WithReservedBits(17, 1)
+                    .WithValueField(18, 9, name: "EXPSYNCLEN")
+                    .WithReservedBits(27, 1)
+                    .WithValueField(28, 4, name: "EXPECTHT")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ViterbiDemodulatorTrackingLoop, new DoubleWordRegister(this, 0x0D803B88)
+                    .WithValueField(0, 2, name: "FREQTRACKMODE")
+                    .WithValueField(2, 4, name: "TIMTRACKTHD")
+                    .WithValueField(6, 8, name: "TIMEACQUTHD")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 2, name: "TIMGEAR")
+                    .WithValueField(18, 4, name: "FREQBIAS")
+                    .WithValueField(22, 8, name: "HIPWRTHD")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ViterbiBleTimingStampControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "VTBLETIMINGSEL")
+                    .WithFlag(2, name: "VTBLETIMINGCLKSEL")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 8, name: "TIMINGDELAY")
+                    .WithValueField(12, 4, name: "FLENOFF")
+                    .WithReservedBits(16, 15)
+                    .WithFlag(31, name: "DISDEMODOF")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BaudrateEstimate, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, FieldMode.Read, name: "BRESTINT")
+                    .WithValueField(6, 5, FieldMode.Read, name: "BRESTNUM")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AutomaticClockGating, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "AUTOCGEN")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AutomaticClockGatingClockStop, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "FORCEOFF")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PhaseOffsetEstimate, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "POEI")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, FieldMode.Read, name: "POEQ")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DirectModeControl, new DoubleWordRegister(this, 0x0000010C)
+                    .WithFlag(0, name: "DMENABLE")
+                    .WithFlag(1, name: "SYNCASYNC")
+                    .WithValueField(2, 2, name: "SYNCPREAM")
+                    .WithReservedBits(4, 4)
+                    .WithValueField(8, 5, name: "CLKWIDTH")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRangeSet1, new DoubleWordRegister(this, 0x40000000)
+                    .WithValueField(0, 4, name: "LRSS")
+                    .WithValueField(4, 11, name: "LRTIMEOUTTHD")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 2, name: "CHPWRACCUDEL")
+                    .WithValueField(18, 3, name: "HYSVAL")
+                    .WithValueField(21, 3, name: "AVGWIN")
+                    .WithValueField(24, 4, name: "LRSPIKETHADD")
+                    .WithFlag(28, name: "LOGICBASEDPUGATE")
+                    .WithFlag(29, name: "LOGICBASEDLRDEMODGATE")
+                    .WithValueField(30, 2, name: "PREFILTLEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRangeSet2, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "LRCHPWRTH1")
+                    .WithValueField(8, 8, name: "LRCHPWRTH2")
+                    .WithValueField(16, 8, name: "LRCHPWRTH3")
+                    .WithValueField(24, 8, name: "LRCHPWRTH4")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRangeSet3, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "LRCHPWRTH5")
+                    .WithValueField(8, 8, name: "LRCHPWRTH6")
+                    .WithValueField(16, 8, name: "LRCHPWRTH7")
+                    .WithValueField(24, 8, name: "LRCHPWRTH8")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRangeSet4, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "LRCHPWRTH9")
+                    .WithValueField(8, 8, name: "LRCHPWRTH10")
+                    .WithValueField(16, 4, name: "LRCHPWRSH1")
+                    .WithValueField(20, 4, name: "LRCHPWRSH2")
+                    .WithValueField(24, 4, name: "LRCHPWRSH3")
+                    .WithValueField(28, 4, name: "LRCHPWRSH4")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRangeSet5, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "LRCHPWRSH5")
+                    .WithValueField(4, 4, name: "LRCHPWRSH6")
+                    .WithValueField(8, 4, name: "LRCHPWRSH7")
+                    .WithValueField(12, 4, name: "LRCHPWRSH8")
+                    .WithValueField(16, 4, name: "LRCHPWRSH9")
+                    .WithValueField(20, 4, name: "LRCHPWRSH10")
+                    .WithValueField(24, 4, name: "LRCHPWRSH11")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRangeSet6, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "LRCHPWRSPIKETH")
+                    .WithValueField(8, 11, name: "LRSPIKETHD")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 8, name: "LRCHPWRTH11")
+                    .WithValueField(28, 4, name: "LRCHPWRSH12")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.BleLongRangeFrameControllerInterface, new DoubleWordRegister(this, 0x00000101)
+                    .WithValueField(0, 2, name: "CI500")
+                    .WithValueField(2, 6, name: "FRCACKTIMETHD")
+                    .WithFlag(8, name: "LRCORRMODE")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.CoherentDemodulatorSignals0, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "COHDYNAMICBBSSEN")
+                    .WithFlag(1, name: "COHDYNAMICSYNCTHRESH")
+                    .WithFlag(2, name: "COHDYNAMICPRETHRESH")
+                    .WithFlag(3, name: "COHCHPWRLOCK")
+                    .WithFlag(4, name: "COHCHPWRRESTART")
+                    .WithValueField(5, 3, name: "COHDYNAMICPRETHRESHSEL")
+                    .WithValueField(8, 8, name: "COHCHPWRTH0")
+                    .WithValueField(16, 8, name: "COHCHPWRTH1")
+                    .WithValueField(24, 8, name: "COHCHPWRTH2")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.CoherentDemodulatorSignals1, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "SYNCTHRESH0")
+                    .WithValueField(8, 8, name: "SYNCTHRESH1")
+                    .WithValueField(16, 8, name: "SYNCTHRESH2")
+                    .WithValueField(24, 8, name: "SYNCTHRESH3")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.CoherentDemodulatorSignals2, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "SYNCTHRESHDELTA0")
+                    .WithValueField(4, 4, name: "SYNCTHRESHDELTA1")
+                    .WithValueField(8, 4, name: "SYNCTHRESHDELTA2")
+                    .WithValueField(12, 4, name: "SYNCTHRESHDELTA3")
+                    .WithValueField(16, 8, name: "DSAPEAKCHPWRTH")
+                    .WithValueField(24, 8, name: "FIXEDCDTHFORIIR")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.CoherentDemodulatorSignals3, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "COHDSAEN")
+                    .WithValueField(1, 10, name: "COHDSAADDWNDSIZE")
+                    .WithValueField(11, 3, name: "CDSS")
+                    .WithFlag(14, name: "DSAPEAKCHKEN")
+                    .WithValueField(15, 3, name: "DSAPEAKINDLEN")
+                    .WithFlag(18, name: "DSAPEAKCHPWREN")
+                    .WithFlag(19, name: "LOGICBASEDCOHDEMODGATE")
+                    .WithValueField(20, 2, name: "DYNIIRCOEFOPTION")
+                    .WithFlag(22, name: "ONEPEAKQUALEN")
+                    .WithValueField(23, 5, name: "PEAKCHKTIMOUT")
+                    .WithFlag(28, name: "COHDSADETDIS")
+                    .WithFlag(29, name: "COHDSACMPLX")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.SyncWordProperties, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 8)
+                    .WithFlag(8, name: "STATICSYNCTHRESHEN")
+                    .WithValueField(9, 8, name: "STATICSYNCTHRESH")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.DigitalGainControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "DIGIGAINEN")
+                    .WithValueField(1, 5, name: "DIGIGAINSEL")
+                    .WithFlag(6, name: "DIGIGAINDOUBLE")
+                    .WithFlag(7, name: "DIGIGAINHALF")
+                    .WithFlag(8, name: "DEC0GAIN")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PeripheralReflexSystemControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "POSTPONESEL")
+                    .WithValueField(2, 2, name: "ADVANCESEL")
+                    .WithValueField(4, 2, name: "NEWWNDSEL")
+                    .WithValueField(6, 2, name: "WEAKSEL")
+                    .WithValueField(8, 2, name: "SYNCSENTSEL")
+                    .WithValueField(10, 2, name: "PRESENTSEL")
+                    .WithValueField(12, 2, name: "LOWCORRSEL")
+                    .WithValueField(14, 2, name: "ANT0SEL")
+                    .WithValueField(16, 2, name: "ANT1SEL")
+                    .WithValueField(18, 2, name: "IFADCCLKSEL")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PowerAmplifierDebug, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 9)
+                    .WithFlag(9, name: "MANPACLKAMPCTRL")
+                    .WithFlag(10, name: "ENMANPACLKAMPCTRL")
+                    .WithFlag(11, name: "ENMANPAPOWER")
+                    .WithFlag(12, name: "ENMANPASELSLICE")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.RealTimeCostFunctionEngineControl, new DoubleWordRegister(this, 0x001F81F4)
+                    .WithValueField(0, 10, name: "MINCOSTTHD")
+                    .WithValueField(10, 4, name: "RTSCHWIN")
+                    .WithFlag(14, name: "RTSCHMODE")
+                    .WithValueField(15, 3, name: "TRACKINGWIN")
+                    .WithValueField(18, 3, name: "SYNCACQWIN")
+                    .WithFlag(21, name: "EXTENSCHBYP")
+                    .WithReservedBits(22, 7)
+                    .WithFlag(29, name: "SINEWEN")
+                    .WithFlag(30, name: "VTAFCFRAME")
+                    .WithFlag(31, name: "RTCFEEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.EarlyTimeStampControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "ETSLOC")
+                    .WithFlag(10, name: "CAPSIGONPRS")
+                    .WithReservedBits(11, 1)
+                    .WithValueField(12, 18, name: "CAPTRIG")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.EarlyTimeStampTiming, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, name: "ETSTIMVAL")
+                    .WithFlag(17, name: "ETSCOUNTEREN")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AntennaSwitchControl, new DoubleWordRegister(this, 0x003C0000)
+                    .WithValueField(0, 6, name: "ANTDFLTSEL")
+                    .WithValueField(6, 6, name: "ANTCOUNT")
+                    .WithValueField(12, 2, name: "ANTSWTYPE")
+                    .WithFlag(14, name: "ANTSWRST")
+                    .WithFlag(15, name: "CFGANTPATTEN")
+                    .WithFlag(16, name: "ANTSWENABLE")
+                    .WithValueField(17, 8, name: "EXTDSTOPPULSECNT")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AntennaSwitchControl1, new DoubleWordRegister(this, 0x0006AAAA)
+                    .WithValueField(0, 24, name: "TIMEPERIOD")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AntennaSwitchStart, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "ANTSWSTARTTIM")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AntennaSwitchEnd, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "ANTSWENDTIM")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.TrecsPreamblePattern, new DoubleWordRegister(this, 0x55555555)
+                    .WithValueField(0, 32, name: "PMEXPECTPATT")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.TrecsPreambleDetectionControl, new DoubleWordRegister(this, 0x00000017)
+                    .WithValueField(0, 3, name: "PMACQUINGWIN")
+                    .WithValueField(3, 3, name: "PMCOSTVALTHD")
+                    .WithValueField(6, 2, name: "PMTIMEOUTSEL")
+                    .WithValueField(8, 2, name: "PHSCALE")
+                    .WithReservedBits(10, 4)
+                    .WithValueField(14, 10, name: "PMMINCOSTTHD")
+                    .WithReservedBits(24, 1)
+                    .WithValueField(25, 5, name: "COSTHYST")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "PREAMSCH")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.TrecsConfiguration, new DoubleWordRegister(this, 0x00020004)
+                    .WithValueField(0, 3, name: "TRECSOSR")
+                    .WithValueField(3, 10, name: "DTIMLOSSTHD")
+                    .WithReservedBits(13, 1)
+                    .WithFlag(14, name: "DTIMLOSSEN")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 9, name: "PMOFFSET")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ConfigureAntennaPattern, new DoubleWordRegister(this)
+                    .WithValueField(0, 30, name: "CFGANTPATTVAL")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ConcurrentMode, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 31)
+                    .WithFlag(31, name: "CONCURRENT")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet0Group0, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "SET0COEFF0")
+                    .WithValueField(10, 10, name: "SET0COEFF1")
+                    .WithValueField(20, 10, name: "SET0COEFF2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet0Group1, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "SET0COEFF3")
+                    .WithValueField(11, 11, name: "SET0COEFF4")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet0Group2, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "SET0COEFF5")
+                    .WithValueField(11, 12, name: "SET0COEFF6")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet0Group3, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "SET0COEFF7")
+                    .WithValueField(12, 12, name: "SET0COEFF8")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet0Group4, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "SET0COEFF9")
+                    .WithValueField(14, 14, name: "SET0COEFF10")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet0Group5, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "SET0COEFF11")
+                    .WithValueField(14, 16, name: "SET0COEFF12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet0Group6, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "SET0COEFF13")
+                    .WithValueField(16, 16, name: "SET0COEFF14")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet1Group0, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "SET1COEFF0")
+                    .WithValueField(10, 10, name: "SET1COEFF1")
+                    .WithValueField(20, 10, name: "SET1COEFF2")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet1Group1, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "SET1COEFF3")
+                    .WithValueField(11, 11, name: "SET1COEFF4")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet1Group2, new DoubleWordRegister(this)
+                    .WithValueField(0, 11, name: "SET1COEFF5")
+                    .WithValueField(11, 12, name: "SET1COEFF6")
+                    .WithReservedBits(23, 9)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet1Group3, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "SET1COEFF7")
+                    .WithValueField(12, 12, name: "SET1COEFF8")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet1Group4, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "SET1COEFF9")
+                    .WithValueField(14, 14, name: "SET1COEFF10")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet1Group5, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "SET1COEFF11")
+                    .WithValueField(14, 16, name: "SET1COEFF12")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterCoeSet1Group6, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "SET1COEFF13")
+                    .WithValueField(16, 16, name: "SET1COEFF14")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "FWSWCOEFFEN")
+                    .WithFlag(1, name: "FWSELCOEFF")
+                    .WithReservedBits(2, 26)
+                    .WithValueField(28, 2, name: "CHFSWSEL")
+                    .WithReservedBits(30, 1)
+                    .WithFlag(31, name: "SWCOEFFEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterLatencyControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "CHFLATENCY")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.FrameSchTimeoutLength, new DoubleWordRegister(this, 0x00000040)
+                    .WithValueField(0, 16, name: "FRMSCHTIME")
+                    .WithReservedBits(16, 13)
+                    .WithFlag(29, name: "PMRSTSYCNEN")
+                    .WithFlag(30, name: "DSARSTSYCNEN")
+                    .WithFlag(31, name: "PMENDSCHEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PreambleFilterCoefficients, new DoubleWordRegister(this, 0x3B3B3B3B)
+                    .WithValueField(0, 32, name: "PREFILTCOEFF")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.CollisionRestartControl, new DoubleWordRegister(this, 0x00001860)
+                    .WithFlag(0, name: "RXRESTARTUPONMARSSI")
+                    .WithReservedBits(1, 3)
+                    .WithValueField(4, 4, name: "RXRESTARTMATHRESHOLD")
+                    .WithValueField(8, 2, name: "RXRESTARTMALATCHSEL")
+                    .WithValueField(10, 2, name: "RXRESTARTMACOMPENSEL")
+                    .WithFlag(12, name: "RXRESTARTMATAP")
+                    .WithReservedBits(13, 3)
+                    .WithFlag(16, name: "RXRESTARTB4PREDET")
+                    .WithReservedBits(17, 13)
+                    .WithFlag(30, name: "ANTSWRSTFLTTDIS")
+                    .WithFlag(31, name: "FLTRSTEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PreambleSenseMode, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "SQEN")
+                    .WithFlag(1, name: "SQSWRST")
+                    .WithReservedBits(2, 14)
+                    .WithValueField(16, 16, name: "SQTIMOUT")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PreambleSenseModeExtended, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "SQSTG2TIMOUT")
+                    .WithValueField(16, 16, name: "SQSTG3TIMOUT")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.SignalQualityIndicator, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "SQISELECT")
+                    .WithReservedBits(1, 15)
+                    .WithValueField(16, 8, name: "CHIPERROR")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AntennaDiversityModeControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "ADPRETHRESH")
+                    .WithFlag(8, name: "ENADPRETHRESH")
+                    .WithFlag(9, name: "ANTDIVDISCCA")
+                    .WithFlag(10, name: "ANTDIVSELCCA")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PhaseDemodulatorFwMode, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "FWSELANT")
+                    .WithFlag(1, name: "FWANTSWCMD")
+                    .WithReservedBits(2, 29)
+                    .WithFlag(31, name: "FWANTDIVEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PhaseDemodulatorAntennaDiversity, new DoubleWordRegister(this, 0x0000000F)
+                    .WithValueField(0, 5, name: "ANTWAIT")
+                    .WithValueField(5, 8, name: "SKIPRSSITHD")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 8, name: "SKIPCORRTHD")
+                    .WithReservedBits(24, 6)
+                    .WithFlag(30, name: "SKIP2ANT")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PhaseDemodulatorAntennaDiversityDecision, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, name: "CORRANDDIVTHD")
+                    .WithValueField(10, 9, name: "RSSIANDDIVTHD")
+                    .WithReservedBits(19, 9)
+                    .WithFlag(28, name: "RSSICORR0")
+                    .WithFlag(29, name: "RSSICORR1")
+                    .WithFlag(30, name: "RSSICORR2")
+                    .WithFlag(31, name: "RSSICORR3")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.PhaseDemodulatorControl, new DoubleWordRegister(this, 0x01DF0004)
+                    .WithValueField(0, 5, name: "PMDETTHD")
+                    .WithValueField(5, 8, name: "PMTIMLOSTHD")
+                    .WithFlag(13, name: "PMTIMLOSEN")
+                    .WithFlag(14, name: "RSSIFLTBYP")
+                    .WithFlag(15, name: "PMDETEN")
+                    .WithValueField(16, 6, name: "REMODOSR")
+                    .WithValueField(22, 4, name: "REMODDWN")
+                    .WithValueField(26, 2, name: "REMODOUTSEL")
+                    .WithFlag(28, name: "REMODEN")
+                    .WithFlag(29, name: "BCRDETECTOR")
+                    .WithFlag(30, name: "BCRTRECSCONC")
+                    .WithFlag(31, name: "BCRLEGACYCONC")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.SignalIdentifierControl0, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "MODE")
+                    .WithValueField(2, 8, name: "NOISETHRESH")
+                    .WithValueField(10, 5, name: "PEAKNUMTHRESHLW")
+                    .WithValueField(15, 3, name: "PEAKNUMTHRESHSW")
+                    .WithValueField(18, 5, name: "SMALLSAMPLETHRESH")
+                    .WithValueField(23, 7, name: "FREQNOMINAL")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.SignalIdentifierControl1, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "SUPERCHIPTOLERANCE")
+                    .WithValueField(5, 7, name: "SUPERCHIPMEDIAN")
+                    .WithValueField(12, 11, name: "CORRTHRESH")
+                    .WithValueField(23, 3, name: "CORRNUM")
+                    .WithFlag(26, name: "FASTMODE")
+                    .WithValueField(27, 5, name: "NARROWPULSETHRESH")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.SignalIdentifierStatus, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, FieldMode.Read, name: "SISTATE")
+                    .WithFlag(4, FieldMode.Read, name: "NOISE")
+                    .WithValueField(5, 5, FieldMode.Read, name: "LWPEAKCOUNT")
+                    .WithValueField(10, 5, FieldMode.Read, name: "NARROWCOUNT")
+                    .WithFlag(15, FieldMode.Read, name: "TIMELOCK")
+                    .WithFlag(16, FieldMode.Read, name: "SUPERCHIPFAIL")
+                    .WithFlag(17, FieldMode.Read, name: "SUPERCHIPPASS")
+                    .WithValueField(18, 3, FieldMode.Read, name: "TIMEOFFSET")
+                    .WithValueField(21, 6, FieldMode.Read, name: "CORRPASSNUM")
+                    .WithReservedBits(27, 2)
+                    .WithFlag(29, FieldMode.Read, name: "SNIFFDONE")
+                    .WithFlag(30, FieldMode.Read, name: "SIDET")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ConfigureAntennaPatternExtended, new DoubleWordRegister(this)
+                    .WithValueField(0, 30, name: "CFGANTPATTVALEXT")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.SignalIdentifierControl2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "SIRSTAGCMODE")
+                    .WithFlag(1, name: "SIRSTPRSMODE")
+                    .WithFlag(2, name: "SIRSTCCAMODE")
+                    .WithValueField(3, 3, name: "SUPERCHIPTHRESH")
+                    .WithFlag(6, name: "DISSIFRAMEDET")
+                    .WithFlag(7, name: "AGCRSTUPONSI")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.ChannelFilterSwitchTime, new DoubleWordRegister(this)
+                    .WithValueField(0, 18, name: "CHFSWTIME")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.IrCalibrationControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "IRCALEN")
+                    .WithValueField(1, 5, name: "MURSHF")
+                    .WithReservedBits(6, 1)
+                    .WithValueField(7, 6, name: "MUISHF")
+                    .WithFlag(13, name: "IRCORREN")
+                    .WithFlag(14, name: "IRCALCOEFRSTCMD")
+                    .WithFlag(15, name: "IRCALIFADCDBG")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.IrCalCoefficientValues, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "CRV")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 15, FieldMode.Read, name: "CIV")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.IrCalCoefficientWrPerAntenna0, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "CRVWD")
+                    .WithFlag(15, name: "CRVWEN")
+                    .WithValueField(16, 15, name: "CIVWD")
+                    .WithFlag(31, name: "CIVWEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.IrCalCoefficientWrPerAntenna1, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "CRVWD")
+                    .WithFlag(15, name: "CRVWEN")
+                    .WithValueField(16, 15, name: "CIVWD")
+                    .WithFlag(31, name: "CIVWEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdControl1, new DoubleWordRegister(this, 0x00080000)
+                    .WithValueField(0, 32, name: "ADCTRL1")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdControl2, new DoubleWordRegister(this, 0x00000001)
+                    .WithValueField(0, 32, name: "ADCTRL2")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual0, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "ADRSSI0")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, FieldMode.Read, name: "ADRSSI1")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual1, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "ADCORR0")
+                    .WithValueField(17, 15, FieldMode.Read, name: "ADSTAT1")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual2, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "ADRSSI0P")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, FieldMode.Read, name: "ADRSSI1P")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual3, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "ADCORR0P")
+                    .WithValueField(17, 15, FieldMode.Read, name: "ADSTAT2")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual4, new DoubleWordRegister(this, 0x0200003F)
+                    .WithValueField(0, 6, name: "ADAGCGRTHR")
+                    .WithReservedBits(6, 10)
+                    .WithValueField(16, 10, name: "ADRSSIGRTHR")
+                    .WithReservedBits(26, 4)
+                    .WithValueField(30, 2, name: "ADGRMODE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual5, new DoubleWordRegister(this, 0x0000FFFF)
+                    .WithValueField(0, 17, name: "ADDIRECTCORR")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual6, new DoubleWordRegister(this, 0x0000FFFF)
+                    .WithValueField(0, 17, name: "ADBACORRTHR")
+                    .WithValueField(17, 15, name: "ADBACORRDIFF")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual7, new DoubleWordRegister(this, 0x000003FF)
+                    .WithValueField(0, 10, name: "ADBARSSITHR")
+                    .WithReservedBits(10, 6)
+                    .WithValueField(16, 10, name: "ADBARSSIDIFF")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual8, new DoubleWordRegister(this, 0x0000FFFF)
+                    .WithValueField(0, 17, name: "ADBACORRTHR2")
+                    .WithReservedBits(17, 3)
+                    .WithValueField(20, 2, name: "ADBAMODE")
+                    .WithReservedBits(22, 2)
+                    .WithValueField(24, 6, name: "ADBAAGCTHR")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual9, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "ADCORR1")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdQual10, new DoubleWordRegister(this)
+                    .WithValueField(0, 17, FieldMode.Read, name: "ADCORR1P")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm0, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "ADSTATEC")
+                    .WithValueField(4, 4, name: "ADSTATEP")
+                    .WithValueField(8, 4, name: "ADSTATEP2")
+                    .WithValueField(12, 4, name: "ADSTATEN")
+                    .WithFlag(16, name: "ADTD0")
+                    .WithFlag(17, name: "ADTD0P")
+                    .WithFlag(18, name: "ADTD1")
+                    .WithFlag(19, name: "ADTD1P")
+                    .WithFlag(20, name: "ADSTATREAD")
+                    .WithValueField(21, 5, name: "ADSTAT1SEL")
+                    .WithValueField(26, 5, name: "ADSTAT2SEL")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm1, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADOSETANT0")
+                    .WithValueField(16, 16, name: "ADOSETANT1")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm2, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADOSWITCHANT")
+                    .WithValueField(16, 16, name: "ADORESTARTRX")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm3, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADOQUAL0UPDATE")
+                    .WithValueField(16, 16, name: "ADOQUAL1UPDATE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm4, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADOQUAL0CLEAR")
+                    .WithValueField(16, 16, name: "ADOQUAL1CLEAR")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm5, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "ADOMUX")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm6, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW0")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW1")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm7, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW2")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW3")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm8, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW4")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW5")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm9, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW6")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW7")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm10, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW8")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW9")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm11, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW10")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW11")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm12, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW12")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW13")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm13, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADNEXTSTATESW14")
+                    .WithValueField(16, 16, name: "ADNEXTSTATESW15")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm14, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND0ENA")
+                    .WithValueField(16, 16, name: "ADFSMCOND1ENA")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm15, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND2ENA")
+                    .WithValueField(16, 16, name: "ADFSMCOND3ENA")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm16, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND0ENB")
+                    .WithValueField(16, 16, name: "ADFSMCOND1ENB")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm17, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND2ENB")
+                    .WithValueField(16, 16, name: "ADFSMCOND3ENB")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm18, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "ADFSMCONDSEL")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm19, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMNEXTFORCE")
+                    .WithValueField(16, 16, name: "ADFSMCONDTRUE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm20, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADITENTEREN")
+                    .WithValueField(16, 16, name: "ADITLEAVEEN")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm21, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "ADENTERFREEZEEN")
+                    .WithFlag(1, name: "ADLEAVEFREEZEEN")
+                    .WithFlag(2, name: "ADFROZEN")
+                    .WithValueField(3, 4, name: "ADUNFREEZENEXT")
+                    .WithFlag(7, name: "ADAS")
+                    .WithFlag(8, name: "ADBA")
+                    .WithReservedBits(9, 7)
+                    .WithFlag(16, name: "ADUNFREEZE")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm22, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "ADITENTERSTATUS")
+                    .WithValueField(16, 16, FieldMode.Read, name: "ADITLEAVESTATUS")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm23, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND0ENC")
+                    .WithValueField(16, 16, name: "ADFSMCOND1ENC")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm24, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND2ENC")
+                    .WithValueField(16, 16, name: "ADFSMCOND3ENC")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm25, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCONDOR0")
+                    .WithValueField(16, 16, name: "ADFSMCONDOR1")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm26, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND0END")
+                    .WithValueField(16, 16, name: "ADFSMCOND1END")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm27, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADFSMCOND2END")
+                    .WithValueField(16, 16, name: "ADFSMCOND3END")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm28, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADOSETANTFORCE")
+                    .WithValueField(16, 16, name: "ADORESTARTRXFORCE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm29, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "ADOQUALUPDATEFORCE")
+                    .WithValueField(16, 16, name: "ADOQUALCLEARFORCE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdFsm30, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "ADODEMODRXREQ")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc1, new DoubleWordRegister(this, 0x01200040)
+                    .WithFlag(0, name: "ADPCEN")
+                    .WithValueField(1, 7, name: "ADPCWNDSIZECHIP")
+                    .WithValueField(8, 7, name: "ADPCCORROFFSETCHIP")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 8, name: "ADPCTIMINGBAUDS")
+                    .WithValueField(24, 3, name: "ADPCWNDCNT")
+                    .WithValueField(27, 5, name: "ADPCSKIPCHIPS")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc2, new DoubleWordRegister(this, 0x000000A0)
+                    .WithValueField(0, 10, name: "ADPCCORRSAMPLES")
+                    .WithValueField(10, 8, name: "ADPCPRETIMINGBAUDS")
+                    .WithFlag(18, name: "ADENCORR32")
+                    .WithValueField(19, 8, name: "ADPCSIGAMPTHR")
+                    .WithValueField(27, 3, name: "ADPCWNDCNTRST")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc3, new DoubleWordRegister(this, 0x01005008)
+                    .WithFlag(0, name: "ADBBSSEN")
+                    .WithValueField(1, 3, name: "ADBBSSFILTLENGTH")
+                    .WithFlag(4, name: "ADBBSSAVGEN")
+                    .WithValueField(5, 3, name: "ADBBSSAVGPER")
+                    .WithValueField(8, 4, name: "ADBBSSAMPMANT")
+                    .WithValueField(12, 4, name: "ADBBSSAMPEXP")
+                    .WithValueField(16, 8, name: "ADBBSSAVGWAIT")
+                    .WithFlag(24, name: "ADBBSSAVGFREEZE")
+                    .WithFlag(25, name: "ADBBSSSELWRDATA")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc4, new DoubleWordRegister(this, 0x1F1F1F1F)
+                    .WithValueField(0, 5, name: "ADBBSSAMPLUT0")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "ADBBSSAMPLUT1")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "ADBBSSAMPLUT2")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "ADBBSSAMPLUT3")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc5, new DoubleWordRegister(this, 0x1B1F1F1F)
+                    .WithValueField(0, 5, name: "ADBBSSAMPLUT4")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "ADBBSSAMPLUT5")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "ADBBSSAMPLUT6")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "ADBBSSAMPLUT7")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc6, new DoubleWordRegister(this, 0x11131518)
+                    .WithValueField(0, 5, name: "ADBBSSAMPLUT8")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "ADBBSSAMPLUT9")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "ADBBSSAMPLUT10")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "ADBBSSAMPLUT11")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc7, new DoubleWordRegister(this, 0x0C0D0E10)
+                    .WithValueField(0, 5, name: "ADBBSSAMPLUT12")
+                    .WithReservedBits(5, 3)
+                    .WithValueField(8, 5, name: "ADBBSSAMPLUT13")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 5, name: "ADBBSSAMPLUT14")
+                    .WithReservedBits(21, 3)
+                    .WithValueField(24, 5, name: "ADBBSSAMPLUT15")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc8, new DoubleWordRegister(this, 0x2F87C145)
+                    .WithValueField(0, 3, name: "ADPCOSR")
+                    .WithValueField(3, 3, name: "ADPCANTSAMPOFFSET")
+                    .WithFlag(6, name: "ADPCANTSAMPSWITCHWAIT")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 6, name: "ADPCANTSAMPBUF")
+                    .WithValueField(14, 8, name: "ADPCANTSAMPWRITE")
+                    .WithValueField(22, 10, name: "ADPCANTSAMPSWITCH")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc9, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "ADBBSSAMPAVGLIM")
+                    .WithValueField(8, 8, name: "ADBBSSAMPTHR")
+                    .WithFlag(16, name: "ADBBSSSYNCEN")
+                    .WithValueField(17, 4, name: "ADBBSSUPTHR")
+                    .WithValueField(21, 4, name: "ADBBSSDNTHR")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.AdPc10, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "ADBBSSAMPJUMP")
+                    .WithFlag(8, name: "ADBBSSCHANGEEN")
+                    .WithValueField(9, 4, name: "ADBBSSCHGUPTHR")
+                    .WithValueField(13, 4, name: "ADBBSSCHGDNTHR")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmControl0, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "HADMEN")
+                    .WithFlag(1, name: "TESEN")
+                    .WithFlag(2, name: "PESEN")
+                    .WithFlag(3, name: "SNDSEQEN")
+                    .WithFlag(4, name: "ROLE")
+                    .WithFlag(5, name: "RTTPHY")
+                    .WithReservedBits(6, 6)
+                    .WithValueField(12, 2, name: "PM")
+                    .WithFlag(14, name: "AVGMODE")
+                    .WithReservedBits(15, 11)
+                    .WithValueField(26, 2, name: "DFTSCALE")
+                    .WithFlag(28, name: "PKTSENTSEL")
+                    .WithFlag(29, name: "TXUPSAMPOSR4")
+                    .WithFlag(30, name: "SSAFCGEAR")
+                    .WithFlag(31, name: "SRC2AUTOSCALE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmControl1, new DoubleWordRegister(this, 0x00040000)
+                    .WithValueField(0, 3, name: "STEPSTATE")
+                    .WithReservedBits(3, 5)
+                    .WithValueField(8, 7, name: "DFTSTARTOFF")
+                    .WithValueField(15, 4, name: "MAXSCHWIN")
+                    .WithReservedBits(19, 3)
+                    .WithValueField(22, 10, name: "AVGSTARTOFF")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmStatus0, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "AVG0")
+                    .WithValueField(16, 16, FieldMode.Read, name: "AVG1")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmStatus1, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "FREQOFFSET")
+                    .WithValueField(16, 16, FieldMode.Read, name: "TIMETOX")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmStatus2, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "COSTLATE1")
+                    .WithValueField(10, 10, FieldMode.Read, name: "COSTCURR1")
+                    .WithValueField(20, 10, FieldMode.Read, name: "COSTEARL1")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmStatus3, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "COSTLATE0")
+                    .WithValueField(10, 10, FieldMode.Read, name: "COSTCURR0")
+                    .WithValueField(20, 10, FieldMode.Read, name: "COSTEARL0")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmStatus4, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "SBSP500I")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 15, FieldMode.Read, name: "SBSP500Q")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmStatus5, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, FieldMode.Read, name: "SBSM500I")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 15, FieldMode.Read, name: "SBSM500Q")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.HadmStatus6, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "FREQMEAS")
+                    .WithReservedBits(16, 4)
+                    .WithValueField(20, 6, FieldMode.Read, name: "SBSPSCALE")
+                    .WithValueField(26, 6, FieldMode.Read, name: "SBSMSCALE")
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Src2NcoControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "SRC2NCOEN")
+                    .WithValueField(1, 14, name: "PHASEPERCLK")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)ModulatorAndDemodulatorRegisters.Spare, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "SPARE")
+                    .WithReservedBits(8, 24)
+                },
             };
             return new DoubleWordRegisterCollection(this, registerDictionary);
         }
@@ -2047,6 +4027,43 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)ProtocolTimerRegisters.IpVersion, new DoubleWordRegister(this, 0x00000002)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
+                {(long)ProtocolTimerRegisters.Enable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)ProtocolTimerRegisters.ListenBeforeTalkETSIStandardSupport, new DoubleWordRegister(this)
+                    .WithFlag(0, writeCallback: (_, value) =>
+                        {
+                            if(value)
+                            {
+                                this.Log(LogLevel.Warning, "PROTIMER ETSI linear backoff (ETSIEN) is not supported");
+                            }
+                        }, name: "ETSIEN")
+                    .WithFlag(1, name: "GRANULARLESSTHANRXWARM")
+                    .WithValueField(2, 8, name: "RXWARMTHLD")
+                    .WithValueField(10, 16, name: "CCAFIXED")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)ProtocolTimerRegisters.LinearRandomValueGeneratedByFirmware0, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, name: "RANDOM0")
+                    .WithValueField(9, 9, name: "RANDOM1")
+                    .WithValueField(18, 9, name: "RANDOM2")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)ProtocolTimerRegisters.LinearRandomValueGeneratedByFirmware1, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, name: "RANDOM3")
+                    .WithValueField(9, 9, name: "RANDOM4")
+                    .WithValueField(18, 9, name: "RANDOM5")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)ProtocolTimerRegisters.LinearRandomValueGeneratedByFirmware2, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, name: "RANDOM6")
+                    .WithValueField(9, 9, name: "RANDOM7")
+                    .WithReservedBits(18, 14)
+                },
                 {(long)ProtocolTimerRegisters.Control, new DoubleWordRegister(this)
                     .WithReservedBits(0, 1)
                     .WithFlag(1, name: "DEBUGRUN")
@@ -2186,8 +4203,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(16, 16, out PROTIMER_timeoutCounter[0].Counter, name: "TOUT0CNT")
                 },
                 {(long)ProtocolTimerRegisters.Timeout0CounterTop, new DoubleWordRegister(this, 0x00FF00FF)
-                    .WithValueField(0, 16, out PROTIMER_timeoutCounter[0].PreCounterTop, name: "TOUT0CNTTOP")
-                    .WithValueField(16, 16, out PROTIMER_timeoutCounter[0].CounterTop, name: "TOUT0PCNTTOP")
+                    .WithValueField(0, 16, out PROTIMER_timeoutCounter[0].PreCounterTop, name: "TOUT0PCNTTOP")
+                    .WithValueField(16, 16, out PROTIMER_timeoutCounter[0].CounterTop, name: "TOUT0CNTTOP")
                 },
                 {(long)ProtocolTimerRegisters.Timeout0Compare, new DoubleWordRegister(this)
                     .WithValueField(0, 16, out PROTIMER_timeoutCounter[0].PreCounterCompare, name: "TOUT0PCNTCOMP")
@@ -2198,8 +4215,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(16, 16, out PROTIMER_timeoutCounter[1].Counter, name: "TOUT1CNT")
                 },
                 {(long)ProtocolTimerRegisters.Timeout1CounterTop, new DoubleWordRegister(this, 0x00FF00FF)
-                    .WithValueField(0, 16, out PROTIMER_timeoutCounter[1].PreCounterTop, name: "TOUT1CNTTOP")
-                    .WithValueField(16, 16, out PROTIMER_timeoutCounter[1].CounterTop, name: "TOUT1PCNTTOP")
+                    .WithValueField(0, 16, out PROTIMER_timeoutCounter[1].PreCounterTop, name: "TOUT1PCNTTOP")
+                    .WithValueField(16, 16, out PROTIMER_timeoutCounter[1].CounterTop, name: "TOUT1CNTTOP")
                 },
                 {(long)ProtocolTimerRegisters.Timeout1Compare, new DoubleWordRegister(this)
                     .WithValueField(0, 16, out PROTIMER_timeoutCounter[1].PreCounterCompare, name: "TOUT1PCNTCOMP")
@@ -2491,6 +4508,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)RadioControllerRegisters.IpVersion, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
+                {(long)RadioControllerRegisters.Enable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)RadioControllerRegisters.RXENSourceEnable, new DoubleWordRegister(this)
                     .WithValueField(0, 8, out RAC_softwareRxEnable, name: "SWRXEN")
                     .WithFlag(8, name: "CHANNELBUSYEN")
@@ -2704,7 +4728,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(2, 5)
                     .WithFlag(7, name: "VCBUFEN")
                     .WithReservedBits(8, 1)
-                    .WithFlag(9, out RAC_synthStartRequest, writeCallback: (oldValue, newValue) =>
+                    .WithFlag(9, writeCallback: (oldValue, newValue) =>
                     {
                         // Rising edge marks the start of the synth-enable sequence, ahead of the LO-counter calibration.
                         if(newValue && !oldValue && RAC_currentRadioState == RAC_RadioState.RxWarm)
@@ -2771,6 +4795,707 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(30, name: "MODEMANTDIVMODE")
                     .WithFlag(31, out RAC_unlocked, name: "UNLOCKED")
                 },
+                {(long)RadioControllerRegisters.TestControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "MODEN")
+                    .WithFlag(1, name: "DEMODEN")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)RadioControllerRegisters.SystemTickTimerControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 24, name: "STCAL")
+                    .WithFlag(24, name: "STSKEW")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)RadioControllerRegisters.FrameControlWordBufferWrite, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "WDATA")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)RadioControllerRegisters.FrameControlWordBufferRead, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "RDATA")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)RadioControllerRegisters.SynthesizerRegulatorEnableControl, new DoubleWordRegister(this, 0x04000000)
+                    .WithReservedBits(0, 10)
+                    .WithValueField(10, 3, name: "MMDLDOVREFTRIM")
+                    .WithReservedBits(13, 11)
+                    .WithValueField(24, 3, name: "CHPLDOVREFTRIM")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)RadioControllerRegisters.VoltageControlledOscillatorControl, new DoubleWordRegister(this, 0x0000044C)
+                    .WithValueField(0, 4, name: "VCOAMPLITUDE")
+                    .WithValueField(4, 4, name: "VCODETAMPLITUDERX")
+                    .WithValueField(8, 4, name: "VCODETAMPLITUDETX")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)RadioControllerRegisters.ChargePumpControl, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 14)
+                    .WithFlag(14, name: "CHPOUTPUTTRISTATEMODE")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)RadioControllerRegisters.IntermediateFrequencyProgrammableGainAmplifierControl, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 19)
+                    .WithFlag(19, name: "DCCALON")
+                    .WithFlag(20, name: "DCRSTEN")
+                    .WithFlag(21, name: "DCESTIEN")
+                    .WithValueField(22, 3, name: "DCCALDEC0")
+                    .WithValueField(25, 3, name: "DCCALDCGEAR")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)RadioControllerRegisters.AutomaticPowerControl, new DoubleWordRegister(this, 0xFF000000)
+                    .WithReservedBits(0, 2)
+                    .WithFlag(2, name: "ENAPCSW")
+                    .WithReservedBits(3, 21)
+                    .WithValueField(24, 8, name: "AMPCONTROLLIMITSW")
+                },
+                {(long)RadioControllerRegisters.AntennaDiversity, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "INTDIVLNAMIXEN0")
+                    .WithReservedBits(1, 1)
+                    .WithFlag(2, name: "INTDIVLNAMIXRFATTDCEN0")
+                    .WithFlag(3, name: "INTDIVLNAMIXRFPKDENRF0")
+                    .WithFlag(4, name: "INTDIVSYLODIVRLO02G4EN")
+                    .WithFlag(5, name: "INTDIVLNAMIXEN1")
+                    .WithReservedBits(6, 1)
+                    .WithFlag(7, name: "INTDIVLNAMIXRFATTDCEN1")
+                    .WithFlag(8, name: "INTDIVLNAMIXRFPKDENRF1")
+                    .WithFlag(9, name: "INTDIVSYLODIVRLO12G4EN")
+                    .WithValueField(10, 2, name: "ANTDIVSTATUS")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)RadioControllerRegisters.AuxiliaryAnalogToDigitalConverterTrim, new DoubleWordRegister(this, 0x06D55502)
+                    .WithFlag(0, name: "AUXADCCLKINVERT")
+                    .WithValueField(1, 2, name: "AUXADCLDOVREFTRIM")
+                    .WithFlag(3, name: "AUXADCOUTPUTINVERT")
+                    .WithValueField(4, 5, name: "AUXADCRCTUNE")
+                    .WithValueField(9, 2, name: "AUXADCTRIMADCINPUTRES")
+                    .WithValueField(11, 2, name: "AUXADCTRIMCURRINPUTBUF")
+                    .WithValueField(13, 2, name: "AUXADCTRIMCURROPA1")
+                    .WithValueField(15, 2, name: "AUXADCTRIMCURROPA2")
+                    .WithValueField(17, 2, name: "AUXADCTRIMCURRREFBUF")
+                    .WithValueField(19, 2, name: "AUXADCTRIMCURRTSENSE")
+                    .WithValueField(21, 2, name: "AUXADCTRIMCURRVCMBUF")
+                    .WithFlag(23, name: "AUXADCTRIMLDOHIGHCURRENT")
+                    .WithValueField(24, 2, name: "AUXADCTRIMREFP")
+                    .WithValueField(26, 2, name: "AUXADCTRIMVREFVCM")
+                    .WithFlag(28, name: "AUXADCTSENSETRIMVBE2")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)RadioControllerRegisters.AuxiliaryAnalogToDigitalConverterEnable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "AUXADCENAUXADC")
+                    .WithFlag(1, name: "AUXADCENINPUTBUFFER")
+                    .WithFlag(2, name: "AUXADCENLDO")
+                    .WithFlag(3, name: "AUXADCENOUTPUTDRV")
+                    .WithFlag(4, name: "AUXADCENPMON")
+                    .WithFlag(5, name: "AUXADCENRESONDIAGA")
+                    .WithFlag(6, name: "AUXADCENTSENSE")
+                    .WithFlag(7, name: "AUXADCENTSENSECAL")
+                    .WithFlag(8, name: "AUXADCINPUTBUFFERBYPASS")
+                    .WithFlag(9, name: "AUXADCENMEASTHERMISTOR")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)RadioControllerRegisters.AuxiliaryAnalogToDigitalConverterControl0, new DoubleWordRegister(this, 0x00000100)
+                    .WithValueField(0, 10, name: "CYCLES")
+                    .WithValueField(10, 2, name: "MUXSEL")
+                    .WithFlag(12, name: "CLRCOUNTER")
+                    .WithFlag(13, name: "CLRFILTER")
+                    .WithReservedBits(14, 18)
+                },
+                {(long)RadioControllerRegisters.AuxiliaryAnalogToDigitalConverterControl1, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "AUXADCINPUTRESSEL")
+                    .WithValueField(4, 4, name: "AUXADCINPUTSELECT")
+                    .WithValueField(8, 4, name: "AUXADCPMONSELECT")
+                    .WithReservedBits(12, 4)
+                    .WithValueField(16, 5, name: "AUXADCTSENSESELCURR")
+                    .WithReservedBits(21, 3)
+                    .WithFlag(24, name: "AUXADCRESET")
+                    .WithFlag(25, name: "AUXADCTSENSESELVBE")
+                    .WithReservedBits(26, 2)
+                    .WithValueField(28, 4, name: "AUXADCTHERMISTORFREQSEL")
+                },
+                {(long)RadioControllerRegisters.AuxiliaryAnalogToDigitalConverterDigitalOutput, new DoubleWordRegister(this)
+                    .WithValueField(0, 28, FieldMode.Read, name: "AUXADCOUT")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)RadioControllerRegisters.ClockMultEnable0, new DoubleWordRegister(this, 0xAA400005)
+                    .WithValueField(0, 2, name: "CLKMULTBWCAL")
+                    .WithFlag(2, name: "CLKMULTDISICO")
+                    .WithFlag(3, name: "CLKMULTENBBDET")
+                    .WithFlag(4, name: "CLKMULTENBBXLDET")
+                    .WithFlag(5, name: "CLKMULTENBBXMDET")
+                    .WithFlag(6, name: "CLKMULTENCFDET")
+                    .WithFlag(7, name: "CLKMULTENDITHER")
+                    .WithFlag(8, name: "CLKMULTENDRVADC")
+                    .WithFlag(9, name: "CLKMULTENDRVN")
+                    .WithFlag(10, name: "CLKMULTENDRVP")
+                    .WithFlag(11, name: "CLKMULTENDRVRX2P4G")
+                    .WithFlag(12, name: "CLKMULTENDRVRXSUBG")
+                    .WithFlag(13, name: "CLKMULTENDRVTXDUALB")
+                    .WithFlag(14, name: "CLKMULTENFBDIV")
+                    .WithFlag(15, name: "CLKMULTENREFDIV")
+                    .WithFlag(16, name: "CLKMULTENREG1")
+                    .WithFlag(17, name: "CLKMULTENREG2")
+                    .WithFlag(18, name: "CLKMULTENREG3")
+                    .WithFlag(19, name: "CLKMULTENROTDET")
+                    .WithFlag(20, name: "CLKMULTENBYPASS40MHZ")
+                    .WithReservedBits(21, 1)
+                    .WithValueField(22, 2, name: "CLKMULTFREQCAL")
+                    .WithValueField(24, 2, name: "CLKMULTREG2ADJI")
+                    .WithValueField(26, 2, name: "CLKMULTREG1ADJV")
+                    .WithValueField(28, 2, name: "CLKMULTREG2ADJV")
+                    .WithValueField(30, 2, name: "CLKMULTREG3ADJV")
+                },
+                {(long)RadioControllerRegisters.ClockMultEnable1, new DoubleWordRegister(this, 0x00000188)
+                    .WithValueField(0, 4, name: "CLKMULTINNIBBLE")
+                    .WithReservedBits(4, 1)
+                    .WithFlag(5, name: "CLKMULTLDFNIB")
+                    .WithFlag(6, name: "CLKMULTLDMNIB")
+                    .WithValueField(7, 2, name: "CLKMULTRDNIBBLE")
+                    .WithReservedBits(9, 1)
+                    .WithFlag(10, name: "CLKMULTLDCNIB")
+                    .WithValueField(11, 6, name: "CLKMULTDRVAMPSEL")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)RadioControllerRegisters.ClockMultControl, new DoubleWordRegister(this, 0x000000C0)
+                    .WithValueField(0, 7, name: "CLKMULTDIVN")
+                    .WithValueField(7, 3, name: "CLKMULTDIVR")
+                    .WithValueField(10, 3, name: "CLKMULTDIVX")
+                    .WithFlag(13, name: "CLKMULTENRESYNC")
+                    .WithFlag(14, name: "CLKMULTVALID")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)RadioControllerRegisters.ClockMultStatus, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, FieldMode.Read, name: "CLKMULTOUTNIBBLE")
+                    .WithFlag(4, FieldMode.Read, name: "CLKMULTACKVALID")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)RadioControllerRegisters.IntermediateFrequencyAnalogToDigitalConverterDebug, new DoubleWordRegister(this, 0x0000000E)
+                    .WithFlag(0, name: "IFADCENADC")
+                    .WithFlag(1, name: "IFADCENCLK")
+                    .WithFlag(2, name: "IFADCENREFBUF")
+                    .WithFlag(3, name: "IFADCENSIDETONE")
+                    .WithFlag(4, name: "IFADCINVERTCLK")
+                    .WithFlag(5, name: "IFADCSHORTINPUT")
+                    .WithFlag(6, name: "IFADCDISABLECLK")
+                    .WithReservedBits(7, 25)
+                },
+                {(long)RadioControllerRegisters.IntermediateFrequencyAnalogToDigitalConverterTrim0, new DoubleWordRegister(this, 0x11512C6C)
+                    .WithFlag(0, name: "IFADCCLKSEL")
+                    .WithReservedBits(1, 1)
+                    .WithValueField(2, 3, name: "IFADCLDOSERIESAMPLVL")
+                    .WithValueField(5, 3, name: "IFADCLDOSHUNTAMPLVL1")
+                    .WithFlag(8, name: "IFADCLDOSHUNTAMPLVL2")
+                    .WithValueField(9, 3, name: "IFADCLDOSHUNTCURLVL1")
+                    .WithValueField(12, 3, name: "IFADCLDOSHUNTCURLVL2")
+                    .WithValueField(15, 3, name: "IFADCOTACURRENT")
+                    .WithValueField(18, 3, name: "IFADCREFBUFAMPLVL")
+                    .WithValueField(21, 3, name: "IFADCREFBUFCURLVL")
+                    .WithValueField(24, 3, name: "IFADCSIDETONEAMP")
+                    .WithValueField(27, 3, name: "IFADCSIDETONEFREQ")
+                    .WithFlag(30, name: "IFADCENHALFMODE")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)RadioControllerRegisters.IntermediateFrequencyAnalogToDigitalConverterTrim1, new DoubleWordRegister(this, 0x00000123)
+                    .WithValueField(0, 3, name: "IFADCVCMLVL")
+                    .WithFlag(3, name: "IFADCENNEGRES")
+                    .WithValueField(4, 3, name: "IFADCNEGRESCURRENT")
+                    .WithValueField(7, 2, name: "IFADCNEGRESVCM")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)RadioControllerRegisters.IntermediateFrequencyAnalogToDigitalConverterCalibration, new DoubleWordRegister(this, 0x00000C00)
+                    .WithFlag(0, name: "IFADCENRCCAL")
+                    .WithFlag(1, name: "IFADCTUNERCCALMODE")
+                    .WithReservedBits(2, 6)
+                    .WithValueField(8, 5, name: "IFADCTUNERC")
+                    .WithReservedBits(13, 3)
+                    .WithValueField(16, 8, name: "IFADCRCCALCOUNTERSTARTVAL")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)RadioControllerRegisters.IntermediateFrequencyAnalogToDigitalConverterStatus, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "IFADCRCCALOUT")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerDebug, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "LNAMIXDISMXR0")
+                    .WithFlag(1, name: "LNAMIXDISMXR1")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerTrim0, new DoubleWordRegister(this, 0x00000110)
+                    .WithValueField(0, 3, name: "LNAMIXCAPSEL0")
+                    .WithValueField(3, 2, name: "LNAMIXMXRBIAS0")
+                    .WithValueField(5, 4, name: "LNAMIXVOUTADJ0")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerTrim1, new DoubleWordRegister(this, 0x00000110)
+                    .WithValueField(0, 3, name: "LNAMIXCAPSEL1")
+                    .WithValueField(3, 2, name: "LNAMIXMXRBIAS1")
+                    .WithValueField(5, 4, name: "LNAMIXVOUTADJ1")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerTrim2, new DoubleWordRegister(this, 0x545033D0)
+                    .WithReservedBits(0, 4)
+                    .WithValueField(4, 6, name: "LNAMIXCURCTRL")
+                    .WithValueField(10, 2, name: "LNAMIXHIGHCUR")
+                    .WithValueField(12, 4, name: "LNAMIXLOWCUR")
+                    .WithReservedBits(16, 3)
+                    .WithValueField(19, 2, name: "LNAMIXNCASADJ0")
+                    .WithValueField(21, 2, name: "LNAMIXPCASADJ0")
+                    .WithValueField(23, 4, name: "LNAMIXTRIMVREG")
+                    .WithValueField(27, 2, name: "LNAMIXNCASADJ1")
+                    .WithValueField(29, 2, name: "LNAMIXPCASADJ1")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerTrim3, new DoubleWordRegister(this, 0x00000208)
+                    .WithValueField(0, 6, name: "LNAMIXIBIASADJ0")
+                    .WithValueField(6, 6, name: "LNAMIXIBIASADJ1")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerTrim4, new DoubleWordRegister(this, 0x88082002)
+                    .WithValueField(0, 2, name: "LNAMIXRFPKDBWSEL")
+                    .WithReservedBits(2, 6)
+                    .WithValueField(8, 6, name: "LNAMIXRFPKDCALCMLO")
+                    .WithValueField(14, 6, name: "LNAMIXRFPKDCALCMHI")
+                    .WithReservedBits(20, 4)
+                    .WithValueField(24, 4, name: "LNAMIXRFPKDTHRESHSELLO")
+                    .WithValueField(28, 4, name: "LNAMIXRFPKDTHRESHSELHI")
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerCalibration, new DoubleWordRegister(this, 0x000007E0)
+                    .WithFlag(0, name: "LNAMIXCALEN")
+                    .WithReservedBits(1, 1)
+                    .WithFlag(2, name: "LNAMIXCALVMODE")
+                    .WithFlag(3, name: "LNAMIXENIRCAL0")
+                    .WithFlag(4, name: "LNAMIXENIRCAL1")
+                    .WithValueField(5, 3, name: "LNAMIXIRCALAMP0")
+                    .WithValueField(8, 3, name: "LNAMIXIRCALAMP1")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)RadioControllerRegisters.LowNoiseAmplifierMixerEnable, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 3)
+                    .WithFlag(3, name: "LNAMIXENLDO")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)RadioControllerRegisters.PreCounterOverflow, new DoubleWordRegister(this, 0x00000026)
+                    .WithFlag(0, name: "PREBYPFORCE")
+                    .WithValueField(1, 3, name: "PREREGTRIM")
+                    .WithValueField(4, 2, name: "PREVREFTRIM")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)RadioControllerRegisters.PowerAmplifierTrim0, new DoubleWordRegister(this, 0x00000077)
+                    .WithValueField(0, 4, name: "TX0DBMTRIMBIASN")
+                    .WithValueField(4, 4, name: "TX0DBMTRIMBIASP")
+                    .WithValueField(8, 8, name: "TXPAAMPCTRL")
+                    .WithFlag(16, name: "TXPABYPASSREG")
+                    .WithReservedBits(17, 7)
+                    .WithFlag(24, name: "ENAMPCTRLREG")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)RadioControllerRegisters.PowerAmplifierTrim1, new DoubleWordRegister(this, 0x03034373)
+                    .WithValueField(0, 2, name: "TX0DBMTRIMPREDRVREGIBCORE")
+                    .WithFlag(2, name: "TX0DBMTRIMPREDRVREGPSR")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 4, name: "TX0DBMTRIMPREDRVREGIBNDIO")
+                    .WithValueField(8, 2, name: "TX0DBMTRIMPREDRVSLOPE")
+                    .WithReservedBits(10, 2)
+                    .WithValueField(12, 4, name: "TX0DBMTRIMREGFB")
+                    .WithValueField(16, 3, name: "TX0DBMTRIMREGVREF")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 3, name: "TX0DBMTRIMTAPCAP100F")
+                    .WithReservedBits(23, 1)
+                    .WithValueField(24, 3, name: "TX0DBMTRIMTAPCAP200F")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)RadioControllerRegisters.PowerAmplifierTrim2, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "TX0DBMTRIMDUTYCYN")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 3, name: "TX0DBMTRIMDUTYCYP")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 3, name: "TXPATRIM10DBMDUTYCYN")
+                    .WithReservedBits(11, 1)
+                    .WithValueField(12, 3, name: "TXPATRIM10DBMDUTYCYP")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)RadioControllerRegisters.PowerAmplifierTrim3, new DoubleWordRegister(this, 0x008D33AA)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "TXPATRIMBLEEDAUTOREG")
+                    .WithValueField(2, 2, name: "TXPATRIMIBIASMASTER")
+                    .WithValueField(4, 2, name: "TXPATRIMPREDRVREGFB")
+                    .WithFlag(6, name: "TXPATRIMPREDRVREGFBKATT")
+                    .WithFlag(7, name: "TXPATRIMPREDRVREGPSR")
+                    .WithValueField(8, 2, name: "TXPATRIMPREDRVREGSLICES")
+                    .WithReservedBits(10, 2)
+                    .WithValueField(12, 3, name: "TXPATRIMPREDRVREGVREF")
+                    .WithReservedBits(15, 1)
+                    .WithValueField(16, 3, name: "TXPATRIMREGFB")
+                    .WithFlag(19, name: "TXPATRIMREGPSR")
+                    .WithValueField(20, 4, name: "TXPATRIMREGVREF")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)RadioControllerRegisters.PowerAmplifierTrim4, new DoubleWordRegister(this, 0x00006000)
+                    .WithValueField(0, 4, name: "TXPATRIM10DBMCTAP")
+                    .WithValueField(4, 2, name: "TXPATRIM10DBMPREDRVCAP")
+                    .WithValueField(6, 2, name: "TXPATRIM10DBMPREDRVSLC")
+                    .WithValueField(8, 4, name: "TXPATRIM20DBMCTAP")
+                    .WithValueField(12, 4, name: "TXPATRIM20DBMPREDRV")
+                    .WithValueField(16, 4, name: "TXPATRIMCAPPAOUTM")
+                    .WithValueField(20, 4, name: "TXPATRIMCAPPAOUTP")
+                    .WithValueField(24, 2, name: "TXPATRIMCMGAIN")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)RadioControllerRegisters.PowerAmplifierTrim5, new DoubleWordRegister(this, 0x00181800)
+                    .WithFlag(0, name: "TXPATRIMDACGLITCH")
+                    .WithValueField(1, 3, name: "TXPATRIMDLY0")
+                    .WithValueField(4, 3, name: "TXPATRIMDLY1")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 4, name: "TXPATRIMNBIAS")
+                    .WithValueField(12, 2, name: "TXPATRIMNCASC")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 4, name: "TXPATRIMPBIAS")
+                    .WithValueField(20, 2, name: "TXPATRIMPCASC")
+                    .WithReservedBits(22, 2)
+                    .WithValueField(24, 2, name: "TXPATRIMREGSLICES")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)RadioControllerRegisters.TxPower, new DoubleWordRegister(this, 0x00000010)
+                    .WithValueField(0, 4, name: "TX0DBMPOWER")
+                    .WithValueField(4, 2, name: "TX0DBMSELSLICE")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)RadioControllerRegisters.TxRamp, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "PARAMPMODE")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)RadioControllerRegisters.ProgrammableGainAmplifierTrim, new DoubleWordRegister(this, 0x00000B15)
+                    .WithValueField(0, 5, name: "PGACTUNE")
+                    .WithReservedBits(5, 1)
+                    .WithValueField(6, 3, name: "PGAVCMOUTTRIM")
+                    .WithValueField(9, 3, name: "PGAVLDOTRIM")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)RadioControllerRegisters.ProgrammableGainAmplifierCalibration, new DoubleWordRegister(this, 0x00002020)
+                    .WithValueField(0, 6, name: "PGAOFFCALI")
+                    .WithReservedBits(6, 2)
+                    .WithValueField(8, 6, name: "PGAOFFCALQ")
+                    .WithReservedBits(14, 18)
+                },
+                {(long)RadioControllerRegisters.ProgrammableGainAmplifierControl, new DoubleWordRegister(this, 0x00008001)
+                    .WithValueField(0, 4, name: "PGABWMODE")
+                    .WithFlag(4, name: "PGAENGHZ")
+                    .WithFlag(5, name: "PGAENBIAS")
+                    .WithFlag(6, name: "PGAENLATCHI")
+                    .WithFlag(7, name: "PGAENLATCHQ")
+                    .WithFlag(8, name: "PGAENLDOLOAD")
+                    .WithFlag(9, name: "PGAENPGAI")
+                    .WithFlag(10, name: "PGAENPGAQ")
+                    .WithFlag(11, name: "PGAENPKD")
+                    .WithReservedBits(12, 1)
+                    .WithFlag(13, name: "PGAENSUBG")
+                    .WithValueField(14, 3, name: "PGAPOWERMODE")
+                    .WithValueField(17, 4, name: "PGATHRPKDLOSEL")
+                    .WithValueField(21, 4, name: "PGATHRPKDHISEL")
+                    .WithReservedBits(25, 7)
+                },
+                {(long)RadioControllerRegisters.RadioFrequencyBiasCalibration, new DoubleWordRegister(this, 0x30201A20)
+                    .WithValueField(0, 6, name: "RFBIASCALBIAS")
+                    .WithReservedBits(6, 2)
+                    .WithValueField(8, 6, name: "RFBIASCALTC")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 6, name: "RFBIASCALVREF")
+                    .WithReservedBits(22, 2)
+                    .WithValueField(24, 6, name: "RFBIASCALVREFSTARTUP")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)RadioControllerRegisters.RadioFrequencyBiasControl, new DoubleWordRegister(this, 0x00040000)
+                    .WithFlag(0, name: "RFBIASDISABLEBOOTSTRAP")
+                    .WithFlag(1, name: "RFBIASLDOHIGHCURRENT")
+                    .WithFlag(2, name: "RFBIASNONFLASHMODE")
+                    .WithFlag(3, name: "RFBIASSTARTUPCORE")
+                    .WithFlag(4, name: "RFBIASSTARTUPSUPPLY")
+                    .WithReservedBits(5, 11)
+                    .WithValueField(16, 4, name: "RFBIASLDOVREFTRIM")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)RadioControllerRegisters.RadioEnable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "PREEN")
+                    .WithFlag(1, name: "PRESTB100UDIS")
+                    .WithFlag(2, name: "RFBIASEN")
+                    .WithReservedBits(3, 29)
+                },
+                {(long)RadioControllerRegisters.RadioFrequencyPathEnable0, new DoubleWordRegister(this, 0x00000002)
+                    .WithFlag(0, name: "LNAMIXEN0")
+                    .WithFlag(1, name: "LNAMIXRFATTDCEN0")
+                    .WithFlag(2, name: "LNAMIXRFPKDENRF0")
+                    .WithFlag(3, name: "SYLODIVRLO02G4EN")
+                    .WithReservedBits(4, 2)
+                    .WithFlag(6, name: "LNAMIXTRSW0")
+                    .WithReservedBits(7, 25)
+                },
+                {(long)RadioControllerRegisters.RadioFrequencyPathEnable1, new DoubleWordRegister(this, 0x00000002)
+                    .WithFlag(0, name: "LNAMIXEN1")
+                    .WithFlag(1, name: "LNAMIXRFATTDCEN1")
+                    .WithFlag(2, name: "LNAMIXRFPKDENRF1")
+                    .WithFlag(3, name: "SYLODIVRLO12G4EN")
+                    .WithReservedBits(4, 2)
+                    .WithFlag(6, name: "LNAMIXTRSW1")
+                    .WithReservedBits(7, 25)
+                },
+                {(long)RadioControllerRegisters.Rx, new DoubleWordRegister(this, 0x00000020)
+                    .WithFlag(0, name: "IFADCCAPRESET")
+                    .WithFlag(1, name: "IFADCENLDOSERIES")
+                    .WithFlag(2, name: "IFADCENLDOSHUNT")
+                    .WithFlag(3, name: "LNAMIXENRFPKD")
+                    .WithFlag(4, name: "LNAMIXENRFPKDLOTHRESH")
+                    .WithFlag(5, name: "LNAMIXLDOLOWCUR")
+                    .WithReservedBits(6, 1)
+                    .WithFlag(7, name: "LNAMIXREGLOADEN")
+                    .WithFlag(8, name: "PGAENLDO")
+                    .WithFlag(9, name: "SYCHPQNC3EN")
+                    .WithReservedBits(10, 6)
+                    .WithFlag(16, name: "SYCHPBIASTRIMBUFRX")
+                    .WithFlag(17, name: "SYPFDCHPLPENRX")
+                    .WithFlag(18, name: "SYPFDFPWENRX")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)RadioControllerRegisters.Tx, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "TXPAENREG")
+                    .WithFlag(1, name: "TXPAENRAMPCLK")
+                    .WithFlag(2, name: "TX0DBMENBLEEDREG")
+                    .WithFlag(3, name: "TX0DBMENREG")
+                    .WithReservedBits(4, 1)
+                    .WithFlag(5, name: "TX0DBMENBIAS")
+                    .WithFlag(6, name: "TX0DBMENPREDRV")
+                    .WithFlag(7, name: "TX0DBMENPREDRVREG")
+                    .WithFlag(8, name: "TX0DBMENPREDRVREGBIAS")
+                    .WithFlag(9, name: "TX0DBMENRAMPCLK")
+                    .WithFlag(10, name: "TX0DBMENBLEEDPREDRVREG")
+                    .WithReservedBits(11, 1)
+                    .WithFlag(12, name: "TXPAENBLEEDPREDRVREG")
+                    .WithFlag(13, name: "TXPAENBLEEDREG")
+                    .WithFlag(14, name: "TXPAENPAOUT")
+                    .WithFlag(15, name: "TXPAENPREDRVREG")
+                    .WithFlag(16, name: "SYCHPBIASTRIMBUFTX")
+                    .WithFlag(17, name: "SYPFDCHPLPENTX")
+                    .WithFlag(18, name: "SYPFDFPWENTX")
+                    .WithFlag(19, name: "TXPAEN10DBM")
+                    .WithFlag(20, name: "TXPAEN10DBMMAINCTAP")
+                    .WithFlag(21, name: "TXPAEN10DBMPREDRV")
+                    .WithFlag(22, name: "TXPAEN10DBMVMID")
+                    .WithFlag(23, name: "TXPAEN20DBM")
+                    .WithFlag(24, name: "TXPAEN20DBMMAINCTAP")
+                    .WithFlag(25, name: "TXPAEN20DBMPREDRV")
+                    .WithFlag(26, name: "TXPAEN20DBMVMID")
+                    .WithFlag(27, name: "TXPAEN20DBMVBIASHF")
+                    .WithValueField(28, 2, name: "TXPATRIM20DBMVBIASHF")
+                    .WithFlag(30, name: "ENPAPOWER")
+                    .WithFlag(31, name: "ENPASELSLICE")
+                },
+                {(long)RadioControllerRegisters.SyDebug, new DoubleWordRegister(this, 0x00000020)
+                    .WithFlag(0, name: "SYCHPSWITCHEDBIASEN")
+                    .WithFlag(1, name: "SYENMMDDREGBIASSTB")
+                    .WithFlag(2, name: "SYLODIVAUXLODIS")
+                    .WithReservedBits(3, 1)
+                    .WithFlag(4, name: "SYLODIVLDOPSRTRIM")
+                    .WithFlag(5, name: "SYPFDLOCKWINDOWN")
+                    .WithFlag(6, name: "SYPFDTRADMODEEN")
+                    .WithReservedBits(7, 1)
+                    .WithFlag(8, name: "SYVCOREGBYPASS")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)RadioControllerRegisters.SyTrim0, new DoubleWordRegister(this, 0x018FF169)
+                    .WithValueField(0, 3, name: "SYCHPBIAS")
+                    .WithValueField(3, 3, name: "SYCHPCURRRX")
+                    .WithValueField(6, 3, name: "SYCHPCURRTX")
+                    .WithValueField(9, 3, name: "SYCHPLEVNSRC")
+                    .WithValueField(12, 3, name: "SYCHPLEVPSRCRX")
+                    .WithValueField(15, 3, name: "SYCHPLEVPSRCTX")
+                    .WithFlag(18, name: "SYCHPSRCENRX")
+                    .WithFlag(19, name: "SYCHPSRCENTX")
+                    .WithValueField(20, 3, name: "SYCHPREPLICACURRADJ")
+                    .WithValueField(23, 3, name: "SYTRIMCHPREGAMPBIAS")
+                    .WithValueField(26, 2, name: "SYTRIMCHPREGAMPBW")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)RadioControllerRegisters.SyTrim1, new DoubleWordRegister(this, 0x1FE00410)
+                    .WithValueField(0, 2, name: "SYLODIVLDOTRIMCORERX")
+                    .WithValueField(2, 2, name: "SYLODIVLDOTRIMCORETX")
+                    .WithValueField(4, 4, name: "SYLODIVLDOTRIMNDIORX")
+                    .WithValueField(8, 4, name: "SYLODIVLDOTRIMNDIOTX")
+                    .WithReservedBits(12, 6)
+                    .WithValueField(18, 3, name: "SYLODIVTLO20DBM2G4DELAY")
+                    .WithValueField(21, 3, name: "SYMMDREPLICA1CURRADJ")
+                    .WithValueField(24, 3, name: "SYMMDREPLICA2CURRADJ")
+                    .WithValueField(27, 3, name: "SYTRIMMMDREGAMPBIAS")
+                    .WithValueField(30, 2, name: "SYTRIMMMDREGAMPBW")
+                },
+                {(long)RadioControllerRegisters.SyCalibration, new DoubleWordRegister(this, 0x01008100)
+                    .WithReservedBits(0, 8)
+                    .WithFlag(8, name: "SYVCOMODEPKD")
+                    .WithFlag(9, name: "SYVCOMORECURRENT")
+                    .WithFlag(10, name: "SYVCOSLOWNOISEFILTER")
+                    .WithReservedBits(11, 4)
+                    .WithValueField(15, 2, name: "SYVCOVCAPVCM")
+                    .WithReservedBits(17, 7)
+                    .WithValueField(24, 2, name: "SYHILOADCHPREG")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)RadioControllerRegisters.SyEnable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "SYCHPEN")
+                    .WithFlag(1, name: "SYCHPLPENRX")
+                    .WithFlag(2, name: "SYCHPLPENTX")
+                    .WithFlag(3, name: "SYENCHPREG")
+                    .WithFlag(4, name: "SYENCHPREPLICA")
+                    .WithFlag(5, name: "SYENMMDREG")
+                    .WithFlag(6, name: "SYENMMDREPLICA1")
+                    .WithFlag(7, name: "SYENMMDREPLICA2")
+                    .WithFlag(8, name: "SYENVCOBIAS")
+                    .WithFlag(9, name: "SYENVCOPFET")
+                    .WithFlag(10, name: "SYENVCOREG")
+                    .WithReservedBits(11, 2)
+                    .WithFlag(13, name: "SYSTARTCHPREG")
+                    .WithFlag(14, name: "SYSTARTMMDREG")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)RadioControllerRegisters.SyloEnable, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "SYLODIVEN")
+                    .WithFlag(2, name: "SYLODIVLDOBIASEN")
+                    .WithFlag(3, name: "SYLODIVLDOEN")
+                    .WithFlag(4, name: "SYLODIVRLOADCCLK2G4EN")
+                    .WithReservedBits(5, 3)
+                    .WithFlag(8, name: "SYLODIVTLO0DBM2G4AUXEN")
+                    .WithFlag(9, name: "SYLODIVTLO0DBM2G4EN")
+                    .WithFlag(10, name: "SYLODIVTLO20DBM2G4AUXEN")
+                    .WithFlag(11, name: "SYLODIVTLO20DBM2G4EN")
+                    .WithFlag(12, name: "SYLODIVRLOADCCLKSEL")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)RadioControllerRegisters.SymmControl, new DoubleWordRegister(this, 0x00000048)
+                    .WithValueField(0, 2, name: "SYMMDDIVRSDIG")
+                    .WithValueField(2, 3, name: "SYMMDMODERX")
+                    .WithValueField(5, 3, name: "SYMMDMODETX")
+                    .WithFlag(8, name: "SYMMDENRSDIG")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)RadioControllerRegisters.DigitalClockRetimeControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "DIGCLKRETIMEENRETIME")
+                    .WithFlag(1, name: "DIGCLKRETIMEDISRETIME")
+                    .WithFlag(2, name: "DIGCLKRETIMERESETN")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 3, name: "DIGCLKRETIMELIMITH")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 3, name: "DIGCLKRETIMELIMITL")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)RadioControllerRegisters.DigitalClockRetimeStatus, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "DIGCLKRETIMECLKSEL")
+                    .WithFlag(1, FieldMode.Read, name: "DIGCLKRETIMERESETNLO")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)RadioControllerRegisters.XoRetimeControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "XORETIMEENRETIME")
+                    .WithFlag(1, name: "XORETIMEDISRETIME")
+                    .WithFlag(2, name: "XORETIMERESETN")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 3, name: "XORETIMELIMITH")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 3, name: "XORETIMELIMITL")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)RadioControllerRegisters.XoRetimeStatus, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "XORETIMECLKSEL")
+                    .WithFlag(1, FieldMode.Read, name: "XORETIMERESETNLO")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)RadioControllerRegisters.AutomaticGainControlOverwrite0, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "ENMANLNAMIXRFATT")
+                    .WithFlag(1, name: "ENMANLNAMIXSLICE")
+                    .WithFlag(2, name: "ENMANPGAGAIN")
+                    .WithFlag(3, name: "ENMANIFADCSCALE")
+                    .WithValueField(4, 6, name: "MANLNAMIXSLICE0")
+                    .WithValueField(10, 6, name: "MANLNAMIXSLICE1")
+                    .WithReservedBits(16, 4)
+                    .WithValueField(20, 4, name: "MANPGAGAIN")
+                    .WithValueField(24, 2, name: "MANIFADCSCALE")
+                    .WithReservedBits(26, 6)
+                },
+                {(long)RadioControllerRegisters.AutomaticGainControlOverwrite1, new DoubleWordRegister(this)
+                    .WithValueField(0, 14, name: "MANLNAMIXRFATT0")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 14, name: "MANLNAMIXRFATT1")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)RadioControllerRegisters.AutomaticGainControlOverwrite2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "ENMANFENOTCH")
+                    .WithFlag(1, name: "MANFENOTCHEN")
+                    .WithValueField(2, 4, name: "MANFENOTCHATTNSEL")
+                    .WithFlag(6, name: "MANFENOTCHRATTNENRF0")
+                    .WithFlag(7, name: "MANFENOTCHRATTNENRF1")
+                    .WithValueField(8, 4, name: "MANFENOTCHCAPCRSE")
+                    .WithValueField(12, 4, name: "MANFENOTCHCAPFINE")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)RadioControllerRegisters.Spare, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "AUXADCSPARE")
+                    .WithValueField(3, 2, name: "CLKMULTSPARE")
+                    .WithFlag(5, name: "TX0DBMSPARE")
+                    .WithReservedBits(6, 3)
+                    .WithValueField(9, 8, name: "SYSPARE")
+                    .WithValueField(17, 5, name: "FENOTCHSPARE")
+                    .WithValueField(22, 4, name: "LNAMIXSPARE")
+                    .WithValueField(26, 3, name: "IFADCCTRLRESERVED")
+                    .WithValueField(29, 3, name: "IFADCCTRLRESERVEDLV")
+                },
+                {(long)RadioControllerRegisters.PowerAmplifierControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "TX0DBMLATCHBYPASS")
+                    .WithFlag(1, name: "TX0DBMSLICERESET")
+                    .WithFlag(2, name: "TXPABYPASSPREDRVREG")
+                    .WithFlag(3, name: "TXPAPULLDOWNVDDPA")
+                    .WithValueField(4, 4, name: "TXPAPOWER")
+                    .WithFlag(8, name: "TXPALATCHBYPASS10DBM")
+                    .WithFlag(9, name: "TXPALATCHBYPASS20DBM")
+                    .WithFlag(10, name: "TXPASELPREDRVREGVDDPA")
+                    .WithFlag(11, name: "TXPASELPREDRVREGVDDRF")
+                    .WithValueField(12, 4, name: "TXPASELSLICE")
+                    .WithFlag(16, name: "TXPASLICERST")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)RadioControllerRegisters.FeNotch0, new DoubleWordRegister(this, 0x00004000)
+                    .WithReservedBits(0, 12)
+                    .WithValueField(12, 3, name: "FENOTCHVBIAS")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)RadioControllerRegisters.FeNotch1, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "FENOTCHENVDDSW")
+                    .WithReservedBits(1, 1)
+                    .WithFlag(2, name: "FENOTCHRCCALEN")
+                    .WithReservedBits(3, 5)
+                    .WithValueField(8, 8, name: "FENOTCHRCCALCOUNTER")
+                    .WithValueField(16, 4, name: "FENOTCHRCCALOSC")
+                    .WithFlag(20, name: "FENOTCHRCCALOUT")
+                    .WithReservedBits(21, 11)
+                },
+                {(long)RadioControllerRegisters.ThermisterControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithFlag(1, name: "HALFSWITCH")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)RadioControllerRegisters.DiagaAlternateEnable, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithFlag(1, name: "RFEN")
+                    .WithReservedBits(2, 30)
+                },
+                {(long)RadioControllerRegisters.DiagaAlternateRfBlocksAndTpSelect, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, name: "TP")
+                    .WithReservedBits(6, 2)
+                    .WithValueField(8, 7, name: "BLK")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)RadioControllerRegisters.DiagaAlternateBridgeControl, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 5)
+                    .WithFlag(5, name: "RFSHORTDIS")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)RadioControllerRegisters.RadioFrequencyLock1, new DoubleWordRegister(this, 0x000000FF)
+                    .WithValueField(0, 4, name: "RACPASTRIPE")
+                    .WithValueField(4, 4, name: "RACPASLICE")
+                    .WithReservedBits(8, 24)
+                },
             };
 
             return new DoubleWordRegisterCollection(this, registerDictionary);
@@ -2780,13 +5505,20 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)FrameControllerRegisters.IpVersion, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
+                {(long)FrameControllerRegisters.Enable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)FrameControllerRegisters.Status, new DoubleWordRegister(this)
                     .WithValueField(0, 5, name: "SNIFFDCOUNT")
                     .WithFlag(5, out FRC_activeTransmitFrameDescriptor, FieldMode.Read, name: "ACTIVETXFCD")
                     .WithFlag(6, out FRC_activeReceiveFrameDescriptor, FieldMode.Read, name: "ACTIVERXFCD")
                     .WithFlag(7, name: "SNIFFDFRAME")
                     .WithFlag(8, out FRC_rxRawBlocked, FieldMode.Read, name: "RXRAWBLOCKED")
-                    .WithFlag(9, name: "FRAMEOK")
+                    .WithFlag(9, FieldMode.Read, valueProviderCallback: _ => FRC_frameOk, name: "FRAMEOK")
                     .WithFlag(10, FieldMode.Read, valueProviderCallback: _ => FRC_rxAbortInProgress, name: "RXABORTINPROGRESS")
                     .WithFlag(11, name: "TXWORD")
                     .WithFlag(12, name: "RXWORD")
@@ -2795,11 +5527,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(15, name: "INTERLEAVEREADPAUSED")
                     .WithFlag(16, name: "INTERLEAVEWRITEPAUSED")
                     .WithFlag(17, name: "FRAMEDETPAUSED")
-                    .WithFlag(18, name: "FRAMELENGTHERROR")
+                    .WithFlag(18, FieldMode.Read, valueProviderCallback: _ => FRC_frameLengthError, name: "FRAMELENGTHERROR")
                     .WithFlag(19, name: "DEMODERROR")
                     .WithValueField(20, 5, out FRC_fsmState, name: "FSMSTATE")
                     .WithFlag(25, name: "RXWCNTMATCHPAUSED")
-                    .WithFlag(26, name: "CRCERRORTOLERATED")
+                    .WithFlag(26, FieldMode.Read, valueProviderCallback: _ => FRC_crcErrorTolerated, name: "CRCERRORTOLERATED")
                     .WithReservedBits(27, 5)
                 },
                 {(long)FrameControllerRegisters.DynamicFrameLengthControl, new DoubleWordRegister(this)
@@ -2814,7 +5546,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(21, 4, name: "DFLBOIOFFSET")
                     .WithReservedBits(25, 7)
                 },
-                {(long)FrameControllerRegisters.MaximumFrameLength, new DoubleWordRegister(this)
+                {(long)FrameControllerRegisters.MaximumFrameLength, new DoubleWordRegister(this, 0x00004FFF)
                     .WithValueField(0, 12, out FRC_maxDecodedLength, name: "MAXLENGTH")
                     .WithValueField(12, 4, out FRC_initialDecodedFrameLength, name: "INILENGTH")
                     .WithReservedBits(16, 16)
@@ -2871,7 +5603,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(13, name: "RXPAUSERESUME")
                     .WithReservedBits(14, 18)
                 },
-                {(long)FrameControllerRegisters.Control, new DoubleWordRegister(this)
+                {(long)FrameControllerRegisters.Control, new DoubleWordRegister(this, 0x03000700)
                     .WithFlag(0, name: "RANDOMTX")
                     .WithFlag(1, name: "UARTMODE")
                     .WithFlag(2, name: "BITORDER")
@@ -2918,7 +5650,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)FrameControllerRegisters.InterruptFlags, new DoubleWordRegister(this)
                     .WithFlag(0, out FRC_txDoneInterrupt, name: "TXDONEIF")
                     .WithFlag(1, out FRC_txAfterFrameDoneInterrupt, name: "TXAFTERFRAMEDONEIF")
-                    .WithFlag(2, name: "TXABORTEDIF")
+                    .WithFlag(2, out FRC_txAbortedInterrupt, name: "TXABORTEDIF")
                     .WithFlag(3, out FRC_txUnderflowInterrupt, name: "TXUFIF")
                     .WithFlag(4, out FRC_rxDoneInterrupt, name: "RXDONEIF")
                     .WithFlag(5, out FRC_rxAbortedInterrupt, name: "RXABORTEDIF")
@@ -2953,7 +5685,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)FrameControllerRegisters.InterruptEnable, new DoubleWordRegister(this)
                     .WithFlag(0, out FRC_txDoneInterruptEnable, name: "TXDONEIEN")
                     .WithFlag(1, out FRC_txAfterFrameDoneInterruptEnable, name: "TXAFTERFRAMEDONEIEN")
-                    .WithFlag(2, name: "TXABORTEDIEN")
+                    .WithFlag(2, out FRC_txAbortedInterruptEnable, name: "TXABORTEDIEN")
                     .WithFlag(3, out FRC_txUnderflowInterruptEnable, name: "TXUFIEN")
                     .WithFlag(4, out FRC_rxDoneInterruptEnable, name: "RXDONEIEN")
                     .WithFlag(5, out FRC_rxAbortedInterruptEnable, name: "RXABORTEDIEN")
@@ -2988,7 +5720,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)FrameControllerRegisters.SequencerInterruptFlags, new DoubleWordRegister(this)
                     .WithFlag(0, out FRC_seqTxDoneInterrupt, name: "TXDONESEQIF")
                     .WithFlag(1, out FRC_seqTxAfterFrameDoneInterrupt, name: "TXAFTERFRAMEDONESEQIF")
-                    .WithFlag(2, name: "TXABORTEDSEQIF")
+                    .WithFlag(2, out FRC_seqTxAbortedInterrupt, name: "TXABORTEDSEQIF")
                     .WithFlag(3, out FRC_seqTxUnderflowInterrupt, name: "TXUFSEQIF")
                     .WithFlag(4, out FRC_seqRxDoneInterrupt, name: "RXDONESEQIF")
                     .WithFlag(5, out FRC_seqRxAbortedInterrupt, name: "RXABORTEDSEQIF")
@@ -3023,7 +5755,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)FrameControllerRegisters.SequencerInterruptEnable, new DoubleWordRegister(this)
                     .WithFlag(0, out FRC_seqTxDoneInterruptEnable, name: "TXDONESEQIEN")
                     .WithFlag(1, out FRC_seqTxAfterFrameDoneInterruptEnable, name: "TXAFTERFRAMEDONESEQIEN")
-                    .WithFlag(2, name: "TXABORTEDSEQIEN")
+                    .WithFlag(2, out FRC_seqTxAbortedInterruptEnable, name: "TXABORTEDSEQIEN")
                     .WithFlag(3, out FRC_seqTxUnderflowInterruptEnable, name: "TXUFSEQIEN")
                     .WithFlag(4, out FRC_seqRxDoneInterruptEnable, name: "RXDONESEQIEN")
                     .WithFlag(5, out FRC_seqRxAbortedInterruptEnable, name: "RXABORTEDSEQIEN")
@@ -3112,7 +5844,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithValueField(0, 6, out FRC_packetBufferCount, FieldMode.Read, name: "PKTBUFCOUNT")
                     .WithReservedBits(6, 24)
                 },
-                {(long)FrameControllerRegisters.SnifferControl, new DoubleWordRegister(this)
+                {(long)FrameControllerRegisters.SnifferControl, new DoubleWordRegister(this, 0x000007FC)
                     .WithValueField(0, 2, name: "SNIFFMODE")
                     .WithFlag(2, name: "SNIFFBITS")
                     .WithFlag(3, out FRC_ptiEmitRx, name: "SNIFFRXDATA")
@@ -3142,6 +5874,225 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(9, 23)
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
+                {(long)FrameControllerRegisters.WhitenerControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "FEEDBACKSEL")
+                    .WithValueField(5, 2, name: "XORFEEDBACK")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 4, name: "SHROUTPUTSEL")
+                    .WithFlag(12, name: "BLOCKERRORCORRECT")
+                    .WithReservedBits(13, 19)
+                },
+                {(long)FrameControllerRegisters.WhitenerPolynomial, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "POLY")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)FrameControllerRegisters.WhitenerInitialValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "WHITEINIT")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)FrameControllerRegisters.ForwardErrorCorrectionControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "BLOCKWHITEMODE")
+                    .WithReservedBits(3, 1)
+                    .WithValueField(4, 2, name: "CONVMODE")
+                    .WithFlag(6, name: "CONVDECODEMODE")
+                    .WithFlag(7, name: "CONVTRACEBACKDISABLE")
+                    .WithValueField(8, 2, name: "CONVINV")
+                    .WithValueField(10, 2, name: "INTERLEAVEMODE")
+                    .WithValueField(12, 4, name: "INTERLEAVEFIRSTINDEX")
+                    .WithFlag(16, name: "INTERLEAVEWIDTH")
+                    .WithFlag(17, name: "CONVBUSLOCK")
+                    .WithFlag(18, name: "CONVSUBFRAMETERMINATE")
+                    .WithFlag(19, name: "SINGLEBLOCK")
+                    .WithFlag(20, name: "FORCE2FSK")
+                    .WithFlag(21, name: "CONVHARDERROR")
+                    .WithReservedBits(22, 10)
+                },
+                {(long)FrameControllerRegisters.BlockDecodingRamAddress, new DoubleWordRegister(this, 0x00004000)
+                    .WithReservedBits(0, 2)
+                    .WithValueField(2, 30, name: "BLOCKRAMADDR")
+                },
+                {(long)FrameControllerRegisters.ConvolutionalDecodingRamAddress, new DoubleWordRegister(this, 0x00004000)
+                    .WithReservedBits(0, 2)
+                    .WithValueField(2, 30, name: "CONVRAMADDR")
+                },
+                {(long)FrameControllerRegisters.TrailingTxDataControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "TRAILTXDATA")
+                    .WithValueField(8, 3, name: "TRAILTXDATACNT")
+                    .WithFlag(11, name: "TRAILTXDATAFORCE")
+                    .WithValueField(12, 10, name: "TRAILTXREPLEN")
+                    .WithFlag(22, name: "TXSUPPLENOVERIDE")
+                    .WithFlag(23, name: "POSTAMBLEEN")
+                    .WithReservedBits(24, 8)
+                },
+                {(long)FrameControllerRegisters.SubFrameCounterValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "SCNT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.ConvolutionalCoderGeneratorPolynomials, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, name: "GENERATOR0")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 7, name: "GENERATOR1")
+                    .WithReservedBits(15, 1)
+                    .WithFlag(16, name: "RECURSIVE")
+                    .WithFlag(17, name: "NONSYSTEMATIC")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)FrameControllerRegisters.PuncturingControl, new DoubleWordRegister(this, 0x00000101)
+                    .WithValueField(0, 7, name: "PUNCT0")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 7, name: "PUNCT1")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)FrameControllerRegisters.PauseControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "FRAMEDETPAUSEEN")
+                    .WithFlag(1, name: "TXINTERLEAVEWRITEPAUSEEN")
+                    .WithFlag(2, name: "RXINTERLEAVEWRITEPAUSEEN")
+                    .WithFlag(3, name: "INTERLEAVEREADPAUSEEN")
+                    .WithFlag(4, name: "TXSUBFRAMEPAUSEEN")
+                    .WithFlag(5, name: "RXWCNTMATCHPAUSEEN")
+                    .WithReservedBits(6, 5)
+                    .WithValueField(11, 6, name: "CONVPAUSECNT")
+                    .WithValueField(17, 5, name: "INTERLEAVEWRITEPAUSECNT")
+                    .WithValueField(22, 5, name: "INTERLEAVEREADPAUSECNT")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)FrameControllerRegisters.OverTheAirNumberOfBitsCounter, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, name: "OTARXCNT")
+                    .WithValueField(16, 16, FieldMode.Read, name: "OTATXCNT")
+                },
+                {(long)FrameControllerRegisters.BufferControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "TXBUFFERMODE")
+                    .WithValueField(1, 2, name: "RXBUFFERMODE")
+                    .WithFlag(3, name: "RXFRCBUFMUX")
+                    .WithReservedBits(4, 28)
+                },
+                {(long)FrameControllerRegisters.RxPauseData, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, FieldMode.Read, name: "PAUSEDATA")
+                },
+                {(long)FrameControllerRegisters.MostLikelyConvolutionalDecoderState, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, FieldMode.Read, name: "LIKELYCONVSTATE")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENTNEXT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverWritePointer, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "INTWRITEPOINT")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)FrameControllerRegisters.InterleaverReadPointer, new DoubleWordRegister(this)
+                    .WithValueField(0, 5, name: "INTREADPOINT")
+                    .WithReservedBits(5, 27)
+                },
+                {(long)FrameControllerRegisters.AutomaticClockGating, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "AUTOCGEN")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)FrameControllerRegisters.AutomaticClockGatingClockStop, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "FORCEOFF")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)FrameControllerRegisters.WordCounterCompare3, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "SUPPLENFIELDLOC")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)FrameControllerRegisters.BitOfInterestControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "BOIEN")
+                    .WithValueField(1, 12, name: "BOIFIELDLOC")
+                    .WithValueField(13, 3, name: "BOIBITPOS")
+                    .WithFlag(16, name: "BOIMATCHVAL")
+                    .WithReservedBits(17, 15)
+                },
+                {(long)FrameControllerRegisters.DynamicSuppLengthControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 3, name: "DSLMODE")
+                    .WithFlag(3, name: "DSLBITORDER")
+                    .WithValueField(4, 3, name: "DSLSHIFT")
+                    .WithReservedBits(7, 1)
+                    .WithValueField(8, 8, name: "DSLOFFSET")
+                    .WithValueField(16, 4, name: "DSLBITS")
+                    .WithValueField(20, 4, name: "DSLMINLENGTH")
+                    .WithValueField(24, 3, name: "RXSUPRECEPMODE")
+                    .WithFlag(27, name: "STORESUP")
+                    .WithValueField(28, 3, name: "SUPSHFFACTOR")
+                    .WithReservedBits(31, 1)
+                },
+                {(long)FrameControllerRegisters.WordCounterCompare4, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "SUPPLENGTH")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)FrameControllerRegisters.WordCounterCompare5, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "RXPAUSELOC")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue0, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue1, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue2, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue3, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue4, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue5, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue6, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue7, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue8, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue9, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue10, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue11, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue12, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue13, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue14, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.InterleaverElementValue15, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, FieldMode.Read, name: "INTELEMENT")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)FrameControllerRegisters.AhbConfiguration, new DoubleWordRegister(this, 0x00000001)
+                    .WithFlag(0, name: "AHBHPROTBUFFERABLE")
+                    .WithReservedBits(1, 31)
+                },
             };
 
             var startOffset = (long)FrameControllerRegisters.FrameControlDescriptor0;
@@ -3151,7 +6102,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 var i = index;
 
                 registerDictionary.Add(startOffset + blockSize * i,
-                    new DoubleWordRegister(this)
+                    new DoubleWordRegister(this, 0x000000FF)
                         .WithValueField(0, 8, out FRC_frameDescriptor[i].WordsField, name: "WORDS")
                         .WithValueField(8, 2, out FRC_frameDescriptor[i].BufferField, name: "BUFFER")
                         .WithFlag(10, out FRC_frameDescriptor[i].IncludeCrc, name: "INCLUDECRC")
@@ -3206,7 +6157,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithReservedBits(4, 28)
                     .WithChangeCallback((_, __) => UpdateInterrupts())
                 },
-                {(long)HostMailboxRegisters.InterruptEnable, new DoubleWordRegister(this)
+                {(long)RadioMailboxRegisters.InterruptEnable, new DoubleWordRegister(this)
                     .WithFlag(0, out RFMAILBOX_messageInterruptEnable[0], name: "MBOXIEN0")
                     .WithFlag(1, out RFMAILBOX_messageInterruptEnable[1], name: "MBOXIEN1")
                     .WithFlag(2, out RFMAILBOX_messageInterruptEnable[2], name: "MBOXIEN2")
@@ -3223,7 +6174,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
-                {(long)CyclicRedundancyCheckRegisters.Control, new DoubleWordRegister(this)
+                {(long)CyclicRedundancyCheckRegisters.IpVersion, new DoubleWordRegister(this, 0x00000000)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
+                {(long)CyclicRedundancyCheckRegisters.Enable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)CyclicRedundancyCheckRegisters.Control, new DoubleWordRegister(this, 0x00000704)
                     .WithFlag(0, name: "INPUTINV")
                     .WithFlag(1, name: "OUTPUTINV")
                     .WithEnumField<DoubleWordRegister, CRC_CrcWidthMode>(2, 2, out CRC_crcWidthMode, name: "CRCWIDTH")
@@ -3235,6 +6193,27 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     .WithFlag(12, name: "PADCRCINPUT")
                     .WithReservedBits(13, 19)
                 },
+                {(long)CyclicRedundancyCheckRegisters.Status, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "BUSY")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)CyclicRedundancyCheckRegisters.Command, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "INITIALIZE")
+                    .WithReservedBits(1, 31)
+                },
+                {(long)CyclicRedundancyCheckRegisters.InputData, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, name: "INPUTDATA")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)CyclicRedundancyCheckRegisters.InitializationValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "INIT")
+                },
+                {(long)CyclicRedundancyCheckRegisters.Data, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, FieldMode.Read, name: "DATA")
+                },
+                {(long)CyclicRedundancyCheckRegisters.PolynomialValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, name: "POLY")
+                },
             };
 
             return new DoubleWordRegisterCollection(this, registerDictionary);
@@ -3244,6 +6223,13 @@ namespace Antmicro.Renode.Peripherals.Wireless
         {
             var registerDictionary = new Dictionary<long, DoubleWordRegister>
             {
+                {(long)SynthesizerRegisters.IpVersion, new DoubleWordRegister(this, 0x00000002)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
+                {(long)SynthesizerRegisters.Enable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "EN")
+                    .WithReservedBits(1, 31)
+                },
                 {(long)SynthesizerRegisters.Frequency, new DoubleWordRegister(this)
                     .WithValueField(0, 28, out SYNTH_frequency, writeCallback: (_, __) => TryAcquireOnAirFrames(), name: "FREQ")
                     .WithReservedBits(28, 4)
@@ -3257,6 +6243,275 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {(long)SynthesizerRegisters.ChannelSpacing, new DoubleWordRegister(this)
                     .WithValueField(0, 16, out SYNTH_channelSpacing, name: "CHSP")
                     .WithReservedBits(16, 15)
+                },
+                {(long)SynthesizerRegisters.Status, new DoubleWordRegister(this)
+                    .WithFlag(0, FieldMode.Read, name: "INLOCK")
+                    .WithFlag(1, FieldMode.Read, name: "IFFREQEN")
+                    .WithFlag(2, FieldMode.Read, name: "SYNTHREADY")
+                    .WithReservedBits(3, 5)
+                    .WithFlag(8, FieldMode.Read, name: "CAPCALRUNNING")
+                    .WithFlag(9, FieldMode.Read, name: "CAPCALBITRESULT")
+                    .WithFlag(10, FieldMode.Read, name: "CAPCALFULLWAIT")
+                    .WithReservedBits(11, 3)
+                    .WithFlag(14, FieldMode.Read, name: "CAPCALERROR")
+                    .WithReservedBits(15, 1)
+                    .WithFlag(16, FieldMode.Read, name: "VCOFREQACTIVE")
+                    .WithReservedBits(17, 9)
+                    .WithFlag(26, FieldMode.Read, name: "CHPALLOWTRISTATE")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)SynthesizerRegisters.Command, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "SYNTHSTART")
+                    .WithFlag(1, name: "SYNTHSTOP")
+                    .WithFlag(2, name: "ENABLEIF")
+                    .WithFlag(3, name: "DISABLEIF")
+                    .WithFlag(4, name: "CAPCALSTART")
+                    .WithReservedBits(5, 4)
+                    .WithFlag(9, name: "VCOADDCAP")
+                    .WithFlag(10, name: "VCOSUBCAP")
+                    .WithReservedBits(11, 21)
+                },
+                {(long)SynthesizerRegisters.Control, new DoubleWordRegister(this, 0x00000003)
+                    .WithValueField(0, 3, name: "LOCKTHRESHOLD")
+                    .WithReservedBits(3, 13)
+                    .WithValueField(16, 3, name: "PRSMUX0")
+                    .WithReservedBits(19, 1)
+                    .WithValueField(20, 3, name: "PRSMUX1")
+                    .WithFlag(23, name: "DISCLKSYNTH")
+                    .WithFlag(24, name: "INVCLKSYNTH")
+                    .WithReservedBits(25, 2)
+                    .WithFlag(27, name: "TRISTATEPOSTPONE")
+                    .WithFlag(28, name: "INTEGERMODE")
+                    .WithReservedBits(29, 1)
+                    .WithFlag(30, name: "MMDRSTNOVERRIDEEN")
+                    .WithFlag(31, name: "MMDMANRSTN")
+                },
+                {(long)SynthesizerRegisters.CalibrationControl, new DoubleWordRegister(this, 0x00002801)
+                    .WithValueField(0, 4, name: "NUMCYCLES")
+                    .WithFlag(4, name: "CAPCALSIDE")
+                    .WithFlag(5, name: "CAPCALENDMODE")
+                    .WithValueField(6, 2, name: "CAPCALCYCLEWAIT")
+                    .WithFlag(8, name: "CAPCALWAITMODE")
+                    .WithFlag(9, name: "CAPCALSINGLESTEP")
+                    .WithValueField(10, 5, name: "STARTUPTIMING")
+                    .WithReservedBits(15, 9)
+                    .WithFlag(24, name: "SYNTHOVERRIDEEN")
+                    .WithFlag(25, name: "CLKLOADDENOMVAL")
+                    .WithFlag(26, name: "PRESCALERRESETVAL")
+                    .WithFlag(27, name: "COUNTERRESETVAL")
+                    .WithReservedBits(28, 4)
+                },
+                {(long)SynthesizerRegisters.VCDACControl, new DoubleWordRegister(this, 0x00000020)
+                    .WithValueField(0, 6, name: "VCDACVAL")
+                    .WithFlag(6, name: "VCDACEN")
+                    .WithFlag(7, name: "LPFEN")
+                    .WithFlag(8, name: "LPFQSEN")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)SynthesizerRegisters.IntermediateFrequency, new DoubleWordRegister(this)
+                    .WithValueField(0, 20, name: "IFFREQ")
+                    .WithFlag(20, name: "LOSIDE")
+                    .WithReservedBits(21, 11)
+                },
+                {(long)SynthesizerRegisters.ChannelControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 6, name: "CHNO")
+                    .WithReservedBits(6, 26)
+                },
+                {(long)SynthesizerRegisters.CalibrationOffset, new DoubleWordRegister(this)
+                    .WithValueField(0, 15, name: "CALOFFSET")
+                    .WithReservedBits(15, 17)
+                },
+                {(long)SynthesizerRegisters.VoltageControlledOscillatorFrequencyTuning, new DoubleWordRegister(this, 0x00008400)
+                    .WithValueField(0, 11, name: "VCOTUNING")
+                    .WithValueField(11, 5, name: "VCAPSEL")
+                    .WithReservedBits(16, 16)
+                },
+                {(long)SynthesizerRegisters.VoltageControlledOscillatorFrequencyRangeControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 2, name: "MODE")
+                    .WithFlag(2, name: "SWITCHMODE")
+                    .WithValueField(3, 3, name: "HIGHTHRESH")
+                    .WithValueField(6, 3, name: "LOWTHRESH")
+                    .WithFlag(9, name: "OVERRIDEEN")
+                    .WithFlag(10, name: "DATA")
+                    .WithFlag(11, name: "LOAD")
+                    .WithFlag(12, name: "RAMPEN")
+                    .WithFlag(13, name: "CMPENABLE")
+                    .WithFlag(14, name: "CMPRESET")
+                    .WithValueField(15, 3, name: "RAMPRATE")
+                    .WithFlag(18, name: "THROUGH")
+                    .WithFlag(19, name: "INVCOMPDIR")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)SynthesizerRegisters.VoltageControlledOscillatorGainCalibration, new DoubleWordRegister(this, 0x00000077)
+                    .WithValueField(0, 4, name: "VCOKVCOARSE")
+                    .WithValueField(4, 4, name: "VCOKVFINE")
+                    .WithReservedBits(8, 24)
+                },
+                {(long)SynthesizerRegisters.ChargePumpDigitalToAnalogConverterControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 8, name: "CHPDACVAL")
+                    .WithFlag(8, name: "OVERRIDE")
+                    .WithReservedBits(9, 23)
+                },
+                {(long)SynthesizerRegisters.CapacitorArrayCalibrationCycleCount, new DoubleWordRegister(this)
+                    .WithValueField(0, 10, FieldMode.Read, name: "CAPCALCYCLECNT")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)SynthesizerRegisters.VoltageControlledOscillatorForceCalibrationCycleCount, new DoubleWordRegister(this, 0x01FF0FFF)
+                    .WithValueField(0, 14, name: "TIMEOUTCOUNTMAX")
+                    .WithReservedBits(14, 2)
+                    .WithValueField(16, 14, name: "TIMEOUTCOUNTRESTART")
+                    .WithReservedBits(30, 2)
+                },
+                {(long)SynthesizerRegisters.InterruptFlags, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "LOCKED")
+                    .WithFlag(1, name: "UNLOCKED")
+                    .WithFlag(2, name: "SYRDY")
+                    .WithReservedBits(3, 1)
+                    .WithFlag(4, name: "VCOHIGH")
+                    .WithFlag(5, name: "VCOLOW")
+                    .WithReservedBits(6, 3)
+                    .WithFlag(9, name: "LOCNTDONE")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)SynthesizerRegisters.InterruptEnable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "LOCKED")
+                    .WithFlag(1, name: "UNLOCKED")
+                    .WithFlag(2, name: "SYRDY")
+                    .WithReservedBits(3, 1)
+                    .WithFlag(4, name: "VCOHIGH")
+                    .WithFlag(5, name: "VCOLOW")
+                    .WithReservedBits(6, 3)
+                    .WithFlag(9, name: "LOCNTDONE")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)SynthesizerRegisters.LoCounterControl, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "ENABLE")
+                    .WithFlag(1, name: "CLEAR")
+                    .WithFlag(2, name: "RUN")
+                    .WithFlag(3, name: "READ")
+                    .WithValueField(4, 4, name: "NUMCYCLE")
+                    .WithFlag(8, name: "LOCNTOVERRIDEEN")
+                    .WithFlag(9, name: "LOCNTMANCLEAR")
+                    .WithFlag(10, name: "LOCNTMANRUN")
+                    .WithFlag(11, name: "FCALRUNCLKEN")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)SynthesizerRegisters.LoCounterStatus, new DoubleWordRegister(this)
+                    .WithValueField(0, 19, FieldMode.Read, name: "LOCOUNT")
+                    .WithFlag(19, FieldMode.Read, name: "BUSY")
+                    .WithReservedBits(20, 12)
+                },
+                {(long)SynthesizerRegisters.LoCounterTargetValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 19, FieldMode.Read, name: "TARGET")
+                    .WithReservedBits(19, 13)
+                },
+                {(long)SynthesizerRegisters.MmdDenominatorInitialValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 9, name: "DENOMINIT0")
+                    .WithValueField(9, 9, name: "DENOMINIT1")
+                    .WithValueField(18, 9, name: "DENOMINIT2")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)SynthesizerRegisters.ChargePumpDigitalToAnalogConverterInitialValue, new DoubleWordRegister(this)
+                    .WithValueField(0, 12, name: "DACINIT")
+                    .WithReservedBits(12, 20)
+                },
+                {(long)SynthesizerRegisters.LowPassFilterCalModeControl, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "OP1BWCAL")
+                    .WithValueField(4, 4, name: "OP1COMPCAL")
+                    .WithValueField(8, 3, name: "RFBVALCAL")
+                    .WithValueField(11, 3, name: "RPVALCAL")
+                    .WithValueField(14, 4, name: "RZVALCAL")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)SynthesizerRegisters.LowPassFilterRxModeControl1, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "OP1BWRX")
+                    .WithValueField(4, 4, name: "OP1COMPRX")
+                    .WithValueField(8, 3, name: "RFBVALRX")
+                    .WithValueField(11, 3, name: "RPVALRX")
+                    .WithValueField(14, 4, name: "RZVALRX")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)SynthesizerRegisters.LowPassFilterTxModeControl1, new DoubleWordRegister(this)
+                    .WithValueField(0, 4, name: "OP1BWTX")
+                    .WithValueField(4, 4, name: "OP1COMPTX")
+                    .WithValueField(8, 3, name: "RFBVALTX")
+                    .WithValueField(11, 3, name: "RPVALTX")
+                    .WithValueField(14, 4, name: "RZVALTX")
+                    .WithReservedBits(18, 14)
+                },
+                {(long)SynthesizerRegisters.LowPassFilterRxModeControl2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "LPFSWENRX")
+                    .WithValueField(1, 2, name: "LPFINCAPRX")
+                    .WithFlag(3, name: "LPFGNDSWENRX")
+                    .WithValueField(4, 5, name: "CALCRX")
+                    .WithFlag(9, name: "CASELRX")
+                    .WithValueField(10, 5, name: "CAVALRX")
+                    .WithFlag(15, name: "CFBSELRX")
+                    .WithFlag(16, name: "CZSELRX")
+                    .WithValueField(17, 8, name: "CZVALRX")
+                    .WithFlag(25, name: "MODESELRX")
+                    .WithValueField(26, 3, name: "VCMLVLRX")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)SynthesizerRegisters.LowPassFilterTxModeControl2, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "LPFSWENTX")
+                    .WithValueField(1, 2, name: "LPFINCAPTX")
+                    .WithFlag(3, name: "LPFGNDSWENTX")
+                    .WithValueField(4, 5, name: "CALCTX")
+                    .WithFlag(9, name: "CASELTX")
+                    .WithValueField(10, 5, name: "CAVALTX")
+                    .WithFlag(15, name: "CFBSELTX")
+                    .WithFlag(16, name: "CZSELTX")
+                    .WithValueField(17, 8, name: "CZVALTX")
+                    .WithFlag(25, name: "MODESELTX")
+                    .WithValueField(26, 3, name: "VCMLVLTX")
+                    .WithReservedBits(29, 3)
+                },
+                {(long)SynthesizerRegisters.DsmRxModeControl, new DoubleWordRegister(this, 0x00000013)
+                    .WithFlag(0, name: "DITHERDSMINPUTRX")
+                    .WithValueField(1, 3, name: "DITHERDSMOUTPUTRX")
+                    .WithValueField(4, 4, name: "DITHERDACRX")
+                    .WithFlag(8, name: "DSMMODERX")
+                    .WithFlag(9, name: "LSBFORCERX")
+                    .WithReservedBits(10, 14)
+                    .WithFlag(24, name: "DEMMODERX")
+                    .WithFlag(25, name: "MASHORDERRX")
+                    .WithFlag(26, name: "REQORDERRX")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)SynthesizerRegisters.DsmTxModeControl, new DoubleWordRegister(this, 0x00000013)
+                    .WithFlag(0, name: "DITHERDSMINPUTTX")
+                    .WithValueField(1, 3, name: "DITHERDSMOUTPUTTX")
+                    .WithValueField(4, 4, name: "DITHERDACTX")
+                    .WithFlag(8, name: "DSMMODETX")
+                    .WithFlag(9, name: "LSBFORCETX")
+                    .WithReservedBits(10, 14)
+                    .WithFlag(24, name: "DEMMODETX")
+                    .WithFlag(25, name: "MASHORDERTX")
+                    .WithFlag(26, name: "REQORDERTX")
+                    .WithReservedBits(27, 5)
+                },
+                {(long)SynthesizerRegisters.SequencerInterruptFlags, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "LOCKED")
+                    .WithFlag(1, name: "UNLOCKED")
+                    .WithFlag(2, name: "SYRDY")
+                    .WithReservedBits(3, 1)
+                    .WithFlag(4, name: "VCOHIGH")
+                    .WithFlag(5, name: "VCOLOW")
+                    .WithReservedBits(6, 3)
+                    .WithFlag(9, name: "LOCNTDONE")
+                    .WithReservedBits(10, 22)
+                },
+                {(long)SynthesizerRegisters.SequencerInterruptEnable, new DoubleWordRegister(this)
+                    .WithFlag(0, name: "LOCKED")
+                    .WithFlag(1, name: "UNLOCKED")
+                    .WithFlag(2, name: "SYRDY")
+                    .WithReservedBits(3, 1)
+                    .WithFlag(4, name: "VCOHIGH")
+                    .WithFlag(5, name: "VCOLOW")
+                    .WithReservedBits(6, 3)
+                    .WithFlag(9, name: "LOCNTDONE")
+                    .WithReservedBits(10, 22)
                 },
             };
 
@@ -3285,7 +6540,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private void TryReceiveFrame(byte[] frame, IRadio sender, bool rxStartedMidPacket, bool syncTime = true)
         {
-            TimeInterval txStartTime = InterferenceQueue.GetTxStartTime(sender);
+            var txStartTime = InterferenceQueue.GetTxStartTime(sender);
             if(txStartTime == TimeInterval.Empty)
             {
                 this.Log(LogBasicRadioActivityAsError ? LogLevel.Error : LogLevel.Info, "TryReceiveFrame() at {0} on channel {1} ({2}) ({3}): Dropping (TX was aborted)",
@@ -3384,9 +6639,9 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 }
             }
 
-            // We first schedule the RX timer to the point that the preamble and sych word are fully transmitted.
+            // We first schedule the RX timer to the point that the preamble and sync word are fully transmitted.
             // That must also include the txChainDelay since at the transmitter we don't delay the FrameTxStart event.
-            // The RX state is set before computing the delay so the coded airtime uses the sender's sub-rate
+            // The RX state is set here so that the payload airtime computed later uses the sender's sub-rate
             // (see MODEM_GetCodedSymbolsPerInfoBit's RX override).
             RAC_internalRxState = RAC_InternalRxState.PreambleAndSyncWord;
             MODEM_demodulatorState.Value = MODEM_DemodulatorState.FrameSearch;
@@ -4657,7 +7912,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         // software (or the sequencer) act on the corresponding frame boundary: the end of the frame, the arrival
         // of the length field, and the arrival of the address field -- the last one doubling as a "N bytes
         // received" trigger for software frame filtering when hardware address filtering is not used.
-        private void FRC_UpdateWordCounterCompareInterrupts(uint firstWordReached, uint lastWordReached)
+        private void FRC_UpdateWordCounterCompareInterrupts(uint firstWordReached, uint lastWordReached, bool includeFrameLengthCompares = true)
         {
             var compareValues = new uint[]
             {
@@ -4669,6 +7924,12 @@ namespace Antmicro.Renode.Peripherals.Wireless
             var raised = false;
             for(var channel = 0; channel < FRC_NumberOfWordCounterCompareChannels; ++channel)
             {
+                // WCNTCMP0 compares against FRAMELENGTH. A rejected length does not update that register,
+                // so the compare must not fire for a frame whose length was never accepted.
+                if(channel == 0 && !includeFrameLengthCompares)
+                {
+                    continue;
+                }
                 if(compareValues[channel] < firstWordReached || compareValues[channel] > lastWordReached)
                 {
                     continue;
@@ -4831,6 +8092,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
             // payload only (DFLOFFSET accounts for the PDU header, not the access address).
             FRC_ResolveLeadingTransmitFrameDescriptor();
 
+            FRC_frameOk = true;
+            FRC_frameLengthError = false;
             var descriptor = FRC_frameDescriptor[FRC_ActiveTransmitFrameDescriptor];
             var frameLength = 0u;
             var dynamicFrameLength = true;
@@ -4855,7 +8118,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return new byte[0];
             }
 
-            if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength))
+            if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength, receiving: false))
             {
                 this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.ToArray()));
                 return new byte[0];
@@ -4890,6 +8153,8 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 {
                     this.Log(LogLevel.Error, "Failed to assemble a frame, partial frame: {0}", BitConverter.ToString(frame.Concat(payload).ToArray()));
                     FRC_txUnderflowInterrupt.Value = true;
+                    FRC_seqTxUnderflowInterrupt.Value = true;
+                    FRC_frameOk = false;
                     return new byte[0];
                 }
                 frame = frame.Concat(payload);
@@ -4948,7 +8213,11 @@ namespace Antmicro.Renode.Peripherals.Wireless
             UpdateInterrupts();
         }
 
-        private bool FRC_TrySetFrameLength(uint frameLength)
+        // Decodes the dynamic frame length: the extracted field is shifted right by DFLSHIFT, masked to DFLBITS
+        // bits and then compensated by DFLOFFSET, a signed 4-bit two's complement value. The result must lie
+        // within [MINLENGTH, MAXLENGTH]; a negative result is always an error. An invalid length sets
+        // STATUS.FRAMELENGTHERROR and discards the frame: FRAMEERROR in RX, TXABORTED in TX.
+        private bool FRC_TrySetFrameLength(uint frameLength, bool receiving)
         {
             switch(FRC_dynamicFrameLengthMode.Value)
             {
@@ -4965,20 +8234,35 @@ namespace Antmicro.Renode.Peripherals.Wireless
             }
             frameLength >>= (byte)FRC_dynamicFrameLengthBitShift.Value;
             frameLength &= (1u << (byte)FRC_dynamicFrameLengthBits.Value) - 1;
-            // Signed 2's complement
-            int offset = (FRC_dynamicFrameLengthOffset.Value & 0x8) != 0
-                ? (int)(FRC_dynamicFrameLengthOffset.Value | unchecked((uint)~0xF))
-                : (int)FRC_dynamicFrameLengthOffset.Value;
-            frameLength += (uint)offset;
-            if(frameLength < FRC_minDecodedLength.Value || FRC_maxDecodedLength.Value < frameLength)
+
+            var offset = (int)FRC_dynamicFrameLengthOffset.Value;
+            if(offset >= 8)
             {
-                FRC_frameErrorInterrupt.Value = true;
-                FRC_seqFrameErrorInterrupt.Value = true;
+                offset -= 16;
+            }
+            var decodedLength = (long)frameLength + offset;
+
+            FRC_frameLengthError = decodedLength < 0
+                                   || decodedLength < (long)FRC_minDecodedLength.Value
+                                   || decodedLength > (long)FRC_maxDecodedLength.Value;
+            if(FRC_frameLengthError)
+            {
+                FRC_frameOk = false;
+                if(receiving)
+                {
+                    FRC_frameErrorInterrupt.Value = true;
+                    FRC_seqFrameErrorInterrupt.Value = true;
+                }
+                else
+                {
+                    FRC_txAbortedInterrupt.Value = true;
+                    FRC_seqTxAbortedInterrupt.Value = true;
+                }
                 UpdateInterrupts();
                 return false;
             }
 
-            FRC_frameLength.Value = frameLength;
+            FRC_frameLength.Value = (ulong)decodedLength;
             return true;
         }
 
@@ -5100,8 +8384,20 @@ namespace Antmicro.Renode.Peripherals.Wireless
             var endOffset = Math.Min(startOffset + numBytes, (uint)currentFrame.Length);
             var isFrameEnd = (endOffset >= (uint)currentFrame.Length);
 
+            if(!isFrameStart && FRC_rxFrameDiscarded)
+            {
+                // The rest of a discarded frame is still on air but never reaches the buffers.
+                currentFrameOffset = endOffset;
+                return;
+            }
+
             if(isFrameStart)
             {
+                // STATUS.FRAMEOK is set when a frame starts and cleared by any error in it.
+                FRC_frameOk = true;
+                FRC_frameLengthError = false;
+                FRC_rxFrameDiscarded = false;
+                FRC_crcErrorTolerated = false;
                 var frameLength = 0u;
                 switch(FRC_dynamicFrameLengthMode.Value)
                 {
@@ -5120,10 +8416,22 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     this.Log(LogLevel.Error, "Unimplemented DFL mode.");
                     return;
                 }
-                if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength))
+                if(dynamicFrameLength && !FRC_TrySetFrameLength(frameLength, receiving: true))
                 {
+                    // An invalid length discards the frame: FRAMEERROR is raised instead of RXDONE and none
+                    // of the frame is written to the buffers.
                     this.Log(LogLevel.Error, "DisassembleFrame FRAMEERROR");
-                    return; // FRAMEERROR
+                    // The length field had to arrive before it could be decoded, so WCNT has already run up to
+                    // its last word and the position compares on the way, WCNTCMP1 included, have fired.
+                    // FRAMELENGTH was not accepted, so the end-of-frame compare stays clear.
+                    var lengthFieldLastWord = (uint)FRC_lengthFieldLocation.Value
+                                              + ((FRC_dynamicFrameLengthMode.Value == FRC_DynamicFrameLengthMode.DualByteLSBFirst
+                                                  || FRC_dynamicFrameLengthMode.Value == FRC_DynamicFrameLengthMode.DualByteMSBFirst) ? 1u : 0u);
+                    FRC_wordCounter.Value = lengthFieldLastWord;
+                    FRC_UpdateWordCounterCompareInterrupts(0, lengthFieldLastWord, includeFrameLengthCompares: false);
+                    FRC_rxFrameDiscarded = true;
+                    currentFrameOffset = endOffset;
+                    return;
                 }
 
                 FRC_ResetWordCounter();
@@ -5432,7 +8740,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 // BUFC + the FRC capture buffer in fixed-size fragments (FRC_RxFragmentLengthInBytes) spaced by
                 // their airtime, approximating the hardware delivering the frame byte-by-byte.
                 // The per-byte airtime is measured from the first payload byte: we don't include the preamble
-                // and sync word time since we already delayed for it in TryReceiveFrame(). We also account for
+                // and sync word time since we already delayed for them in TryReceiveFrame(). We also account for
                 // any extra quantum slack in currentFrameElapsedAirtimeUs).
                 RAC_UpdateRadioStateMachine(RAC_RadioStateMachineSignal.FrameDetected);
                 RAC_internalRxState = RAC_InternalRxState.Frame;
@@ -5521,8 +8829,26 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 // currentFrame also appends the RX trailer, now that the RxDone PROTIMER captures above have run.
                 FRC_DisassembleCurrentFrame(currentFrameOffset, (uint)currentFrame.Length - currentFrameOffset);
 
-                FRC_rxDoneInterrupt.Value = true;
-                FRC_seqRxDoneInterrupt.Value = true;
+                if(!FRC_rxFrameDiscarded)
+                {
+                    FRC_rxDoneInterrupt.Value = true;
+                    FRC_seqRxDoneInterrupt.Value = true;
+                }
+            }
+
+            // The failure outcome is applied last: FRC_DisassembleCurrentFrame is also the frame start when
+            // the frame was not delivered in chunks, and it rearms FRAMEOK for the new frame.
+            if(RAC_RxWillFail)
+            {
+                FRC_frameOk = false;
+                FRC_crcErrorTolerated = FRC_rxAcceptCrcErrors.Value && !FRC_rxFrameDiscarded;
+            }
+
+            // TXAFTERFRAMEPEND only survives a reception that completes successfully, CRC verification
+            // included, so a failed or discarded frame does not start the pending transmission.
+            if(RAC_RxWillFail || FRC_rxFrameDiscarded)
+            {
+                RAC_txAfterFramePending.Value = false;
             }
 
             UpdateInterrupts();
@@ -5688,15 +9014,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             });
         }
 
-        private void RAC_NoteSynthStartRequest(bool oldValue, bool newValue)
-        {
-            if(newValue && !oldValue && RAC_currentRadioState == RAC_RadioState.RxWarm)
-            {
-                SYNTH_startTime = GetTime();
-                SYNTH_startValid = true;
-            }
-        }
-
         // The sequencer clears STATERXWARMIF when its own waits finish. The
         // LO-counter calibration it polls between SYNTHSTARTREQ and that
         // clear is unmodeled, so the clear comes well before the RX front
@@ -5749,18 +9066,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             Emu?.SetEm1pHostClockRequest(this, RAC_Em1pHostClockRequest);
         }
 
-        // The sequencer requests EM1P in hardware unless it is in WFI with the radio state machine idle.
-        private bool RAC_Em1pHardwareRequest => (!sequencer.CpuWaitSignal.IsSet && !RAC_sequencerInWfi)
-                                                || RAC_currentRadioState != RAC_RadioState.Off;
-
-        private bool RAC_Em1pRequest => (RAC_em1pRadioSwControl.Value && !RAC_em1pRadioDisableSwRequest.Value)
-                                        || RAC_Em1pHardwareRequest;
-
-        // MCUEM1PMODE mirrors the radio request: software control with the disable bit clear
-        // forces the host clock domain on in EM1P. Hardware requestors (FRC, EUSART, ADC, VDAC)
-        // are not modeled, so hardware control leaves those clocks gated.
-        private bool RAC_Em1pHostClockRequest => RAC_em1pMcuSwControl.Value && !RAC_em1pMcuDisableSwRequest.Value;
-
         // CPUWAITDIS releases the core at the vector table in sequencer RAM. The same path restarts
         // it after EM2, once software sets the bit again.
         private void RAC_ReleaseSequencer()
@@ -5783,10 +9088,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
             this.Log(LogLevel.Noisy, "Sequencer resumed, isHalted={0} VTOR={1:X} SP={2:X} PC={3:X} CPUWAIT={4}.", sequencer.IsHalted, sequencer.VectorTableOffset, sequencer.SP, sequencer.PC, sequencer.CpuWaitSignal.IsSet);
         }
 
-        // EM2 retains PD1 but resets its non-retained flops, and the radio is inactive. The core
-        // stays in CPUWAIT afterwards, until software sets CPUWAITDIS. The enter hook runs on the
-        // sequencer thread, where a core cannot be reset, so the reset runs at the next synced
-        // state, when no CPU is executing.
+        // EM2 powers PD1 down: its retained state survives, but non-retained flops are reset and the radio
+        // is inactive. The core stays in CPUWAIT afterwards, until software sets CPUWAITDIS. The enter hook
+        // can run on a CPU thread (the host's or the sequencer's), where a core cannot be reset, so the
+        // reset runs at the next synced state, when no CPU is executing.
         private void RAC_PowerDownSequencer()
         {
             if(sequencer.CpuWaitSignal.IsSet)
@@ -6124,6 +9429,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
                     {
                         if(signal == RAC_RadioStateMachineSignal.TxDisable)
                         {
+                            // The FRC reports a TX stopped by the TXDIS command as aborted.
+                            FRC_txAbortedInterrupt.Value = true;
+                            FRC_seqTxAbortedInterrupt.Value = true;
+                            FRC_frameOk = false;
                             RAC_ClearOngoingTx();
 
                             if(RAC_RxEnable)
@@ -6586,18 +9895,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
 
         private sbyte AGC_RssiIntegerPartAdjusted => (sbyte)(AGC_RssiIntegerPart + AGC_RssiWrapCompensationOffsetDbm);
 
-        private sbyte AGC_RssiIntegerPart
-        {
-            get
-            {
-                return AGC_rssiIntegerPart;
-            }
-
-            set
-            {
-                AGC_rssiIntegerPart = value;
-            }
-        }
+        private sbyte AGC_RssiIntegerPart { get; set; }
 
         private byte AGC_RssiFractionalPart
         {
@@ -6703,6 +10001,20 @@ namespace Antmicro.Renode.Peripherals.Wireless
                 return emu;
             }
         }
+
+        // The sequencer requests EM1P in hardware unless it is halted (CPUWAIT) or in WFI, with the radio state machine off.
+        private bool RAC_Em1pHardwareRequest => (!sequencer.CpuWaitSignal.IsSet && !RAC_sequencerInWfi)
+                                                || RAC_currentRadioState != RAC_RadioState.Off;
+
+        private bool RAC_Em1pRequest => (RAC_em1pRadioSwControl.Value && !RAC_em1pRadioDisableSwRequest.Value)
+                                        || RAC_Em1pHardwareRequest;
+
+        // MCUEM1PMODE in software control with the disable bit clear forces the host clock domain on
+        // in EM1P. The RAC hardware requestors (FRC, ADC, VDAC) are not modeled, so hardware control
+        // leaves those clocks gated; the EM2-capable EUSART raises its own host-clock request.
+        private bool RAC_Em1pHostClockRequest => RAC_em1pMcuSwControl.Value && !RAC_em1pMcuDisableSwRequest.Value;
+
+        private bool RAC_RxWillFail => RAC_rxFailReason != RAC_RxFailReason.None;
 
         private byte[] currentFrame;
         private IRadio currentFrameSender;
@@ -6889,7 +10201,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField AGC_rssiDoneInterruptEnable;
         private IFlagRegisterField AGC_ccaInterruptEnable;
         private IFlagRegisterField AGC_seqRssiHighInterrupt;
-        private sbyte AGC_rssiIntegerPart;
         private bool AGC_rssiStartCommandFromProtimer = false;
         private bool AGC_rssiStartCommandOngoing = false;
         private bool AGC_rssiFirstRead = true;
@@ -6959,6 +10270,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private bool FRC_rxFrameIrqClearedPending = false;
         private bool FRC_rxDonePending = false;
         private bool FRC_rxAbortInProgress = false;
+        private bool FRC_frameOk = false;
+        private bool FRC_frameLengthError = false;
+        private bool FRC_rxFrameDiscarded = false;
+        private bool FRC_crcErrorTolerated = false;
         private IValueRegisterField FRC_initialDecodedFrameLength;
         private IValueRegisterField FRC_wordCounter;
         private IValueRegisterField FRC_frameLength;
@@ -6973,6 +10288,10 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IFlagRegisterField FRC_rxAppendProtimerCc0HighWrap;
         private IFlagRegisterField FRC_rxAppendProtimerCc0LowWrap;
         private IFlagRegisterField FRC_txUnderflowInterrupt;
+        private IFlagRegisterField FRC_txAbortedInterrupt;
+        private IFlagRegisterField FRC_txAbortedInterruptEnable;
+        private IFlagRegisterField FRC_seqTxAbortedInterrupt;
+        private IFlagRegisterField FRC_seqTxAbortedInterruptEnable;
         private IFlagRegisterField FRC_rxAppendProtimerCc0base;
         private IFlagRegisterField FRC_rxAppendRssi;
         private IFlagRegisterField FRC_rxBufferRestoreOnRxAborted;
@@ -7042,7 +10361,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private RAC_RadioState RAC_currentRadioState = RAC_RadioState.Off;
         private RAC_RxFailReason RAC_rxFailReason = RAC_RxFailReason.None;
 
-        private bool RAC_RxWillFail => RAC_rxFailReason != RAC_RxFailReason.None;
         private RAC_InternalRxState RAC_internalRxState = RAC_InternalRxState.Idle;
         private RAC_InternalTxState RAC_internalTxState = RAC_InternalTxState.Idle;
         private IFlagRegisterField FRC_ptiEmitSyncWord;
@@ -7065,7 +10383,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IValueRegisterField RAC_mainCoreSeqInterrupts;
         private bool RAC_paOutputLevelRamping = false;
         private IFlagRegisterField RAC_paRampingDone;
-        private IFlagRegisterField RAC_synthStartRequest;
         private IFlagRegisterField RAC_em1pRadioSwControl;
         private IFlagRegisterField RAC_em1pRadioDisableSwRequest;
         private IFlagRegisterField RAC_em1pMcuSwControl;
@@ -7081,14 +10398,14 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private IValueRegisterField SYNTH_frequency;
         private IEnumRegisterField<SYNTH_LoDivFreqCtrl> SYNTH_loDivFreqCtrl;
         private IValueRegisterField SYNTH_channelSpacing;
+        // Last value software wrote to the PROTIMER RANDOM register. While FIXEDBACKOFF is set this is
+        // frozen (writes are ignored) to mirror hardware.
+        private uint PROTIMER_fixedBackoffRandomValue = 1;
 
         private readonly Machine machine;
         private readonly MappedMemory ram;
         private readonly CortexM sequencer;
-        private static readonly PseudorandomNumberGenerator random = EmulationManager.Instance.CurrentEmulation.RandomGenerator;
-        // Last value software wrote to the PROTIMER RANDOM register. While FIXEDBACKOFF is set this is
-        // frozen (writes are ignored) to mirror hardware.
-        private uint PROTIMER_fixedBackoffRandomValue = 1;
+        private readonly PseudorandomNumberGenerator random;
         private readonly SiLabs_BUFC_4 bufferController;
         private readonly LimitTimer seqTimer;
         private readonly LimitTimer proTimer;
@@ -7116,7 +10433,7 @@ namespace Antmicro.Renode.Peripherals.Wireless
         private readonly IValueRegisterField[] HOSTMAILBOX_messagePointer = new IValueRegisterField[MailboxMessageNumber];
         private readonly PROTIMER_TimeoutCounter[] PROTIMER_timeoutCounter;
         private readonly PROTIMER_CaptureCompareChannel[] PROTIMER_captureCompareChannel;
-        private readonly byte[] FRC_packetBufferCapture;        
+        private readonly byte[] FRC_packetBufferCapture;
         private readonly FRC_FrameDescriptor[] FRC_frameDescriptor;
         private readonly IFlagRegisterField[] FRC_wordCounterCompareInterrupt = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
         private readonly IFlagRegisterField[] FRC_wordCounterCompareInterruptEnable = new IFlagRegisterField[FRC_NumberOfWordCounterCompareChannels];
@@ -10144,7 +13461,6 @@ namespace Antmicro.Renode.Peripherals.Wireless
             RadioFrequencyLock0_Tgl                                         = 0x37F8,
             RadioFrequencyLock1_Tgl                                         = 0x37FC,
         }
-
 
         [RegistersDescription("synth", "synth_ns")]
         private enum SynthesizerRegisters : long

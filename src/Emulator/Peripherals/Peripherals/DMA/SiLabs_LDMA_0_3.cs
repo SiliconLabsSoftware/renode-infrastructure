@@ -220,6 +220,9 @@ namespace Antmicro.Renode.Peripherals.DMA
         {
             var c =  new DoubleWordRegisterCollection(this, new Dictionary<long, DoubleWordRegister>
             {
+                {(long)LdmaRegisters.IPVERSION, new DoubleWordRegister(this, 0x00000000)
+                    .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION")
+                },
                 {(long)LdmaRegisters.CTRL, new DoubleWordRegister(this, 0x1E000000)
                     .WithReservedBits(0, 24)
                     .WithValueField(24, 5, name: "NUMFIXED")
@@ -342,6 +345,9 @@ namespace Antmicro.Renode.Peripherals.DMA
         {
             var c =  new DoubleWordRegisterCollection(this, new Dictionary<long, DoubleWordRegister>());
 
+            c.AddRegister((long)LdmaXbarRegisters.XBAR_IPVERSION, new DoubleWordRegister(this, 0x00000003)
+                .WithValueField(0, 32, FieldMode.Read, name: "IPVERSION"));
+
             var channelDelta = (uint)((long)LdmaXbarRegisters.XBAR_CH1_REQSEL - (long)LdmaXbarRegisters.XBAR_CH0_REQSEL);
             BindRegisters(LdmaXbarRegisters.XBAR_CH0_REQSEL, c, NumberOfChannels, i => channels[i].PeripheralRequestSelectRegister, channelDelta);
 
@@ -455,6 +461,8 @@ namespace Antmicro.Renode.Peripherals.DMA
             });
         }
 
+        private TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
+
         // True while a transfer has to wait for the Host EM1P clock domain.
         private bool HostClocksGated
         {
@@ -464,8 +472,6 @@ namespace Antmicro.Renode.Peripherals.DMA
                 return hostClocksGated;
             }
         }
-
-        private TimeInterval GetTime() => machine.LocalTimeSource.ElapsedVirtualTime;
 
         private byte syncTrigger;
         private bool inSyncNotification;
@@ -837,7 +843,7 @@ namespace Antmicro.Renode.Peripherals.DMA
                 if(Done)
                 {
                     pullTimer.Enabled = false;
-                    
+
                     // The channel drops out of CHSTATUS when the final descriptor completes without LINK.
                     if(!descriptor.Link)
                     {

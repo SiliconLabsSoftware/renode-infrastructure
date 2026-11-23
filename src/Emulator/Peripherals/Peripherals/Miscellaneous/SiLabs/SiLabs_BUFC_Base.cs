@@ -16,20 +16,26 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 {
     public abstract class SiLabs_BUFC_Base : SiLabsPeripheral
     {
-        public SiLabs_BUFC_Base(Machine machine, uint numberOfBuffers) : base(machine, false)
+        public SiLabs_BUFC_Base(Machine machine, uint numberOfBuffers, uint bufferAddressReset = 0) : base(machine, false)
         {
             this.numberOfBuffers = numberOfBuffers;
 
             buffer = new BUFC_Buffer[numberOfBuffers];
             for(var i = 0u; i < numberOfBuffers; ++i)
             {
-                buffer[i] = new BUFC_Buffer(this, machine, i);
+                buffer[i] = new BUFC_Buffer(this, machine, i, bufferAddressReset);
             }
 
             IRQ = new GPIO();
             SequencerIRQ = new GPIO();
 
             registersCollection = BuildRegistersCollection();
+        }
+
+        public override void Reset()
+        {
+            Array.ForEach(buffer, entry => entry.Reset());
+            base.Reset();
         }
 
         public uint Peek(uint bufferIndex, uint byteIndex)
@@ -106,7 +112,33 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         public GPIO SequencerIRQ { get; }
 
+        protected bool BusErrorInterrupt => field_26.Value && field_25.Value;
+
+        protected bool SeqBusErrorInterrupt => field_28.Value && field_27.Value;
+
+        protected DoubleWordRegister BuildEventRegister(string suffix)
+        {
+            var register = new DoubleWordRegister(this);
+            for(var i = 0; i < numberOfBuffers; i++)
+            {
+                var position = 8 * i;
+                register
+                    .WithFlag(position, name: $"BUF{i}OF{suffix}")
+                    .WithFlag(position + 1, name: $"BUF{i}UF{suffix}")
+                    .WithFlag(position + 2, name: $"BUF{i}THR{suffix}")
+                    .WithFlag(position + 3, name: $"BUF{i}CORR{suffix}")
+                    .WithFlag(position + 4, name: $"BUF{i}NWA{suffix}")
+                    .WithReservedBits(position + 5, i == numberOfBuffers - 1 ? 2 : 3);
+            }
+            return register.WithFlag(31, name: $"BUSERROR{suffix}");
+        }
+
         protected readonly BUFC_Buffer[] buffer;
+
+        protected IFlagRegisterField field_26;
+        protected IFlagRegisterField field_25;
+        protected IFlagRegisterField field_28;
+        protected IFlagRegisterField field_27;
 
         private void CheckBufferIndex(uint bufferIndex)
         {
@@ -138,31 +170,46 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
 
         protected class BUFC_Buffer
         {
-            public BUFC_Buffer(SiLabs_BUFC_Base parent, Machine machine, uint index)
+            public BUFC_Buffer(SiLabs_BUFC_Base parent, Machine machine, uint index, uint addressReset)
             {
                 this.parent = parent;
                 this.machine = machine;
                 this.index = index;
+                this.addressReset = addressReset;
+                Address = addressReset;
+            }
+
+            public void Reset()
+            {
+                Address = addressReset;
+                readOffset = 0;
+                writeOffset = 0;
+                busAccessFailed = false;
             }
 
             public uint Peek(uint index)
             {
                 var offset = (ulong)(Address + ((ReadOffset + index) % Size));
+                if(!TryReadBusByte(offset, out var value))
+                {
+                    return 0;
+                }
 
-                return machine.SystemBus.ReadByte(offset);
+                return value;
             }
 
             public bool TryReadBytes(uint length, out byte[] data)
             {
                 bool savedUnderflowValue = Field_23.Value;
                 Field_23.Value = false;
+                busAccessFailed = false;
                 bool retValue = true;
                 data = new byte[length];
                 var i = 0;
                 for(; i < data.Length; ++i)
                 {
                     var value = (byte)ReadData;
-                    if(Field_23.Value)
+                    if(Field_23.Value || busAccessFailed)
                     {
                         retValue = false;
                         break;
@@ -184,11 +231,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             {
                 bool savedOverflowValue = Field_6.Value;
                 Field_6.Value = false;
+                busAccessFailed = false;
                 bool retValue = true;
                 for(i = 0; i < data.Length; ++i)
                 {
                     WriteData = data[i];
-                    if(Field_6.Value)
+                    if(Field_6.Value || busAccessFailed)
                     {
                         retValue = false;
                         break;
@@ -205,6 +253,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             {
                 readOffset = 0;
                 writeOffset = 0;
+                Field_24.Value = 0;
                 UpdateThresholdFlag();
             }
 
@@ -240,24 +289,23 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 }
             }
 
-            public bool ReadReady => true;
+            public void UpdateCorruptFlag()
+            {
+                if(BytesNumber > Size)
+                {
+                    Field_2.Value = true;
+                    Field_8.Value = true;
+                    parent.UpdateInterrupts();
+                }
+            }
 
-            public bool Read32Ready => true;
+            public bool ReadReady => BytesNumber > 0;
+
+            public bool Read32Ready => BytesNumber >= 4 && IsWordAligned(ReadOffset);
 
             public uint Size => 64u << (int)Field_17.Value;
 
-            public uint Address
-            {
-                get
-                {
-                    return address;
-                }
-
-                set
-                {
-                    address = value;
-                }
-            }
+            public uint Address { get; set; }
 
             public uint ReadOffset
             {
@@ -269,6 +317,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 set
                 {
                     readOffset = value;
+                    UpdateCorruptFlag();
                     UpdateThresholdFlag();
                 }
             }
@@ -283,6 +332,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                 set
                 {
                     writeOffset = value;
+                    UpdateCorruptFlag();
                     UpdateThresholdFlag();
                 }
             }
@@ -300,7 +350,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     }
 
                     var offset = (ulong)(Address + (ReadOffset % Size));
-                    var value = machine.SystemBus.ReadByte(offset);
+                    if(!TryReadBusByte(offset, out var value))
+                    {
+                        return 0;
+                    }
                     var newOffset = (ReadOffset + 1) % (2 * Size);
                     ReadOffset = newOffset;
                     return value;
@@ -311,6 +364,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             {
                 get
                 {
+                    if(!CheckWordAligned(ReadOffset))
+                    {
+                        return 0;
+                    }
+
                     var offset = (ulong)(Address + (ReadOffset % Size));
                     uint value = 0;
 
@@ -319,15 +377,23 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                         Field_23.Value = true;
                         Field_16.Value = true;
                         var bytesRead = BytesNumber;
+                        if(bytesRead > 0 && !IsMapped(offset, bytesRead))
+                        {
+                            ReportBusError(offset);
+                            return 0;
+                        }
                         for(uint i = 0; i < bytesRead; i++)
                         {
                             value = value | ((uint)machine.SystemBus.ReadByte(offset + i) << 8 * (int)i);
                         }
                         parent.UpdateInterrupts();
                     }
+                    else if(!TryReadBusWord(offset, out value))
+                    {
+                        return 0;
+                    }
                     else
                     {
-                        value = machine.SystemBus.ReadDoubleWord(offset);
                         var newOffset = (ReadOffset + 4) % (2 * Size);
                         ReadOffset = newOffset;
                     }
@@ -349,7 +415,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     }
 
                     var offset = (ulong)(Address + (WriteOffset % Size));
-                    machine.SystemBus.WriteByte(offset, (byte)value);
+                    if(!TryWriteBusByte(offset, (byte)value))
+                    {
+                        return;
+                    }
                     var newOffset = (WriteOffset + 1) % (2 * Size);
                     WriteOffset = newOffset;
                 }
@@ -359,6 +428,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             {
                 set
                 {
+                    if(!CheckWordAligned(WriteOffset))
+                    {
+                        return;
+                    }
+
                     if(BytesNumber > Size - 4)
                     {
                         Field_6.Value = true;
@@ -368,7 +442,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     }
 
                     var offset = (ulong)(Address + (WriteOffset % Size));
-                    machine.SystemBus.WriteDoubleWord(offset, value);
+                    if(!TryWriteBusWord(offset, value))
+                    {
+                        return;
+                    }
                     var newOffset = (WriteOffset + 4) % (2 * Size);
                     WriteOffset = newOffset;
                 }
@@ -387,9 +464,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     }
 
                     var offset = (ulong)(Address + (WriteOffset % Size));
-                    var oldData = machine.SystemBus.ReadByte(offset);
+                    if(!TryReadBusByte(offset, out var oldData))
+                    {
+                        return;
+                    }
                     var newData = (byte)(oldData ^ (byte)value);
-                    machine.SystemBus.WriteByte(offset, newData);
+                    if(!TryWriteBusByte(offset, newData))
+                    {
+                        return;
+                    }
                     var newOffset = (WriteOffset + 1) % (2* Size);
                     WriteOffset = newOffset;
                 }
@@ -399,6 +482,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             {
                 set
                 {
+                    if(!CheckWordAligned(WriteOffset))
+                    {
+                        return;
+                    }
+
                     if(BytesNumber > (Size - 4))
                     {
                         Field_6.Value = true;
@@ -408,9 +496,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
                     }
 
                     var offset = (ulong)(Address + (WriteOffset % Size));
-                    var oldData = machine.SystemBus.ReadDoubleWord(offset);
+                    if(!TryReadBusWord(offset, out var oldData))
+                    {
+                        return;
+                    }
                     var newData = oldData ^ value;
-                    machine.SystemBus.WriteDoubleWord(offset, newData);
+                    if(!TryWriteBusWord(offset, newData))
+                    {
+                        return;
+                    }
                     var newOffset = (WriteOffset + 4) % (2 * Size);
                     WriteOffset = newOffset;
                 }
@@ -486,7 +580,88 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous.SiLabs
             public IValueRegisterField Field_24;
             public IEnumRegisterField<BUFC_ThresholdMode> Field_21;
             public IValueRegisterField Field_20;
-            private uint address;
+
+            private static bool IsWordAligned(uint offset) => offset % 4 == 0;
+
+            private bool IsMapped(ulong address, uint length)
+            {
+                var registration = machine.SystemBus.WhatIsAt(address);
+                return registration != null && registration.RegistrationPoint.Range.Contains(address + length - 1);
+            }
+
+            private void ReportBusError(ulong address)
+            {
+                busAccessFailed = true;
+                parent.field_26.Value = true;
+                parent.field_28.Value = true;
+                parent.UpdateInterrupts();
+            }
+
+            private bool TryReadBusByte(ulong address, out byte value)
+            {
+                if(!IsMapped(address, 1))
+                {
+                    ReportBusError(address);
+                    value = 0;
+                    return false;
+                }
+
+                value = machine.SystemBus.ReadByte(address);
+                return true;
+            }
+
+            private bool TryWriteBusByte(ulong address, byte value)
+            {
+                if(!IsMapped(address, 1))
+                {
+                    ReportBusError(address);
+                    return false;
+                }
+
+                machine.SystemBus.WriteByte(address, value);
+                return true;
+            }
+
+            private bool TryReadBusWord(ulong address, out uint value)
+            {
+                if(!IsMapped(address, 4))
+                {
+                    ReportBusError(address);
+                    value = 0;
+                    return false;
+                }
+
+                value = machine.SystemBus.ReadDoubleWord(address);
+                return true;
+            }
+
+            private bool TryWriteBusWord(ulong address, uint value)
+            {
+                if(!IsMapped(address, 4))
+                {
+                    ReportBusError(address);
+                    return false;
+                }
+
+                machine.SystemBus.WriteDoubleWord(address, value);
+                return true;
+            }
+
+            private bool CheckWordAligned(uint offset)
+            {
+                if(IsWordAligned(offset))
+                {
+                    return true;
+                }
+
+                Field_4.Value = true;
+                Field_10.Value = true;
+                parent.UpdateInterrupts();
+                return false;
+            }
+
+            private bool busAccessFailed;
+            private readonly uint addressReset;
             private uint readOffset;
             private uint writeOffset;
             private readonly SiLabs_BUFC_Base parent;

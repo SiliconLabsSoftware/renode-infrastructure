@@ -17,7 +17,7 @@ using Antmicro.Renode.Time;
 namespace Antmicro.Renode.Peripherals.UART
 {
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
-    public sealed class STM32F7_USART : UARTBase, IUARTWithBufferState, IDoubleWordPeripheral, IKnownSize
+    public sealed class STM32F7_USART : UARTBase, IUARTWithBufferState, IDoubleWordPeripheral, IKnownSize, ILINController
     {
         public STM32F7_USART(IMachine machine, uint frequency, bool lowPowerMode = false) : base(machine)
         {
@@ -64,8 +64,22 @@ namespace Antmicro.Renode.Peripherals.UART
             RegistersCollection.Write(offset, value);
         }
 
+        public void ReceiveLINBreak()
+        {
+            if(linModeEnable?.Value ?? false)
+            {
+                this.DebugLog("LIN Break received");
+                linBreakOccurred.Value = true;
+                UpdateInterrupt();
+            }
+            else
+            {
+                this.DebugLog("LIN Break received, but ignoring as USART is not in LIN mode");
+            }
+        }
+
         public override uint BaudRate =>
-            BaudRateMultiplier * frequency / Math.Max(1, BaudRateDivisor);
+            BaudRateMultiplier * (frequency / ClockDivider) / Math.Max(1, BaudRateDivisor);
 
         public override Bits StopBits
         {
@@ -127,7 +141,19 @@ namespace Antmicro.Renode.Peripherals.UART
             }
         }
 
+        // Simulated transmission delays causes emulation to be very slow running Zephyr, and breaks a few test
+        // So using them is opt-in for now
+        // Not reset on peripheral reset, as it is an emulation setting, not part of the peripheral state
+        public bool DisableTransmissionCompleteDelay { get; set; } = true;
+
+        // The actual USART only has a one character buffer (except on certain models), but some of our tests like the h7 suite can't keep up with the baudrate, leading to dropped characters
+        // New platforms should have it disabled, and it should eventually be removed as it is a hack.
+        // Not reset on peripheral reset, as it is an emulation setting, not part of the peripheral state
+        public bool EnableUnlimitedFifo { get; set; } = true;
+
         public event Action<BufferState> BufferStateChanged;
+
+        public event Action BroadcastLINBreak;
 
         protected override void CharWritten()
         {
@@ -207,14 +233,14 @@ namespace Antmicro.Renode.Peripherals.UART
                 .WithTag("ADD", 24, 8);
 
             var cr3 = Registers.ControlRegister3.Define(RegistersCollection)
-                .WithTaggedFlag("EIE", 0)
+                .WithFlag(0, out errorInterruptEnable, name: "EIE")
                 .WithTaggedFlag("HDSEL", 3)
                 .WithFlag(6, out receiveDmaEnabled, name: "DMAR")
                 .WithFlag(7, name: "DMAT")
                 .WithTaggedFlag("RTSE", 8)
                 .WithTaggedFlag("CTSE", 9)
                 .WithTaggedFlag("CTSIE", 10)
-                .WithTaggedFlag("OVRDIS", 12)
+                .WithFlag(12, out overrunDisable, name : "OVRDIS")
                 .WithTaggedFlag("DDRE", 13)
                 .WithTaggedFlag("DEM", 14)
                 .WithTaggedFlag("DEP", 15)
@@ -236,7 +262,13 @@ namespace Antmicro.Renode.Peripherals.UART
                 .WithReservedBits(lowPowerMode ? 20 : 16, lowPowerMode ? 12 : 16);
 
             var request = Registers.Request.Define(RegistersCollection)
-                .WithFlag(1, FieldMode.Write, name: "SBKRQ")
+                .WithFlag(1, FieldMode.Write, name: "SBKRQ", writeCallback: (_, val) =>
+                {
+                    if(val && linModeEnable.Value)
+                    {
+                        BroadcastLINBreak?.Invoke();
+                    }
+                })
                 .WithFlag(2, FieldMode.Write, name: "MMRQ")
                 .WithFlag(3, FieldMode.Write, writeCallback: (_, value) =>
                 {
@@ -251,11 +283,11 @@ namespace Antmicro.Renode.Peripherals.UART
                 .WithTaggedFlag("PE", 0)
                 .WithTaggedFlag("FE", 1)
                 .WithTaggedFlag("NF", 2)
-                .WithTaggedFlag("ORE", 3)
+                .WithFlag(3, out overrunOccured, FieldMode.Read, name: "ORE")
                 .WithTaggedFlag("IDLE", 4)
                 .WithFlag(5, FieldMode.Read, valueProviderCallback: _ => (Count != 0), name: "RXNE")
                 .WithFlag(6, out transferComplete, FieldMode.Read, name: "TC")
-                .WithFlag(7, FieldMode.Read, name: "TXE", valueProviderCallback: _ => true)
+                .WithFlag(7, out transmitDataRegisterEmpty, FieldMode.Read, name: "TXE")
                 .WithTaggedFlag("CTSIF", 9)
                 .WithTaggedFlag("CTS", 10)
                 .WithReservedBits(13, 1)
@@ -273,7 +305,8 @@ namespace Antmicro.Renode.Peripherals.UART
                 .WithTaggedFlag("PECF", 0)
                 .WithTaggedFlag("FECF", 1)
                 .WithTaggedFlag("NCF", 2)
-                .WithTaggedFlag("ORECF", 3)
+                .WithFlag(3, FieldMode.Read | FieldMode.WriteOneToClear, name: "ORECF",
+                    writeCallback: (_, val) => { if(val) overrunOccured.Value = false; })
                 .WithTaggedFlag("IDLECF", 4)
                 .WithReservedBits(5, 1)
                 // the TC flag is cleared by writing 1 to TCCF
@@ -297,6 +330,10 @@ namespace Antmicro.Renode.Peripherals.UART
                     // reading this register will intentionally return the last written value
                     writeCallback: (_, val) => HandleTransmitData((uint)val), name: "TDR")
                 .WithReservedBits(8, 24);
+
+            Registers.USARTPrescaler.Define(RegistersCollection)
+                .WithValueField(0, 4, out clockPrescaler, changeCallback: (_, _) => BaudRateChanged())
+                .WithReservedBits(4, 28);
 
             if(lowPowerMode)
             {
@@ -360,13 +397,12 @@ namespace Antmicro.Renode.Peripherals.UART
                     );
 
                 cr2
-                    .WithTaggedFlag("LBDL", 5)
-                    .WithTaggedFlag("LBDIE", 6)
+                    .WithFlag(6, out linBreakInterruptEnable, name: "LBDIE")
                     .WithTaggedFlag("LBCL", 8)
                     .WithTaggedFlag("CPHA", 9)
                     .WithTaggedFlag("CPOL", 10)
                     .WithTaggedFlag("CLKEN", 11)
-                    .WithTaggedFlag("LINEN", 14)
+                    .WithFlag(14, out linModeEnable, name: "LINEN")
                     .WithTaggedFlag("ABREN", 20)
                     .WithTag("ABRMOD", 21, 2)
                     .WithTaggedFlag("RTOEN", 23);
@@ -385,7 +421,7 @@ namespace Antmicro.Renode.Peripherals.UART
                     .WithTaggedFlag("TXFRQ", 5);
 
                 isr
-                    .WithTaggedFlag("LBDF", 8)
+                    .WithFlag(8, FieldMode.Read, valueProviderCallback: _ => linBreakInterruptEnable.Value && linBreakOccurred.Value, name: "LBDF")
                     .WithFlag(11, FieldMode.Read, valueProviderCallback: _ => receiverTimeoutInterruptEnable.Value && (receiverTimeoutOccurred?.Value ?? false), name: "RTOF")
                     .WithTaggedFlag("EOBF", 12)
                     .WithTaggedFlag("ABRE", 14)
@@ -394,7 +430,7 @@ namespace Antmicro.Renode.Peripherals.UART
 
                 icr
                     .WithTaggedFlag("TCBGTCF", 7)
-                    .WithTaggedFlag("LBDCF", 8)
+                    .WithFlag(8, out linBreakOccurred, FieldMode.WriteOneToClear, name: "LBDCF")
                     .WithFlag(11, out receiverTimeoutOccurred, FieldMode.WriteOneToClear, name: "RTOCF")
                     .WithTaggedFlag("EOBCF", 12)
                     .WithWriteCallback((_, __) => UpdateInterrupt());
@@ -405,9 +441,21 @@ namespace Antmicro.Renode.Peripherals.UART
         {
             if(transmitEnabled.Value && enabled.Value)
             {
-                base.TransmitCharacter((byte)value);
-                transferComplete.Value = true;
+                transmitDataRegisterEmpty.Value = false;
+                transferComplete.Value = false;
                 UpdateInterrupt();
+                base.TransmitCharacter((byte)value);
+                // Delay marking the transmission as done for 8 bit times
+                var delay_amount = DisableTransmissionCompleteDelay ? TimeInterval.Empty : this.GetActualTransmissionDuration(8);
+                var before_delay = machine.ElapsedVirtualTime;
+                Machine.ScheduleAction(delay_amount, (_) =>
+                {
+                    var after_delay = machine.ElapsedVirtualTime;
+                    this.DebugLog("Data transmission of 0x{2:X} done. Started {0}, ended {1}", before_delay.TimeElapsed, after_delay.TimeElapsed, value);
+                    transmitDataRegisterEmpty.Value = true;
+                    transferComplete.Value = true;
+                    UpdateInterrupt();
+                });
             }
             else
             {
@@ -433,7 +481,10 @@ namespace Antmicro.Renode.Peripherals.UART
             // This interrupt is expected to fire if there are not additional bits incoming after some specified time after last reception
             var receiverTimeoutInterrupt = (receiverTimeoutOccurred?.Value ?? false) && receiverTimeoutInterruptEnable.Value;
 
-            IRQ.Set(transmitRegisterEmptyInterrupt || transferCompleteInterrupt || readRegisterNotEmptyInterrupt || receiverTimeoutInterrupt);
+            var linBreakDetectedInterrupt = (linBreakOccurred?.Value ?? false) && linBreakInterruptEnable.Value;
+            var overrunOccuredInterrupt = overrunOccured.Value && (errorInterruptEnable.Value || readRegisterNotEmptyInterruptEnabled.Value);
+
+            IRQ.Set(transmitRegisterEmptyInterrupt || transferCompleteInterrupt || readRegisterNotEmptyInterrupt || receiverTimeoutInterrupt || linBreakDetectedInterrupt || overrunOccuredInterrupt);
         }
 
         private void ReportRxTimeout(CancellationToken ct)
@@ -477,6 +528,26 @@ namespace Antmicro.Renode.Peripherals.UART
                             }
                         }
 
+                        this.DebugLog("Inner Received character 0x{0:X}", value);
+
+                        // UARTBase has a unlimited FIFO, but the F7 UART only has one byte buffer.
+                        // If there is already a byte in the buffer, we handle the overrun condition
+                        if(Count > 0 && !EnableUnlimitedFifo)
+                        {
+                            if(overrunDisable.Value)
+                            {
+                                TryGetCharacter(out var dropped);
+                                this.DebugLog("already received character 0x{0:X} dropped as the USART has overrun disabled", dropped);
+                            }
+                            else
+                            {
+                                // With overrun enabled, we drop the incoming character and set the overrun flag
+                                this.DebugLog("character 0x{0:X} dropped. There is a pending byte and the USART is in overrun mode", value);
+                                overrunOccured.Value = true;
+                                UpdateInterrupt();
+                                return;
+                            }
+                        }
                         WriteCharInner(value, null);
                     },
                     period: this.GetActualTransmissionDuration(8),
@@ -501,6 +572,44 @@ namespace Antmicro.Renode.Peripherals.UART
         private bool Over8 => over8 == null ? false : over8.Value;
 
         private uint BaudRateMultiplier => lowPowerMode ? 256u : Over8 ? 2u : 1u;
+
+        private uint ClockDivider
+        {
+            get
+            {
+                // Decoding rules taken from the L5 TRM
+                // If it is set to a non listed value, it is interpreted as a 256 divider
+                switch(clockPrescaler.Value)
+                {
+                case 0b0000:
+                    return 1;
+                case 0b0001:
+                    return 2;
+                case 0b0010:
+                    return 4;
+                case 0b0011:
+                    return 6;
+                case 0b0100:
+                    return 8;
+                case 0b0101:
+                    return 10;
+                case 0b0110:
+                    return 12;
+                case 0b0111:
+                    return 16;
+                case 0b1000:
+                    return 32;
+                case 0b1001:
+                    return 64;
+                case 0b1010:
+                    return 128;
+                case 0b1011:
+                    return 256;
+                default:
+                    return 256;
+                }
+            }
+        }
 
         private uint BaudRateDivisor
         {
@@ -557,7 +666,14 @@ namespace Antmicro.Renode.Peripherals.UART
         private bool wasEnabledBeforeCurrentWrite;
 
         private IManagedThread receiverThread;
-
+        private IFlagRegisterField linModeEnable;
+        private IFlagRegisterField linBreakInterruptEnable;
+        private IFlagRegisterField linBreakOccurred;
+        private IFlagRegisterField overrunDisable;
+        private IFlagRegisterField overrunOccured;
+        private IFlagRegisterField errorInterruptEnable;
+        private IFlagRegisterField transmitDataRegisterEmpty;
+        private IValueRegisterField clockPrescaler;
         private readonly Queue<byte> intermediateReceiveQueue = new();
         private readonly object receiverThreadLock = new();
         private readonly IMachine machine;
@@ -577,6 +693,7 @@ namespace Antmicro.Renode.Peripherals.UART
             InterruptFlagClear = 0x20,
             ReceiveData        = 0x24,
             TransmitData       = 0x28,
+            USARTPrescaler     = 0x2C,
         }
     }
 }
